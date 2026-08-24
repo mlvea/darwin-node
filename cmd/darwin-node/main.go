@@ -57,6 +57,8 @@ func main() {
 	f.StringVar(&cfg.ProviderID, "provider-id", cfg.ProviderID, "provider ID reported to the API server")
 	f.StringVar((*string)(&cfg.Runtime), "runtime", string(cfg.Runtime), "vz (hardware) or fake (tests/CI)")
 	f.IntVar(&cfg.MaxVMs, "max-vms", cfg.MaxVMs, "max concurrent macOS VMs (1 or 2)")
+	f.IntVar(&cfg.WarmSlots, "warm-slots", cfg.WarmSlots, "pre-booted idle VMs kept in free slots (0-2); matching pods adopt them instead of cold-booting")
+	f.StringVar(&cfg.WarmImage, "warm-image", cfg.WarmImage, "image pre-booted into warm slots (default: most recently used image)")
 	f.StringVar((*string)(&cfg.NetworkMode), "network-mode", string(cfg.NetworkMode), "nat or bridged")
 	f.StringVar(&cfg.BridgeInterface, "bridge-interface", cfg.BridgeInterface, "host interface for bridged mode")
 	f.BoolVar(&cfg.AllowNATWorkloads, "allow-nat-workloads", cfg.AllowNATWorkloads, "do not taint NAT-only nodes")
@@ -118,6 +120,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 		}
 	}
 	eng := engine.New(cfg, slots, rt, sc, event.Slog{}, host.InternalIP)
+	defer eng.Close()
 	inv := node.Inventory{Host: host, Cfg: cfg, Slots: slots}
 	p := provider.New(cfg, eng, inv, event.Slog{})
 	metrics := observability.NewMetrics()

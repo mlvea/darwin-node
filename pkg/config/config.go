@@ -28,6 +28,13 @@ type Config struct {
 	AllowNATWorkloads bool
 	DisableTaint      bool
 
+	// WarmSlots keeps up to N pre-booted idle VMs in free slots so matching
+	// pods adopt them instead of cold-booting. Warm VMs consume real slots.
+	WarmSlots int
+	// WarmImage is the image pre-booted into warm slots. Empty defers to the
+	// most recently used image on this node.
+	WarmImage string
+
 	ReservedCPU       resource.Quantity
 	ReservedMemory    resource.Quantity
 	ReservedEphemeral resource.Quantity
@@ -187,6 +194,16 @@ func (c *Config) ApplyEnv() error {
 	if v := os.Getenv("DARWIN_NODE_AGENT_TCP_FALLBACK"); v != "" {
 		c.AgentTCPFallback = v == "true" || v == "1"
 	}
+	if v := os.Getenv("DARWIN_NODE_WARM_SLOTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_WARM_SLOTS: %w", err)
+		}
+		c.WarmSlots = n
+	}
+	if v := os.Getenv("DARWIN_NODE_WARM_IMAGE"); v != "" {
+		c.WarmImage = v
+	}
 	return c.Validate()
 }
 
@@ -218,6 +235,9 @@ func first(a, b string) string {
 func (c Config) Validate() error {
 	if c.MaxVMs < 1 || c.MaxVMs > types.AppleMaxConcurrentVMs {
 		return fmt.Errorf("max VMs must be 1 or 2 (Apple EULA), got %d", c.MaxVMs)
+	}
+	if c.WarmSlots < 0 || c.WarmSlots > types.AppleMaxConcurrentVMs {
+		return fmt.Errorf("warm slots must be between 0 and %d (Apple EULA), got %d", types.AppleMaxConcurrentVMs, c.WarmSlots)
 	}
 	switch c.Runtime {
 	case types.RuntimeVZ, types.RuntimeFake, "":

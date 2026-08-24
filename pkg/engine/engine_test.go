@@ -89,6 +89,9 @@ func TestCreateRunningAndThirdFails(t *testing.T) {
 	if err := e.Create(ctx, samplePod("c", "uid-c"), Credentials{}); err != nil {
 		t.Fatalf("create after delete: %v", err)
 	}
+	waitPhase(t, e, "default", "c", corev1.PodRunning)
+	_ = e.Delete(ctx, "default", "b", 0)
+	_ = e.Delete(ctx, "default", "c", 0)
 }
 
 func podReady(p *corev1.Pod) bool {

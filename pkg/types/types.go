@@ -26,14 +26,14 @@ const (
 
 // Taints.
 const (
-	TaintMacOSKey     = "darwin.node/macos"
-	TaintMacOSValue   = "true"
-	TaintNATKey       = "darwin.node/nat-only"
-	TaintNATValue     = "true"
-	TaintVMFullKey    = "darwin.node/vm-full"
-	TaintVMFullValue  = "true"
-	TaintProviderKey  = "virtual-kubelet.io/provider"
-	TaintProviderVal  = "darwin-node"
+	TaintMacOSKey    = "darwin.node/macos"
+	TaintMacOSValue  = "true"
+	TaintNATKey      = "darwin.node/nat-only"
+	TaintNATValue    = "true"
+	TaintVMFullKey   = "darwin.node/vm-full"
+	TaintVMFullValue = "true"
+	TaintProviderKey = "virtual-kubelet.io/provider"
+	TaintProviderVal = "darwin-node"
 )
 
 // Well-known guest-agent ports.
@@ -42,23 +42,29 @@ const (
 	GuestTCPPort   = 1050
 )
 
+// Pod annotation prefix for persistent CoW cache volumes. Each annotation
+// "cache.darwin.node/<name>: <absolute-guest-path>" declares one cache: the
+// host keeps a snapshot under the node cache store, restores it into the pod
+// with APFS clonefile before start, and re-snapshots it on graceful delete.
+const AnnotationCachePrefix = "cache.darwin.node/"
+
 // Shared directory names.
 const (
-	ControlShareName       = ".darwin-node"
-	GuestAutomountRoot     = "/Volumes/My Shared Files"
-	GuestAgentTokenFile    = "agent-token"
-	GuestAgentLogPath      = "/var/log/darwin-guest-agent.log"
-	GuestLaunchdLabel      = "io.darwin-node.guest-agent"
-	HostLaunchdLabel       = "io.darwin-node.node"
-	DefaultCacheBundleID   = "io.darwin-node.node"
+	ControlShareName     = ".darwin-node"
+	GuestAutomountRoot   = "/Volumes/My Shared Files"
+	GuestAgentTokenFile  = "agent-token"
+	GuestAgentLogPath    = "/var/log/darwin-guest-agent.log"
+	GuestLaunchdLabel    = "io.darwin-node.guest-agent"
+	HostLaunchdLabel     = "io.darwin-node.node"
+	DefaultCacheBundleID = "io.darwin-node.node"
 )
 
 // NetworkMode is the VM NIC attachment.
 type NetworkMode string
 
 const (
-	NetworkNAT     NetworkMode = "nat"
-	NetworkBridged NetworkMode = "bridged"
+	NetworkNAT      NetworkMode = "nat"
+	NetworkBridged  NetworkMode = "bridged"
 	NetworkDisabled NetworkMode = "disabled"
 )
 
@@ -86,13 +92,13 @@ func DefaultGraphics() Graphics {
 type VMState string
 
 const (
-	VMPending     VMState = "Pending"
-	VMPreparing   VMState = "Preparing"
-	VMStarting    VMState = "Starting"
-	VMRunning     VMState = "Running"
-	VMStopping    VMState = "Stopping"
-	VMStopped     VMState = "Stopped"
-	VMFailed      VMState = "Failed"
+	VMPending   VMState = "Pending"
+	VMPreparing VMState = "Preparing"
+	VMStarting  VMState = "Starting"
+	VMRunning   VMState = "Running"
+	VMStopping  VMState = "Stopping"
+	VMStopped   VMState = "Stopped"
+	VMFailed    VMState = "Failed"
 )
 
 // AgentTransport is how the host talks to the guest agent.
@@ -118,17 +124,17 @@ func (m MachineID) String() string {
 
 // VMSpec is the runtime-level create request (no Pod types).
 type VMSpec struct {
-	ID            MachineID
-	ImageRef      string
-	CPU           uint
-	MemoryBytes   uint64
-	MAC           string
-	NetworkMode   NetworkMode
-	BridgeDevice  string
-	Graphics      Graphics
-	Shares        []Share
-	AgentToken    string
-	IgnoreCache   bool
+	ID           MachineID
+	ImageRef     string
+	CPU          uint
+	MemoryBytes  uint64
+	MAC          string
+	NetworkMode  NetworkMode
+	BridgeDevice string
+	Graphics     Graphics
+	Shares       []Share
+	AgentToken   string
+	IgnoreCache  bool
 
 	// Image-backed disk (required for the vz runtime).
 	DiskPath              string

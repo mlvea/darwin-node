@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/darwin-node/darwin-node/internal/netutil"
@@ -57,6 +58,12 @@ type Engine struct {
 	puller    image.Puller
 	hostports *hostport.Manager
 
+	warm       warmPool
+	warmCancel context.CancelFunc
+	warmCtx    context.Context
+	warmBootWG sync.WaitGroup
+	lastImage  atomic.Value // string: most recently booted image ref
+
 	mu   sync.RWMutex
 	pods map[string]*podRecord
 }
@@ -80,6 +87,8 @@ type podRecord struct {
 	restartCount    int32
 	initialized     bool
 	sidecarStatuses []sidecar.Status
+	warmDir         string     // set when the VM was adopted from the warm pool
+	adopt           *warmEntry // claimed under capacity pressure, adopted in start()
 }
 
 // New constructs an engine.
@@ -104,7 +113,15 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 		pods:      map[string]*podRecord{},
 	}
 	_ = e.Recover()
+	if cfg.WarmSlots > 0 {
+		e.startWarmPool()
+	}
 	return e
+}
+
+// Close stops the warm pool and every VM it holds. Pod machines keep running.
+func (e *Engine) Close() {
+	e.shutdownWarmPool()
 }
 
 func (e *Engine) Slots() *capacity.Slots { return e.slots }
@@ -123,13 +140,32 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		e.mu.Unlock()
 		return nil
 	}
-	if err := e.slots.TryAcquire(uid); err != nil {
-		e.mu.Unlock()
-		if errors.Is(err, capacity.ErrVMCapacityExhausted) {
-			e.events.Warn(ctx, event.ReasonVMCapacityExhausted, err.Error())
-			return err
+	var adopt *warmEntry
+	acqErr := e.slots.TryAcquire(uid)
+	if errors.Is(acqErr, capacity.ErrVMCapacityExhausted) {
+		// Real demand reclaims warm capacity before any pod is rejected.
+		entry, freed := e.reclaimWarmForPod(pod.Spec.Containers[0].Image, canAdopt(pod))
+		if freed {
+			if entry != nil {
+				e.slots.Release(entry.slotID)
+			}
+			if acqErr = e.slots.TryAcquire(uid); acqErr != nil && entry != nil {
+				// Slot raced away; the claimed VM cannot be adopted.
+				_ = entry.machine.Stop(context.Background(), 5*time.Second)
+				_ = os.RemoveAll(entry.root)
+				entry = nil
+			} else if acqErr == nil {
+				adopt = entry
+			}
 		}
-		return err
+	}
+	if acqErr != nil {
+		e.mu.Unlock()
+		if errors.Is(acqErr, capacity.ErrVMCapacityExhausted) {
+			e.events.Warn(ctx, event.ReasonVMCapacityExhausted, acqErr.Error())
+			return acqErr
+		}
+		return acqErr
 	}
 	pctx, cancel := context.WithCancel(context.Background())
 	rec := &podRecord{
@@ -137,6 +173,7 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		phase:  corev1.PodPending,
 		reason: "Starting",
 		cancel: cancel,
+		adopt:  adopt,
 	}
 	e.pods[key] = rec
 	e.mu.Unlock()
@@ -161,6 +198,22 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 	rec.mu.Lock()
 	pod := rec.pod.DeepCopy()
 	rec.mu.Unlock()
+
+	// Warm adoption: virtio-fs shares are fixed at VM creation, so only pods
+	// whose primary container mounts nothing (and declares no caches) can
+	// adopt a pre-booted VM. rec.adopt was claimed in Create under capacity
+	// pressure; otherwise try the pool directly.
+	rec.mu.Lock()
+	entry := rec.adopt
+	rec.adopt = nil
+	rec.mu.Unlock()
+	if entry == nil && canAdopt(pod) {
+		entry = e.takeWarm(pod.Spec.Containers[0].Image)
+	}
+	if entry != nil {
+		e.startAdopted(ctx, rec, pod, creds, entry)
+		return
+	}
 
 	e.events.Normal(ctx, event.ReasonStarting, "starting macOS VM")
 
@@ -204,6 +257,15 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 		return
 	}
 	shares = append(shares, types.Share{Name: types.ControlShareName, HostPath: ctrl, ReadOnly: true})
+
+	cacheShares, cachePlaces, err := e.prepareCaches(pod)
+	if err != nil {
+		e.events.Warn(ctx, event.ReasonFailedCreate, err.Error())
+		e.fail(rec, errdefs.InvalidInput(err.Error()))
+		return
+	}
+	shares = append(shares, cacheShares...)
+	places = append(places, cachePlaces...)
 
 	if err := e.runInitContainers(ctx, rec, pod, creds, volRoot); err != nil {
 		e.fail(rec, err)
@@ -250,7 +312,34 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 		e.fail(rec, err)
 		return
 	}
+	e.noteImageRef(pod.Spec.Containers[0].Image)
+	e.runConnected(ctx, rec, pod, creds, machine, token, places)
+}
 
+// startAdopted hands a pre-booted warm VM to a pod. The guest is already
+// running and agent-ready; the pod keeps the token it was booted with.
+func (e *Engine) startAdopted(ctx context.Context, rec *podRecord, pod *corev1.Pod, creds Credentials, entry *warmEntry) {
+	rec.mu.Lock()
+	rec.machine = entry.machine
+	rec.warmDir = entry.root
+	rec.mu.Unlock()
+
+	e.events.Normal(ctx, event.ReasonStarting, "adopting pre-booted macOS VM")
+
+	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
+	if len(pod.Spec.InitContainers) > 0 {
+		if err := e.runInitContainers(ctx, rec, pod, creds, volRoot); err != nil {
+			e.fail(rec, err)
+			return
+		}
+	}
+	e.runConnected(ctx, rec, pod, creds, entry.machine, entry.token, nil)
+}
+
+// runConnected dials the running machine's agent and drives everything from
+// handshake to Running: volume placement, IP, hooks, sidecars, watch loop.
+func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.Pod, creds Credentials, machine runtime.Machine, token string, places []volume.Placement) {
+	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
 	e.events.Normal(ctx, event.ReasonVMDialing, "dialing guest agent")
 	dialCtx := ctx
 	cancelDial := func() {}
@@ -373,6 +462,7 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 	pod := rec.pod
 	machine := rec.machine
 	agent := rec.agent
+	warmDir := rec.warmDir
 	rec.agent = nil
 	rec.ready = false
 	uid := ""
@@ -405,6 +495,10 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 		_ = machine.Stop(ctx, time.Duration(grace)*time.Second)
 	}
 	_ = e.sidecar.RemovePod(ctx, ns, name, grace)
+	if warmDir != "" {
+		// Adopted VM: its overlay/control tree lives under cache/warm.
+		_ = os.RemoveAll(warmDir)
+	}
 	if uid != "" {
 		e.slots.Release(uid)
 	}
@@ -428,6 +522,7 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
+	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
 	e.mu.Lock()

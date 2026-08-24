@@ -1,0 +1,45 @@
+# A CI pod whose Xcode caches survive across runs. Every
+# cache.darwin.node/<name> annotation declares a persistent cache:
+# the host restores it into this pod with APFS clonefile (CoW, instant),
+# shares it read-write over virtio-fs at the annotated guest path, and
+# re-snapshots it on graceful delete for the next pod.
+#
+# Pair with `darwin-node --warm-slots=1` so the VM itself also skips
+# its cold boot when the previous pod used the same image.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: xcode-build
+  annotations:
+    cache.darwin.node/derived-data: "/Users/mac/Library/Developer/Xcode/DerivedData"
+    cache.darwin.node/spm: "/Users/mac/Library/Caches/org.swift.swiftpm"
+spec:
+  containers:
+    - name: macos
+      image: registry.example.com/macos:15-xcodes
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+          darwin.node/vm: "1"
+          darwin.node/metal: "1"
+      readinessProbe:
+        exec:
+          command: ["/usr/bin/true"]
+        initialDelaySeconds: 5
+        periodSeconds: 10
+  tolerations:
+    - key: darwin.node/macos
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+    - key: virtual-kubelet.io/provider
+      operator: Equal
+      value: darwin-node
+      effect: NoSchedule
+    - key: darwin.node/nat-only
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  nodeSelector:
+    kubernetes.io/os: darwin

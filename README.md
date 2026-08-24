@@ -48,6 +48,49 @@ Virtualization.framework guests instead of a container engine:
 - **A kubelet contract you can operate.** TLS on the exec/logs port,
   hostPath default-deny, image provenance, crash recovery of on-disk
   pod dirs, and stats that report *usage*, not capacity.
+- **Pods that start like containers.** A warm VM pool pre-boots idle
+  guests into free slots (`--warm-slots`), and matching pods adopt a
+  running VM instead of cold-booting one.
+- **Caches that survive the pod.** Annotation-declared cache volumes
+  restore via APFS `clonefile` before boot and re-snapshot on delete:
+  DerivedData that stays warm across CI runs, with no PVC and no CSI.
+
+## Two things no SSH-era node can do
+
+**Warm VM pool: pod startup without the cold boot.** Every pod on an
+SSH-driven macOS node pays a full macOS boot before the first command
+runs. darwin-node can keep up to two pre-booted, agent-ready guests idling in
+free slots (`--warm-slots=1 --warm-image=registry.example.com/macos:15`);
+a pod whose image matches adopts one and is Running in seconds. The
+pool obeys every invariant: warm VMs hold real slots from the same
+fail-closed table, the pool only fills capacity pods don't need right
+now, and real demand evicts a warm guest *before* any pod is rejected.
+Only pods whose primary container mounts nothing can adopt — virtio-fs
+shares are fixed at VM creation.
+
+```bash
+./bin/darwin-node --runtime=vz --allow-nat-workloads \
+  --warm-slots=1 --warm-image=registry.example.com/macos:15
+```
+
+**Cache snapshots: warm builds with zero storage infrastructure.**
+Annotate a pod and the node does the rest:
+
+```yaml
+metadata:
+  annotations:
+    cache.darwin.node/derived-data: "/Users/mac/Library/Developer/Xcode/DerivedData"
+    cache.darwin.node/spm: "/Users/mac/Library/Caches/org.swift.swiftpm"
+```
+
+Before the VM boots, each declared path is restored from the node's
+cache store as an APFS clone — instant, copy-on-write. The directory is
+shared read-write over virtio-fs at exactly that guest path, so the
+build writes straight through to host disk. On graceful delete the
+final state is cloned back into the store for the next pod. No PVC, no
+CSI, no registry round-trip — and no equivalent anywhere in the
+upstream lineage, whose guests are pristine and reachable only over
+SSH. See [examples/pod-cache.yaml](examples/pod-cache.yaml).
 
 ## Lineage
 
@@ -59,10 +102,48 @@ cloned with APFS `clonefile`, and macOS images shipped as OCI
 artifacts.
 
 That yes is why this repo exists. darwin-node is the next question:
-what that node looks like when the scheduler is told there are two
-machines, the guest has a control plane of its own, and the kubelet
-surface is something you can operate. The Apache-2.0 record — and the
-ideas we still share — are in [NOTICE](NOTICE) and
+what that node looks like when upstream's three central defaults are
+inverted.
+
+**1. The guest is a peer, not an SSH target.** Upstream reaches into
+the VM over SSH: exec sessions, the readiness probe, even graceful
+shutdown dial port 22 with credentials supplied through environment
+variables. darwin-node ships `bin/darwin-guest-agent`, a launchd
+daemon baked into every image (`darwin-image inject-agent`), serving
+exec, logs, probes, metrics, and shutdown over a length-prefixed
+protocol on vsock — a channel reachable only from the host process —
+with a token-authenticated TCP fallback and SSH kept as last resort.
+There is now a control plane *inside* the guest, with its own binary,
+lifecycle, and version-skew story.
+
+**2. Capacity is enforced, not queued.** Both trees respect Apple's
+two-guest ceiling (XNU `hv_apple_isa_vm_quota`) and advertise `pods=2`.
+But upstream blocks a third create until a slot frees — the pod waits.
+darwin-node fails closed: the third pod is rejected
+(`VMCapacityExhausted`), the node taints itself
+`darwin.node/vm-full=true:NoSchedule` while both slots are held, and
+admission goes through an explicit slot table (`pkg/capacity`). The
+scheduler is never left holding a promise the hardware cannot keep.
+
+**3. Operability is a default, not a flag.** The kubelet HTTP server
+refuses to start plaintext; hostPath is default-deny behind an
+allowlist; pulled images are digest-verified; on-disk pod state is
+recovered after an agent crash; and stats report measured *usage*, so
+autoscaling reacts to what the VMs consume rather than the static
+numbers the node advertises.
+
+None of these are additive features. Each rewrites a load-bearing
+contract — where the guest boundary lies, what admission means when a
+slot is gone, which guarantees arrive on by default — which is the
+shape of a fresh Go module honoring upstream's license, not edits
+bolted beside someone else's defaults. Where the ideas still align —
+Virtual Kubelet as the Kubernetes surface, hybrid pods, APFS
+`clonefile` overlays, OCI disk artifacts — they are shared
+deliberately, and Agoda-format artifacts are still accepted on read,
+so existing registries and images migrate without a flag day.
+
+The Apache-2.0 record — the derived-file list, adapted algorithms, and
+license obligations — is in [NOTICE](NOTICE) and
 [docs/credits.md](docs/credits.md).
 
 Thank you to Agoda for publishing that work.
@@ -106,7 +187,8 @@ Hardware workloads need `--runtime=vz` (the default on `darwin/arm64`),
 a signed binary, and a baked macOS image (`darwin-image restore` /
 `inject-agent` / `pack`, or an OCI pull). Example manifests:
 [examples/pod.yaml](examples/pod.yaml),
-[examples/pod-hybrid.yaml](examples/pod-hybrid.yaml).
+[examples/pod-hybrid.yaml](examples/pod-hybrid.yaml),
+[examples/pod-cache.yaml](examples/pod-cache.yaml).
 
 Full install, launchd, entitlements, Helm:
 [docs/installation.md](docs/installation.md).
@@ -122,6 +204,8 @@ Kubernetes API
 │   provider → engine → runtime/vz    │
 │   sidecars on host Docker           │
 │   capacity: 2 VM slots, fail-closed │
+│   warm pool: pre-booted, adoptable  │
+│   cache store: CoW snapshots        │
 └──────────────┬──────────────────────┘
                │ vsock (primary)
                │ TCP  (opt-in fallback)
@@ -143,6 +227,9 @@ Kubernetes API
   userspace TCP proxy. PodIP comes from the Guest Agent.
 - **Images**: Darwin-Node OCI media types; Agoda-format artifacts are
   still accepted on read so existing registries keep working.
+- **Warm pool & caches**: pre-booted guests adopt matching pods;
+  `cache.darwin.node/*` annotations persist guest paths across pods via
+  CoW snapshots. Details in "Two things no SSH-era node can do" above.
 
 ## Kubernetes surface
 
@@ -151,6 +238,8 @@ Kubernetes API
 | Node Ready, capacity, taints, labels | Yes |
 | Pod create / delete / status / conditions | Yes |
 | Fail-closed 2-VM admission | Yes |
+| Warm VM pool + adoption (`--warm-slots`) | Yes (matching image; no primary mounts) |
+| Pod cache snapshots (`cache.darwin.node/*` annotations) | Yes — CoW restore/snapshot |
 | Hybrid sidecars (mounts + resource requests) | Yes |
 | Host-side init containers | Yes |
 | In-guest probes (exec / httpGet / tcpSocket) | Yes |

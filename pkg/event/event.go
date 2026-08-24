@@ -57,4 +57,9 @@ const (
 	ReasonPodIPChanged        = "PodIPChanged"
 	ReasonInitStarted         = "InitContainerStarted"
 	ReasonInitExited          = "InitContainerExited"
+	ReasonWarmBooted          = "WarmVMBooted"
+	ReasonWarmAdopted         = "WarmVMAdopted"
+	ReasonWarmEvicted         = "WarmVMEvicted"
+	ReasonCacheRestored       = "CacheRestored"
+	ReasonCacheSaved          = "CacheSnapshotSaved"
 )

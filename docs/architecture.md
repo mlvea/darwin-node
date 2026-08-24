@@ -61,6 +61,28 @@ VMs per host. darwin-node:
 
 See [ADR 0006](adr/0006-capacity-2vm.md).
 
+## Warm VM pool
+
+`--warm-slots=N` keeps up to N pre-booted, agent-ready guests in slots
+that pods do not currently need (default image source: the most recently
+booted image, or `--warm-image`). A pod whose image matches and whose
+primary container mounts nothing adopts a warm VM and skips the cold
+boot entirely. Invariants:
+
+- Warm VMs acquire real slots from the same fail-closed table.
+- Real demand evicts a warm guest before any pod is rejected; rejection
+  still happens once no warm entry remains.
+
+## Cache volumes
+
+Pod annotations `cache.darwin.node/<name>: <absolute-guest-path>`
+declare persistent caches. The host restores each one into the pod dir
+with APFS `clonefile` (CoW), shares it read-write over virtio-fs at the
+annotated path (link placement — guest writes land on host disk), and
+clones the final state back into `<cache-dir>/cache-store/<ns>/<name>/`
+on graceful delete. Failed starts never snapshot. No new guest protocol;
+no PVC/CSI.
+
 ## Package map
 
 | Package | Responsibility |
