@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.darwin-node.node</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/darwin-node</string>
+		<string>--nodename</string>
+		<string>CHANGE_ME</string>
+		<string>--log-level</string>
+		<string>info</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>KUBECONFIG</key>
+		<string>/var/lib/darwin-node/kubeconfig</string>
+		<key>APISERVER_CERT_LOCATION</key>
+		<string>/var/lib/darwin-node/tls.crt</string>
+		<key>APISERVER_KEY_LOCATION</key>
+		<string>/var/lib/darwin-node/tls.key</string>
+		<key>DARWIN_NODE_MAX_VMS</key>
+		<string>2</string>
+		<key>DARWIN_NODE_NETWORK_MODE</key>
+		<string>nat</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/var/log/darwin-node/stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/darwin-node/stderr.log</string>
+</dict>
+</plist>

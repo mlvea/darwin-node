@@ -1,0 +1,8 @@
+# The node agent does not run in-cluster. This chart only installs RBAC
+# that a darwin-node kubeconfig user can bind to.
+serviceAccount:
+  create: true
+  name: darwin-node
+
+clusterRole:
+  name: darwin-node

@@ -1,0 +1,96 @@
+# Architecture
+
+darwin-node turns an Apple Silicon Mac into a Kubernetes node that runs
+**native macOS virtual machines as pods**, with optional Linux sidecar
+containers on the host.
+
+It is not a kubelet fork and not an Orka-style control plane. It is a
+Virtual Kubelet provider with a real VM runtime and a Guest Agent.
+Lineage and third-party licenses: [credits.md](credits.md).
+
+```
+                    Kubernetes API server
+                            │
+                            ▼
+                 ┌─────────────────────┐
+                 │    darwin-node      │  Virtual Kubelet
+                 │  ┌───────────────┐  │
+                 │  │   Provider    │  │  Pod API, exec, logs, stats
+                 │  └──────┬────────┘  │
+                 │         ▼           │
+                 │  ┌───────────────┐  │
+                 │  │  Pod Engine   │  │  lifecycle, probes, hooks
+                 │  └──┬───┬───┬────┘  │
+                 │     │   │   │       │
+                 │     ▼   ▼   ▼       │
+                 │   Runtime Sidecar   │
+                 │   Image   Volume    │
+                 │   Net     Capacity  │
+                 └─────┬───────────────┘
+                       │ vsock (primary)
+                       │ TCP  (fallback)
+                       │ SSH  (last resort)
+                       ▼
+                 ┌─────────────────────┐
+                 │   macOS VM (× ≤ 2)  │
+                 │  darwin-guest-agent │  launchd
+                 │  Metal (shared GPU) │
+                 └─────────────────────┘
+```
+
+## Hybrid pods
+
+```
+spec.containers[0]     →  macOS VM via Virtualization.framework
+spec.containers[1..]   →  host Docker (or future containerd) sidecars
+spec.initContainers    →  host-side only (sequential); no extra VM boots
+```
+
+This is the unique capability. A typical CI pod is a macOS VM plus a logging
+or artifact sidecar.
+
+## 2-VM hard cap
+
+Apple's EULA and XNU (`hv_apple_isa_vm_quota`) allow two concurrent macOS
+VMs per host. darwin-node:
+
+- Advertises `pods=2` and `darwin.node/vm=2`
+- Injects a `darwin.node/vm: 1` request on the primary container
+- **Rejects** a third pod (`VMCapacityExhausted`) instead of queueing
+- Taints the node `darwin.node/vm-full=true:NoSchedule` when both slots are used
+
+See [ADR 0006](adr/0006-capacity-2vm.md).
+
+## Package map
+
+| Package | Responsibility |
+|---|---|
+| `pkg/provider` | Virtual Kubelet `PodLifecycleHandler` |
+| `pkg/engine` | Pod state machine, restart policy, hooks, probes |
+| `pkg/runtime` | VM interface |
+| `pkg/runtime/vz` | Virtualization.framework (`darwin/arm64`) |
+| `pkg/runtime/fake` | In-process VM for tests |
+| `pkg/guest` | Agent protocol, client, server, transports |
+| `pkg/capacity` | Slot table, fail-closed acquire/release |
+| `pkg/image` | OCI pull/cache/verify, clonefile overlay |
+| `pkg/volume` | Materialize emptyDir/hostPath/ConfigMap/Secret/projected |
+| `pkg/net` | NAT/bridged, IP, MAC |
+| `pkg/hostport` | Userspace hostPort proxy |
+| `pkg/sidecar` | Host containers |
+| `pkg/node` | Capacity, allocatable, conditions, labels |
+| `pkg/event` | Kubernetes events |
+| `pkg/observability` | slog, Prometheus, OpenTelemetry |
+| `pkg/config` | Flags, env, file |
+
+## Extension points (CRDs later)
+
+`pkg/runtime.Runtime` and `pkg/image.Store` have no Pod types on their
+public surfaces. A future `VirtualMachine` CRD controller can call them
+directly. The provider stays the Kubernetes *Pod* API.
+
+## Trust boundaries
+
+- Host agent is a privileged, entitled process (Virtualization, optional vmnet).
+- Guest agent runs as root *inside* the VM, not on the host.
+- vsock is host-process-only. TCP fallback is token-authenticated.
+- Secrets exist on the host disk under a 0700 pod directory for the pod lifetime.

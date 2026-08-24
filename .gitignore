@@ -1,0 +1,70 @@
+# Build outputs (Makefile → bin/)
+/bin/
+/build/
+/dist/
+coverage.out
+coverage.html
+*.coverprofile
+*.test
+*.out
+
+# Accidental `go build` in the module root
+/darwin-node
+/darwin-guest-agent
+/darwin-image
+/guest-agent
+
+# Go module / workspace noise
+vendor/
+.gocache/
+.go/
+go.work
+go.work.sum
+
+# VM disks, IPSW restores, sparse copies — never publish
+*.img
+*.img.digest
+*.ungz.tmp
+*.ipsw
+*.dmg
+*.sparseimage
+*.raw
+*.vhd
+*.vhdx
+
+# Secrets, certs, local kube material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.mobileprovision
+*.kubeconfig
+kubeconfig
+
+# Local working notes and the debug UI — not part of the published tree
+/issues/
+/web/
+
+# Local debug dumps (`darwin-node debug-dump`)
+/debug-snapshot.json
+/debug.html
+/debug.js
+snapshot.js
+!pkg/debug/assets/
+
+# Caches and machine-local state
+.cache/
+hack/local/
+*.log
+
+# OS / editors
+.DS_Store
+.AppleDouble
+.idea/
+.vscode/
+*.swp
+*~
+*.orig

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>darwin-node debug</title>
+  <style>
+    :root { color-scheme: dark light; --ok:#2a6; --bad:#a33; --muted:#888; }
+    body { font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 1100px; }
+    h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 24px 0 8px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+    .slot { min-width: 160px; padding: 16px; border: 1px solid #8884; border-radius: 8px; }
+    .slot.used { background: var(--ok); color: #fff; }
+    .slot.free { background: #8882; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; margin: 0 6px 6px 0; border: 1px solid #8884; font-size: 12px; }
+    .pill.true { background: var(--ok); color: #fff; border-color: transparent; }
+    .pill.false { background: var(--bad); color: #fff; border-color: transparent; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #8883; vertical-align: top; }
+    #empty { padding: 12px 0; }
+    input[type=file] { margin-top: 8px; }
+    .meta { color: var(--muted); font-size: 12px; }
+    pre { overflow: auto; max-height: 320px; padding: 12px; border: 1px solid #8883; border-radius: 8px; background: #8881; }
+    .msg { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>darwin-node debug</h1>
+  <p class="meta" id="generated">loading…</p>
+  <div id="empty">
+    <label>Load snapshot JSON<br><input id="file" type="file" accept="application/json,.json"></label>
+  </div>
+  <section id="view">
+    <h2>Node</h2>
+    <div id="node">—</div>
+    <div id="conditions"></div>
+    <h2>VM slots</h2>
+    <div class="row" id="slots"></div>
+    <p class="meta" id="slot-uids"></p>
+    <h2>Pods</h2>
+    <table>
+      <thead><tr><th>Pod</th><th>Phase</th><th>Ready</th><th>Agent</th><th>VM</th><th>IP</th><th>Restarts</th><th>Reason</th></tr></thead>
+      <tbody id="pods"><tr><td colspan="8">no pods</td></tr></tbody>
+    </table>
+    <h2>Agents</h2>
+    <table>
+      <thead><tr><th>Pod</th><th>OK</th><th>VM state</th></tr></thead>
+      <tbody id="agents"><tr><td colspan="3">no agents</td></tr></tbody>
+    </table>
+    <h2>Raw snapshot</h2>
+    <pre id="raw">{}</pre>
+  </section>
+  <script src="snapshot.js"></script>
+  <script src="debug.js"></script>
+</body>
+</html>

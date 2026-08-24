@@ -1,0 +1,13 @@
+{
+  "mediatype": "application/vnd.darwin-node.config.v1+json",
+  "os": "darwin",
+  "osVersion": "15.0",
+  "hardwareModelData": "abc",
+  "machineIdData": "def",
+  "guestAgent": { "version": "0.1.0", "vsockPort": 50051 },
+  "graphics": { "width": 1920, "height": 1200, "ppi": 80 },
+  "storage": [
+    { "mediatype": "application/vnd.darwin-node.disk.v1", "file": "disk.img" },
+    { "mediatype": "application/vnd.darwin-node.aux.v1", "file": "aux.img" }
+  ]
+}

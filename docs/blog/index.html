@@ -1,0 +1,1378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two machines per universe — a Kubernetes node made of virtualized Macs</title>
+<meta name="description" content="An end-to-end architecture tour of darwin-node: native macOS virtual machines as Kubernetes pods, at the edge of what Apple permits.">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="%230b0c0e"/><rect x="7" y="7" width="18" height="18" rx="4" fill="none" stroke="%23e8a33d" stroke-width="2"/><circle cx="16" cy="16" r="3" fill="%23e8a33d"/></svg>'>
+<style>
+/* ============================= tokens ============================= */
+:root{
+  --bg:#0b0c0e; --bg2:#0e1013;
+  --panel:#121419; --panel2:#171a20; --inset:#0d0f13;
+  --line:#22252c; --line2:#2e323b; --line3:#3a3f4a;
+  --text:#eae8e1; --muted:#a3a097; --faint:#716f68;
+  --amber:#e8a33d; --amber-dim:#8a6223;
+  --blue:#79abff; --green:#83cf8f; --red:#ef7568; --purple:#b69bff; --teal:#5fc6b8;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",sans-serif;
+  --serif:Georgia,"Times New Roman",serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --prose:46rem; --wide:62rem;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:17px/1.78 var(--sans);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+::selection{background:rgba(232,163,61,.28)}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline;text-underline-offset:3px}
+p{margin:0 0 1.4em}
+strong{color:#fff;font-weight:600}
+em{color:var(--text)}
+code{font-family:var(--mono);font-size:.86em;background:var(--panel2);
+  border:1px solid var(--line);border-radius:6px;padding:.1em .38em;color:#ffd9a0}
+
+/* scroll progress */
+#progress{position:fixed;top:0;left:0;height:2px;width:0;z-index:99;
+  background:linear-gradient(90deg,var(--amber-dim),var(--amber));transition:width .15s linear}
+
+/* ============================= layout ============================= */
+.wrap{max-width:calc(var(--prose) + 4rem);margin:0 auto;padding:0 2rem}
+.wrapw{max-width:calc(var(--wide) + 4rem);margin:0 auto;padding:0 2rem}
+header.hero{padding:7rem 0 3rem;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--amber)}
+h1{font-size:clamp(2.5rem,6vw,4.1rem);line-height:1.04;letter-spacing:-.035em;
+  font-weight:750;margin:1.1rem 0 0;color:#fff}
+.deks{margin-top:1.6rem;font-size:1.22rem;line-height:1.65;color:var(--muted);max-width:40rem}
+.byline{display:flex;align-items:center;gap:.9rem;margin-top:2.6rem;color:var(--faint);
+  font-size:.9rem}
+.avatar{width:34px;height:34px;border-radius:50%;background:var(--panel2);
+  border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);color:var(--amber);font-size:.8rem}
+.dotsep{width:3px;height:3px;border-radius:50%;background:var(--faint)}
+
+nav.toc{margin:3.2rem 0 0;padding:1.4rem 1.6rem;border:1px solid var(--line);
+  border-radius:14px;background:var(--bg2)}
+nav.toc h2{all:unset;display:block;font-family:var(--mono);font-size:.72rem;
+  letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin-bottom:1rem}
+nav.toc ol{list-style:none;margin:0;padding:0;columns:2;column-gap:2.5rem}
+nav.toc li{break-inside:avoid;margin:.32rem 0}
+nav.toc a{color:var(--muted);font-size:.95rem;display:flex;gap:.7rem;align-items:baseline}
+nav.toc a .no{font-family:var(--mono);font-size:.72rem;color:var(--faint);min-width:1.4rem}
+nav.toc a:hover{color:var(--text);text-decoration:none}
+nav.toc a.active{color:var(--amber)}
+
+main{padding-bottom:8rem}
+section{padding-top:6.5rem}
+.snum{font-family:var(--mono);font-size:.74rem;letter-spacing:.24em;color:var(--amber);
+  text-transform:uppercase}
+section h2{font-size:clamp(1.7rem,3.4vw,2.35rem);letter-spacing:-.02em;line-height:1.15;
+  margin:.7rem 0 1.8rem;color:#fff;font-weight:700}
+h3{font-size:1.18rem;margin:2.6rem 0 .9rem;color:#fff;letter-spacing:-.01em}
+.mantra{border-left:2px solid var(--amber);padding:.2rem 0 .2rem 1.4rem;margin:2.6rem 0;
+  font-family:var(--serif);font-style:italic;font-size:1.32rem;line-height:1.55;color:#efece4}
+.aside{background:var(--bg2);border:1px solid var(--line);border-radius:12px;
+  padding:1rem 1.25rem;color:var(--muted);font-size:.95rem;margin:2rem 0}
+.aside b{color:var(--text)}
+hr.sep{border:0;border-top:1px solid var(--line);margin:3.5rem 0}
+footer{border-top:1px solid var(--line);padding:3.5rem 0 5rem;color:var(--faint);font-size:.9rem}
+
+/* prose width vs wide figures */
+.prose{max-width:var(--prose)}
+.breakout{max-width:var(--wide);margin:2.8rem auto}
+@media(max-width:900px){.wrapw{padding:0 1.2rem}}
+
+/* reveal on scroll */
+.reveal{opacity:0;transform:translateY(14px);transition:opacity .7s ease,transform .7s ease}
+.reveal.in{opacity:1;transform:none}
+
+/* ============================ figures ============================ */
+.fig{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  padding:1.5rem;overflow:hidden}
+.figcap{display:flex;gap:.6rem;align-items:baseline;margin-top:.9rem;color:var(--faint);
+  font-size:.85rem}
+.figcap b{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;color:var(--amber);
+  text-transform:uppercase}
+.scrollx{overflow-x:auto}
+.scrollx svg,.scrollx .framefmt{min-width:640px}
+
+/* controls shared */
+.btn{appearance:none;background:var(--panel2);border:1px solid var(--line2);color:var(--text);
+  font:600 .82rem var(--sans);padding:.5rem .95rem;border-radius:9px;cursor:pointer;
+  transition:border-color .15s,background .15s}
+.btn:hover{border-color:var(--line3);background:#1c2027}
+.btn.primary{background:var(--amber);border-color:var(--amber);color:#151005}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn:disabled{opacity:.45;cursor:default}
+.ctrlrow{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:1.1rem}
+.stat{font-family:var(--mono);font-size:.8rem;color:var(--muted)}
+.stat b{color:var(--text);font-weight:600}
+.chip{display:inline-flex;align-items:center;gap:.45rem;font-family:var(--mono);
+  font-size:.74rem;padding:.28rem .65rem;border-radius:999px;border:1px solid var(--line2);
+  color:var(--muted);white-space:nowrap}
+.chip i{width:7px;height:7px;border-radius:50%;display:inline-block}
+.chip.on{border-color:rgba(239,117,104,.5);color:#ffb0a6}.chip.on i{background:var(--red)}
+.chip.ok{border-color:rgba(131,207,143,.45);color:#a9e6b2}.chip.ok i{background:var(--green)}
+.toggle{display:inline-flex;gap:.55rem;align-items:center;cursor:pointer;user-select:none;
+  font-size:.85rem;color:var(--muted)}
+.toggle input{accent-color:var(--amber)}
+
+/* ==================== fig: hero architecture (svg) ==================== */
+svg text{font-family:var(--mono)}
+.svgbox{width:100%;height:auto;display:block}
+
+/* ==================== fig: slot table playground ==================== */
+.slotsgrid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+@media(max-width:640px){.slotsgrid{grid-template-columns:1fr}}
+.nodecard{border:1px solid var(--line2);border-radius:12px;background:var(--inset);
+  padding:1rem 1.1rem}
+.nodecard .nc-title{display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:.8rem}
+.nodecard h4{margin:0;font-size:.95rem;color:#fff}
+.slotcard{border:1px dashed var(--line3);border-radius:10px;padding:.75rem .9rem;
+  margin-top:.6rem;font-family:var(--mono);font-size:.8rem;color:var(--faint);
+  display:flex;justify-content:space-between;transition:all .3s}
+.slotcard.held{border-style:solid;border-color:rgba(131,207,143,.5);color:var(--text);
+  background:rgba(131,207,143,.05)}
+.slotcard .st{color:var(--faint)}.slotcard.held .st{color:var(--green)}
+.evlog{margin-top:1rem;border-top:1px solid var(--line);padding-top:.8rem;
+  font-family:var(--mono);font-size:.76rem;line-height:1.9;max-height:9.5rem;
+  overflow-y:auto;color:var(--muted)}
+.evlog .err{color:var(--red)}.evlog .good{color:var(--green)}.evlog .dim{color:var(--faint)}
+
+/* ==================== fig: oci anatomy + sparse demo ==================== */
+.ocitree{font-family:var(--mono);font-size:.84rem;line-height:2.05;color:var(--muted)}
+.ocitree .blob{padding:.14rem .5rem;border-radius:6px;border:1px solid var(--line2);
+  margin-right:.4rem;font-size:.76rem}
+.blob.config{color:var(--purple);border-color:rgba(182,155,255,.4)}
+.blob.disk{color:var(--amber);border-color:rgba(232,163,61,.4)}
+.blob.aux{color:var(--teal);border-color:rgba(95,198,184,.4)}
+.ocitree .sz{float:right;color:var(--faint)}
+.sparsebar{display:flex;gap:2px;margin-top:1.1rem}
+.sparsebar span{flex:1;height:26px;border-radius:3px;background:var(--inset);
+  border:1px solid var(--line);transition:all .18s}
+.sparsebar span.data{background:linear-gradient(180deg,#f0b45c,#c9821f);border-color:#a86f1a}
+.sparsebar span.hole{background:transparent;border:1px dashed var(--line3)}
+.kpirow{display:flex;gap:2rem;flex-wrap:wrap;margin-top:1rem}
+
+/* ==================== fig: cow demo ==================== */
+.cowlane{display:grid;grid-template-columns:7.5rem 1fr;gap:.8rem;align-items:center;
+  margin-top:.7rem}
+.cowlane .lbl{font-family:var(--mono);font-size:.76rem;color:var(--muted);text-align:right}
+.blockrow{display:flex;gap:3px}
+.blockrow span{flex:1;height:20px;border-radius:3px;background:var(--inset);
+  border:1px solid var(--line)}
+.blockrow span.shared{background:#2b3a55;border-color:#3c527a}
+.blockrow span.ownA{background:linear-gradient(180deg,#f0b45c,#c9821f);border-color:#a86f1a}
+.blockrow span.ownB{background:linear-gradient(180deg,#9f86e8,#6d4fc0);border-color:#5a3fa5}
+
+/* ==================== fig: frame format ==================== */
+.framefmt{display:flex;gap:6px;font-family:var(--mono);font-size:.74rem}
+.framefmt .cell{border:1px solid var(--line2);border-radius:8px;padding:.65rem .4rem;
+  text-align:center;background:var(--inset)}
+.framefmt .cell b{display:block;color:#fff;font-weight:600;margin-bottom:.15rem}
+.framefmt .cell span{color:var(--faint)}
+.f-len{flex:0 0 9%}.f-v{flex:0 0 9%}.f-id{flex:0 0 10%}.f-kind{flex:0 0 13%}
+.f-meth{flex:0 0 24%}.f-pay{flex:1}
+
+/* ==================== fig: handshake flow ==================== */
+.hs{position:relative;padding-left:1rem}
+.hs .lanehead{display:grid;grid-template-columns:1fr 1fr;gap:3rem;margin-bottom:1.2rem;
+  font-family:var(--mono);font-size:.74rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--faint)}
+.hs .msg{opacity:0;transform:translateX(-8px);transition:all .45s ease;margin:.55rem 0;
+  display:flex;flex-direction:column}
+.hs .msg.show{opacity:1;transform:none}
+.hs .msg .arrow{font-family:var(--mono);font-size:.72rem;color:var(--faint);
+  letter-spacing:.06em}
+.hs .msg.toHost{align-items:flex-start}.hs .msg.toGuest{align-items:flex-end}
+.hs .bubble{max-width:85%;border:1px solid var(--line2);background:var(--inset);
+  border-radius:10px;padding:.55rem .85rem;font-family:var(--mono);font-size:.78rem;
+  color:var(--text);margin-top:.25rem}
+.hs .msg.note .bubble{border-style:dashed;color:var(--muted)}
+.hs .msg.ok .bubble{border-color:rgba(131,207,143,.5)}
+.hs .msg.err .bubble{border-color:rgba(239,117,104,.6);color:#ffb4aa}
+.hs .msg.check .bubble{border-color:rgba(232,163,61,.55)}
+
+/* ==================== fig: boot timeline ==================== */
+.btl{margin-top:.4rem}
+.btl-head{display:flex;justify-content:space-between;align-items:center;
+  font-family:var(--mono);font-size:.8rem;color:var(--muted);margin-bottom:1rem}
+.btl-head .clock b{color:var(--amber);font-size:1rem}
+.phase{position:relative;padding:.55rem 0 .55rem 1.65rem;border-left:2px solid var(--line);
+  transition:border-color .3s}
+.phase::before{content:"";position:absolute;left:-7px;top:1rem;width:12px;height:12px;
+  border-radius:50%;background:var(--bg);border:2px solid var(--line3);transition:all .3s}
+.phase.current{border-left-color:var(--amber)}
+.phase.current::before{border-color:var(--amber);background:var(--amber);
+  box-shadow:0 0 0 4px rgba(232,163,61,.18)}
+.phase.done{border-left-color:var(--amber-dim)}
+.phase.done::before{border-color:var(--amber-dim);background:var(--amber-dim)}
+.phase .pt{display:flex;justify-content:space-between;align-items:baseline;gap:1rem}
+.phase .pt b{color:var(--faint);font-weight:600;transition:color .3s}
+.phase.current .pt b,.phase.done .pt b{color:#fff}
+.phase .pdur{font-family:var(--mono);font-size:.72rem;color:var(--faint)}
+.phase .pdesc{font-size:.82rem;color:var(--faint);max-height:0;overflow:hidden;
+  transition:max-height .4s ease,margin .4s}
+.phase.current .pdesc,.phase.done .pdesc{max-height:4rem;margin-top:.25rem}
+.phase .pev{display:inline-block;margin-left:.5rem;font-family:var(--mono);font-size:.66rem;
+  letter-spacing:.12em;color:var(--amber);border:1px solid rgba(232,163,61,.4);
+  padding:.1rem .45rem;border-radius:5px;vertical-align:middle}
+
+/* ==================== tables ==================== */
+table.tbl{width:100%;border-collapse:collapse;font-size:.9rem;margin:1.6rem 0}
+.tbl th{font-family:var(--mono);font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--faint);text-align:left;padding:.55rem .8rem;border-bottom:1px solid var(--line2)}
+.tbl td{padding:.7rem .8rem;border-bottom:1px solid var(--line);color:var(--muted);
+  vertical-align:top}
+.tbl td:first-child{color:var(--text)}
+.tbl tr:last-child td{border-bottom:0}
+
+/* ==================== code ==================== */
+pre.code{background:var(--inset);border:1px solid var(--line);border-radius:12px;
+  padding:1.2rem 1.3rem;overflow-x:auto;font-family:var(--mono);font-size:.82rem;
+  line-height:1.75;color:#cdd2da;margin:1.8rem 0}
+pre.code .win{display:flex;gap:.4rem;margin-bottom:.8rem}
+pre.code .win i{width:9px;height:9px;border-radius:50%;background:var(--line3)}
+.k{color:#c792ea}.t{color:#82aaff}.s{color:#c3e88d}.c{color:#5d6570;font-style:italic}
+.f{color:#ffd580}.n{color:#f78c6c}.o{color:#89ddff}
+
+/* trust nested boxes */
+.trust{border:1px solid var(--line2);border-radius:14px;padding:1.2rem;background:var(--bg2)}
+.trust .layer{border:1px dashed var(--line3);border-radius:11px;padding:1rem 1.1rem;
+  margin-top:.8rem}
+.trust .layer h5{all:unset;display:flex;justify-content:space-between;gap:1rem;
+  font-family:var(--mono);font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--amber)}
+.trust ul{margin:.7rem 0 .2rem;padding-left:1.1rem;color:var(--muted);font-size:.88rem}
+.trust li{margin:.3rem 0}
+.trust li b{color:var(--text)}
+
+/* misc two-col */
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+@media(max-width:760px){.duo{grid-template-columns:1fr}}
+.netcard{border:1px solid var(--line);border-radius:12px;background:var(--inset);padding:1.1rem}
+.netcard h4{margin:0 0 .3rem;font-size:.95rem;color:#fff}
+.netcard .sub{font-size:.8rem;color:var(--faint);margin-bottom:.9rem}
+.netflow{font-family:var(--mono);font-size:.76rem;line-height:2.2;color:var(--muted)}
+.netflow b{color:var(--text)}
+.taint{display:inline-block;font-family:var(--mono);font-size:.68rem;padding:.16rem .5rem;
+  border-radius:6px;border:1px solid rgba(239,117,104,.45);color:#ffb0a6;margin-top:.5rem}
+.taint.okay{border-color:rgba(131,207,143,.4);color:#a9e6b2}
+
+@media(prefers-reduced-motion:reduce){
+  .reveal{transition:none;opacity:1;transform:none}
+  html{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+
+<!-- ================================ HERO ================================ -->
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Systems · Apple Silicon · Kubernetes</div>
+    <h1>Two machines<br>per universe</h1>
+    <p class="deks">Kubernetes assumes capacity is fungible. On an Apple Silicon Mac,
+    the hypervisor disagrees — twice, exactly, by law. This is the architecture tour
+    of <code>darwin-node</code>: a node that runs native macOS virtual machines as pods,
+    and treats that constraint as the design's center of gravity.</p>
+    <div class="byline">
+      <div class="avatar">dn</div>
+      <span><b style="color:var(--text)">darwin-node systems</b></span>
+      <span class="dotsep"></span><span>Aug 2026</span>
+      <span class="dotsep"></span><span>24 min read</span>
+      <span class="dotsep"></span><span>interactive</span>
+    </div>
+
+    <nav class="toc" aria-label="Table of contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#constraint"><span class="no">01</span>The constraint</a></li>
+        <li><a href="#admission"><span class="no">02</span>Admission: fail-closed capacity</a></li>
+        <li><a href="#images"><span class="no">03</span>Operating systems as OCI artifacts</a></li>
+        <li><a href="#cow"><span class="no">04</span>Copy-on-write for free</a></li>
+        <li><a href="#agent"><span class="no">05</span>A control plane inside every VM</a></li>
+        <li><a href="#boot"><span class="no">06</span>The boot path, timed</a></li>
+        <li><a href="#hybrid"><span class="no">07</span>Hybrid pods</a></li>
+        <li><a href="#networking"><span class="no">08</span>Networking without a CNI</a></li>
+        <li><a href="#trust"><span class="no">09</span>Trust boundaries</a></li>
+        <li><a href="#truth"><span class="no">10</span>Telling the truth to the scheduler</a></li>
+        <li><a href="#wrong"><span class="no">11</span>What we got wrong</a></li>
+        <li><a href="#philosophy"><span class="no">12</span>The philosophy</a></li>
+      </ol>
+    </nav>
+
+    <!-- ============ hero architecture map ============ -->
+    <div class="breakout reveal" style="margin-top:3rem">
+      <div class="fig scrollx">
+        <svg class="svgbox" viewBox="0 0 1040 660" role="img" aria-label="darwin-node architecture">
+          <!-- api server -->
+          <rect x="340" y="18" width="360" height="54" rx="12" fill="#121419" stroke="#2e323b"/>
+          <text x="520" y="42" text-anchor="middle" font-size="14" fill="#eae8e1">Kubernetes API server</text>
+          <text x="520" y="60" text-anchor="middle" font-size="11" fill="#716f68">watches · heartbeats · scheduler</text>
+          <!-- arrow down -->
+          <line x1="520" y1="72" x2="520" y2="118" stroke="#3a3f4a" stroke-width="1.5"/>
+          <polygon points="516,114 524,114 520,122" fill="#3a3f4a"/>
+          <text x="534" y="102" font-size="11" fill="#e8a33d">mTLS · client-cert required · :10250 exec/logs/stats</text>
+
+          <!-- host container -->
+          <rect x="60" y="124" width="920" height="298" rx="16" fill="#0e1013" stroke="#2e323b"/>
+          <text x="84" y="152" font-size="12" letter-spacing="2" fill="#e8a33d">DARWIN-NODE — ONE GO BINARY, THE KUBELET</text>
+
+          <!-- row 1 -->
+          <rect x="90" y="172" width="185" height="62" rx="10" fill="#171a20" stroke="#2e323b"/>
+          <text x="182" y="198" text-anchor="middle" font-size="12.5" fill="#eae8e1">Virtual Kubelet</text>
+          <text x="182" y="216" text-anchor="middle" font-size="11" fill="#716f68">provider</text>
+
+          <rect x="315" y="172" width="215" height="62" rx="10" fill="#171a20" stroke="#2e323b"/>
+          <text x="422" y="198" text-anchor="middle" font-size="12.5" fill="#eae8e1">Pod engine</text>
+          <text x="422" y="216" text-anchor="middle" font-size="11" fill="#716f68">lifecycle · probes · hooks</text>
+
+          <rect x="572" y="172" width="228" height="62" rx="10" fill="#171a20" stroke="#2e323b"/>
+          <text x="686" y="198" text-anchor="middle" font-size="12.5" fill="#eae8e1">VZ runtime</text>
+          <text x="686" y="216" text-anchor="middle" font-size="11" fill="#716f68">Virtualization.framework</text>
+
+          <rect x="836" y="172" width="126" height="62" rx="10" fill="#171a20" stroke="#2e323b"/>
+          <text x="899" y="198" text-anchor="middle" font-size="12" fill="#eae8e1">sidecars</text>
+          <text x="899" y="216" text-anchor="middle" font-size="11" fill="#716f68">host Docker</text>
+
+          <!-- row 2 -->
+          <rect x="90" y="278" width="185" height="66" rx="10" fill="#171a20" stroke="rgba(232,163,61,.55)"/>
+          <text x="182" y="304" text-anchor="middle" font-size="12.5" fill="#ffd9a0">Slot table</text>
+          <text x="182" y="322" text-anchor="middle" font-size="11" fill="#e8a33d">max 2 · fail closed</text>
+
+          <rect x="315" y="278" width="260" height="66" rx="10" fill="#171a20" stroke="#2e323b"/>
+          <text x="445" y="302" text-anchor="middle" font-size="12.5" fill="#eae8e1">Image store</text>
+          <text x="445" y="320" text-anchor="middle" font-size="11" fill="#716f68">ORAS pull · sparse gunzip · clonefile CoW · provenance</text>
+
+          <rect x="615" y="278" width="347" height="66" rx="10" fill="#171a20" stroke="#2e323b"/>
+          <text x="788" y="302" text-anchor="middle" font-size="12.5" fill="#eae8e1">Volumes · hostPort proxy · events · stats</text>
+          <text x="788" y="320" text-anchor="middle" font-size="11" fill="#716f68">virtio-fs trees · userspace splice · honest signals</text>
+
+          <!-- internal arrows -->
+          <line x1="275" y1="203" x2="311" y2="203" stroke="#3a3f4a" stroke-width="1.5"/><polygon points="308,199 308,207 315,203" fill="#3a3f4a"/>
+          <line x1="530" y1="203" x2="568" y2="203" stroke="#3a3f4a" stroke-width="1.5"/><polygon points="565,199 565,207 572,203" fill="#3a3f4a"/>
+          <line x1="422" y1="234" x2="422" y2="274" stroke="#3a3f4a" stroke-width="1.5"/><polygon points="418,271 426,271 422,278" fill="#3a3f4a"/>
+          <line x1="182" y1="234" x2="182" y2="274" stroke="rgba(232,163,61,.6)" stroke-width="1.5"/><polygon points="178,271 186,271 182,278" fill="#e8a33d"/>
+          <text x="196" y="258" font-size="10.5" fill="#e8a33d">TryAcquire → ErrVMCapacityExhausted</text>
+
+          <!-- VMs -->
+          <rect x="560" y="472" width="212" height="140" rx="14" fill="#121419" stroke="rgba(95,198,184,.65)"/>
+          <text x="666" y="498" text-anchor="middle" font-size="12.5" fill="#5fc6b8">VM #1 · macOS pod</text>
+          <text x="666" y="520" text-anchor="middle" font-size="11" fill="#716f68">Darwin kernel · Metal</text>
+          <text x="666" y="538" text-anchor="middle" font-size="11" fill="#716f68">launchd</text>
+          <circle cx="618" cy="576" r="4" fill="#83cf8f"/>
+          <text x="632" y="580" font-size="11" fill="#a3a097">guest-agent · root in-guest</text>
+
+          <rect x="800" y="472" width="180" height="140" rx="14" fill="#121419" stroke="#22252c" stroke-dasharray="5 5"/>
+          <text x="890" y="498" text-anchor="middle" font-size="12.5" fill="#5fc6b8">VM #2 · macOS pod</text>
+          <text x="890" y="538" text-anchor="middle" font-size="11" fill="#716f68">idle slot — the law says</text>
+          <text x="890" y="556" text-anchor="middle" font-size="11" fill="#716f68">two, never three</text>
+
+          <!-- linux sidecars outside host -->
+          <rect x="90" y="472" width="240" height="140" rx="14" fill="#121419" stroke="#2e323b"/>
+          <text x="210" y="498" text-anchor="middle" font-size="12.5" fill="#79abff">Linux sidecars</text>
+          <text x="210" y="518" text-anchor="middle" font-size="11" fill="#716f68">containers[1..] · colima/Desktop</text>
+          <text x="210" y="540" text-anchor="middle" font-size="11" fill="#716f68">spec-derived mounts + limits</text>
+          <text x="210" y="562" text-anchor="middle" font-size="11" fill="#716f68">one pod, two operating systems</text>
+
+          <!-- vsock arrows -->
+          <path d="M 666 472 L 686 238" stroke="rgba(95,198,184,.75)" stroke-width="1.5" stroke-dasharray="5 5" fill="none"/>
+          <polygon points="663,468 671,470 666,477" fill="#5fc6b8"/>
+          <text x="700" y="380" font-size="11" fill="#5fc6b8">vsock — device bus, not IP</text>
+          <text x="700" y="397" font-size="11" fill="#5fc6b8">framed JSON · token + nonce</text>
+          <path d="M 890 472 L 901 238" stroke="#22252c" stroke-width="1.5" stroke-dasharray="5 5" fill="none"/>
+
+          <!-- capacity annotation -->
+          <text x="90" y="452" font-size="11" fill="#e8a33d">capacity: pods=2 · darwin.node/vm=2 · allocatable = host − reservations</text>
+        </svg>
+      </div>
+      <div class="figcap"><b>The whole system</b> Everything after this is zooming in.</div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<!-- ================================ 01 CONSTRAINT ================================ -->
+<section id="constraint">
+  <div class="snum">01 · The constraint</div>
+  <h2>A computer is not a container</h2>
+
+  <div class="prose">
+    <p>Kubernetes has a foundational assumption so deep nobody states it anymore:
+    <strong>capacity is fungible</strong>. A node advertises <code>pods: 110</code>,
+    and the scheduler spends that budget one pod at a time, trusting that pod 111
+    will fit tomorrow once today's workloads die. Every bin-packing heuristic,
+    every autoscaler, every overcommit ratio rests on the idea that the number in
+    <code>status.capacity</code> is a soft economic fact.</p>
+
+    <p>On an Apple Silicon Mac running macOS workloads, it is physics. XNU's
+    hypervisor enforces a quota of <strong>two concurrent Virtualization.framework
+    VMs per host</strong>, and Apple's macOS license agrees with the kernel. Not
+    “two is recommended.” Two, or the third <code>VM_START</code> fails.</p>
+
+    <p>So the unit of scheduling here is not a container. It is a <em>computer</em>:
+    a full Darwin kernel, its own network stack, a Metal device, tens of gigabytes
+    of RAM. That reframes nearly every subsystem Kubernetes takes for granted:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <table class="tbl">
+        <thead><tr><th></th><th>Normal kubelet node</th><th>darwin-node</th></tr></thead>
+        <tbody>
+          <tr><td>Pod isolation</td><td>namespaces + cgroups</td><td>hardware virtualization</td></tr>
+          <tr><td>Marginal pod cost</td><td>MBs, milliseconds</td><td>GBs of RAM, ~30–60 s of boot</td></tr>
+          <tr><td>Capacity ceiling</td><td>soft, tunable</td><td style="color:var(--amber)">hard, enforced in-kernel</td></tr>
+          <tr><td>Image</td><td>tar layers over a shared kernel</td><td>an entire bootable disk, own kernel</td></tr>
+          <tr><td>exec / logs / probes</td><td>nsenter, cgroup fds</td><td>a wire protocol to a daemon in the guest</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="figcap"><b>Fig. 01</b> The unit of scheduling changed; the API did not.</div>
+  </div>
+
+  <div class="prose">
+    <p>That last row is the sneaky one. On a normal node, <code>kubectl exec</code>
+    is the kubelet reaching into its own kernel. Here, the kubelet must
+    <em>talk to another operating system</em> over a device bus — and whatever
+    speaks on the far end becomes part of the product. We'll get there.</p>
+
+    <p>First, the discipline question: how do you let a scheduler — which exists
+    to overcommit — loose on a machine where the third VM is illegal?</p>
+  </div>
+</section>
+
+<!-- ================================ 02 ADMISSION ================================ -->
+<section id="admission">
+  <div class="snum">02 · Admission</div>
+  <h2>Capacity you cannot negotiate with</h2>
+
+  <div class="prose">
+    <p>The naive approach advertises a generous capacity and rejects overflow at
+    bind time. That produces the worst kind of failure: the scheduler believes a
+    lie, ships workloads to a node that cannot run them, and the error surfaces
+    minutes later as flapping events — on fire, in production.</p>
+
+    <div class="mantra">A lie must be impossible to tell. Admission happens before
+    any expensive work, release is idempotent, and identity is the pod's UID —
+    because Kubernetes guarantees a recreated pod gets a new one even when it
+    reuses a name.</div>
+
+    <p>The slot table is the only component allowed to decide whether a VM may
+    exist. It is small enough to hold in your head:</p>
+  </div>
+
+<pre class="code reveal"><div class="win"><i></i><i></i><i></i></div><span class="c">// TryAcquire takes a slot for uid. Never blocks.</span>
+<span class="c">// A third distinct uid fails with ErrVMCapacityExhausted.</span>
+<span class="k">func</span> (s *<span class="t">Slots</span>) <span class="f">TryAcquire</span>(uid <span class="t">string</span>) <span class="t">error</span> {
+    <span class="k">if</span> uid == <span class="s">""</span> {
+        <span class="k">return</span> fmt.<span class="f">Errorf</span>(<span class="s">"empty pod uid"</span>)  <span class="c">// anonymous capacity does not exist</span>
+    }
+    s.mu.<span class="f">Lock</span>()
+    <span class="k">defer</span> s.mu.<span class="f">Unlock</span>()
+    <span class="k">if</span> _, ok := s.held[uid]; ok {
+        <span class="k">return</span> nil                          <span class="c">// idempotent re-admission</span>
+    }
+    <span class="k">if</span> <span class="f">len</span>(s.held) &gt;= s.max {
+        <span class="k">return</span> ErrVMCapacityExhausted       <span class="c">// the law, stated plainly</span>
+    }
+    s.held[uid] = <span class="k">struct</span>{}{}
+    <span class="k">return</span> nil
+}</pre>
+
+  <div class="prose">
+    <p>Refusing pods is only half of honesty. The other half is telling the
+    scheduler to <em>stop asking</em>. When both slots fill, the node gains a
+    <code>NoSchedule</code> taint and a <code>VMCapacity</code> condition, pushed
+    to the API server on a 15-second heartbeat. Try it:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="ctrlrow" style="margin:0 0 1rem">
+        <button class="btn primary" id="slotApply">kubectl apply pod</button>
+        <button class="btn" id="slotDelete">kubectl delete</button>
+        <span class="stat" style="margin-left:auto">capacity pods=<b>2</b> · darwin.node/vm=<b>2</b></span>
+      </div>
+      <div class="slotsgrid">
+        <div class="nodecard">
+          <div class="nc-title"><h4>node: studio-m4-max</h4><span class="chip ok" id="slotCond"><i></i>VMCapacity=False</span></div>
+          <div id="slot1" class="slotcard"><span>slot 1 — free</span><span class="st">—</span></div>
+          <div id="slot2" class="slotcard"><span>slot 2 — free</span><span class="st">—</span></div>
+          <div id="slotTaint" style="visibility:hidden"><span class="taint">darwin.node/vm-full=true:NoSchedule</span></div>
+        </div>
+        <div>
+          <div class="evlog" id="slotLog"><div class="dim">$ watching darwin-node events…</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 02</b> Fail-closed admission, live. Fill both slots, then ask for a third.</div>
+  </div>
+
+  <div class="prose">
+    <p>Allocatable follows the same rule: host CPU/memory minus explicit
+    reservations (defaults: 2 cores, 4&nbsp;GiB, 20&nbsp;GiB), and
+    <code>pods: 2</code> — equal to the VM count, because that is the truth, even
+    though it makes this the smallest-capacity node in any cluster it joins.
+    With two slots the mechanism looks like overkill; you could almost count on
+    your fingers. But the same heartbeat carries memory pressure, disk pressure,
+    and Metal availability. <strong>A node whose status is recomputed from reality
+    on a timer is a node you can reason about at 3am.</strong> One whose status was
+    computed at boot is a museum exhibit.</p>
+  </div>
+</section>
+
+<!-- ================================ 03 IMAGES ================================ -->
+<section id="images">
+  <div class="snum">03 · Images</div>
+  <h2>Shipping operating systems as OCI artifacts</h2>
+
+  <div class="prose">
+    <p>A macOS VM image is not an app. It is a <strong>bootable disk</strong> —
+    tens of gigabytes containing a kernel, frameworks, and whatever toolchains
+    the tenant needs — plus an auxiliary storage file holding the machine's
+    identity, plus a hardware-model blob describing which Mac the disk believes
+    it lives in.</p>
+
+    <p>We ship these as OCI <em>artifacts</em> anyway. Not Docker images — plain
+    OCI, pulled with ordinary registries via ORAS. That buys the boring
+    superpowers for free: auth, proxies, mirrors, air-gapped bundling, retention
+    policies, and a world of registry operators who already know how to store
+    these blobs. The price is that registries speak <em>manifest-and-tarball</em>,
+    not <em>hypervisor-ready-disk</em>, so the puller rebuilds a bootable artifact
+    from parts. Three problems fall out of that:</p>
+
+    <h3>Which blob is which?</h3>
+    <p>A registry will happily serve five layers with unhelpful names. Layers are
+    identified by media type first and exact title second — <strong>never substring
+    heuristics</strong>. If nothing identifies a disk, an aux, and a config, the pull
+    fails immediately. A partial image is worse than no image: it fails forty
+    seconds later, somewhere that looks like a bug in something else.</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="ocitree">
+        <div><span class="blob config">config</span>application/vnd.darwin-node.config.v1+json<span class="sz">config.json · ~1 KiB · hardwareModel, storage roles</span></div>
+        <div style="padding-left:1.6rem">├─ <span class="blob disk">disk</span>application/vnd.darwin-node.disk.v1<span class="sz">disk.img · gzip · ~10 GB</span></div>
+        <div style="padding-left:1.6rem">└─ <span class="blob aux">aux</span>application/vnd.darwin-node.aux.v1<span class="sz">aux.img · gzip · ~MiB · machine identity</span></div>
+      </div>
+      <div class="sparsebar" id="sparseBar"></div>
+      <div class="kpirow">
+        <span class="stat">logical size <b id="spLogical">—</b></span>
+        <span class="stat">resident (APFS blocks) <b id="spResident">—</b></span>
+        <span class="stat">holes skipped <b id="spHoles">0</b>/<b id="spTotal">0</b></span>
+        <span style="flex:1"></span>
+        <button class="btn primary" id="sparseRun">stream pull</button>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 03</b> One artifact, three roles — and why decompression is the interesting part. Solid blocks are written data; dashed outlines are APFS holes that cost nothing.</div>
+  </div>
+
+  <div class="prose">
+    <h3>Decompressing tens of gigabytes shouldn't allocate tens of gigabytes</h3>
+    <p>Disk images compress beautifully — most of any macOS volume is zeros — so
+    the transform is gzip-in, <strong>sparse-file-out</strong>. The inflater streams
+    through a writer that skips all-zero megabyte pages entirely, leaving real
+    holes that APFS never materializes:</p>
+  </div>
+
+<pre class="code reveal"><div class="win"><i></i><i></i><i></i></div><span class="k">const</span> sparseBlock = <span class="n">1</span> &lt;&lt; <span class="n">20</span>  <span class="c">// 1 MiB pages</span>
+
+<span class="k">for</span> {
+    n, err := io.<span class="f">ReadFull</span>(r, buf)               <span class="c">// one reusable 1 MiB buffer</span>
+    <span class="k">if</span> n &gt; <span class="n">0</span> {
+        <span class="k">if</span> !bytes.<span class="f">Equal</span>(buf[:n], zeroBlock[:n]) { <span class="c">// all zeros?</span>
+            f.<span class="f">WriteAt</span>(buf[:n], off)                <span class="c">// …then write nothing at all</span>
+        }
+        off += <span class="t">int64</span>(n)
+    }
+    <span class="c">// …</span>
+}
+f.<span class="f">Truncate</span>(off)   <span class="c">// trailing zeros become length, not data</span></pre>
+
+  <div class="prose">
+    <p>The file's <em>logical size</em> matches the image bit-for-bit — the
+    hypervisor cares — while its <em>physical footprint</em> lands near the
+    compressed size. A 64&nbsp;GiB image typically occupies single-digit GiB of
+    real blocks.</p>
+
+    <h3>How do you know the disk you booted yesterday is the disk you pulled?</h3>
+    <p>Registries verify compressed-blob digests in transit; we anchor expectations
+    harder. As each descriptor arrives, its <em>uncompressed</em> digest and size
+    are recorded from OCI annotations into a <code>provenance.json</code> lockfile
+    beside the materialized image. Verification on later starts is then O(1): a
+    sidecar cache keyed by <code>(expected digest, expected size)</code> matches, or a
+    full SHA-256 pass settles it. Integrity is anchored to <strong>content and
+    expectations</strong> — never mtimes. Mtimes are suggestions; digests are facts.
+    And the whole cache directory is <code>0700</code>, because a bootable OS image
+    is not just data. It is code, waiting to be run.</p>
+  </div>
+</section>
+
+<!-- ================================ 04 COW ================================ -->
+<section id="cow">
+  <div class="snum">04 · Copy-on-write</div>
+  <h2>Cloning an operating system in microseconds</h2>
+
+  <div class="prose">
+    <p>Here is where the Mac pays rent. Every pod start clones the golden image
+    with a single <code>clonefile(2)</code> call — and APFS copies the inode,
+    not the bytes. Extents are shared with the origin until one side writes, at
+    which point just that extent breaks off:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="cowlane">
+        <div class="lbl">golden image<br><span style="color:var(--faint)">immutable</span></div>
+        <div class="blockrow" id="cowBase"></div>
+      </div>
+      <div class="cowlane">
+        <div class="lbl">pod A overlay<br><span style="color:var(--faint)">clonefile()</span></div>
+        <div class="blockrow" id="cowA"></div>
+      </div>
+      <div class="cowlane">
+        <div class="lbl">pod B overlay<br><span style="color:var(--faint)">clonefile()</span></div>
+        <div class="blockrow" id="cowB"></div>
+      </div>
+      <div class="ctrlrow">
+        <button class="btn primary" id="cowRun">run workloads</button>
+        <button class="btn" id="cowReset">reset</button>
+        <span class="stat" style="margin-left:auto">clone cost <b>~µs ×2 syscalls</b></span>
+        <span class="stat">new blocks A <b id="cowCntA">0</b> · B <b id="cowCntB">0</b></span>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 04</b> Blue extents are shared with the golden image. Amber and violet are blocks a workload dirtied — the only bytes that exist twice.</div>
+  </div>
+
+  <div class="prose">
+    <p>Cost per pod start: two syscalls and microseconds. Cost per pod in blocks:
+    whatever the guest actually dirties. With a two-slot host, image churn is
+    essentially free and cold-starts are bounded by VM boot rather than by copying
+    tens of gigabytes.</p>
+    <p>Crash semantics come free too. Golden images are opened by nobody; overlays
+    are owned by exactly one pod UID; anything orphaned is collected by a 24-hour
+    sweep at boot. The invariant fits in one sentence: <strong>goldens are immutable,
+    overlays have exactly one owner, and nothing else exists.</strong></p>
+  </div>
+</section>
+
+<!-- ================================ 05 AGENT ================================ -->
+<section id="agent">
+  <div class="snum">05 · The agent</div>
+  <h2>A control plane inside every VM</h2>
+
+  <div class="prose">
+    <p>Once the VM boots, the host needs to reach inside it: exec, logs, probes,
+    network info, volume placement, graceful shutdown. On a normal node that's
+    <code>nsenter</code>. Here it's a wire protocol, and we had opinions about
+    the wire. The transport hierarchy is short and strict:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <table class="tbl">
+        <thead><tr><th style="width:16%">Rank</th><th>Transport</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td style="color:var(--green)">preferred</td><td><b>vsock</b> — device-bus socket</td><td>host↔guest, point-to-point by hypervisor-assigned CID. Not routed. Not reachable from other VMs. No IP stack involved at all.</td></tr>
+          <tr><td style="color:var(--amber)">escape hatch</td><td>TCP, plaintext — <b>opt-in</b></td><td><code>--agent-tcp-fallback</code>, off by default. Token + fresh nonce gated, deadline-guarded.</td></tr>
+          <tr><td style="color:var(--red)">last resort</td><td>SSH — opt-in, key-only</td><td>for images without the agent baked in. Pinned host key required, passwords refused outright, argv strictly quoted.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="figcap"><b>Fig. 05</b> When the workload is a whole computer someone's YAML asked for, a transport that bypasses the network entirely is worth designing around.</div>
+  </div>
+
+  <div class="prose">
+    <p>Over whichever transport flows a framed JSON protocol. One envelope,
+    length-prefixed, with an ID that turns a single connection into a multiplexer:
+    requests carry it, responses return it, the client demuxes into per-call
+    channels. Probes, health checks, and exec streams share one vsock without
+    head-of-line blocking — provided the server also refuses to run handlers
+    serially, which it does: every post-handshake request gets its own goroutine
+    behind an in-flight semaphore, and slow consumers get dropped with
+    <code>consumer_too_slow</code> instead of stalling the reader.</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig scrollx">
+      <div class="framefmt">
+        <div class="cell f-len"><b>u32 len</b><span>big-endian</span></div>
+        <div class="cell f-v"><b>v = 1</b><span>proto ver</span></div>
+        <div class="cell f-id"><b>id</b><span>mux key</span></div>
+        <div class="cell f-kind"><b>kind</b><span>req·res·stream·error</span></div>
+        <div class="cell f-meth"><b>method</b><span>Exec · Probe · Logs · NetInfo · Materialize · Shutdown</span></div>
+        <div class="cell f-pay"><b>payload</b><span>json.RawMessage · ≤ 16 MiB</span></div>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 06</b> The envelope. Boring on purpose — every byte is inspectable with netcat and patience.</div>
+  </div>
+
+  <div class="prose">
+    <p>Authentication is one handshake, and it fails closed in every direction.
+    Watch what happens when the token hasn't appeared yet — flip the switch and
+    press play:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="ctrlrow" style="margin:0 0 1.2rem">
+        <button class="btn primary" id="hsPlay">▶ run handshake</button>
+        <button class="btn" id="hsReset">↺ reset</button>
+        <label class="toggle" style="margin-left:auto">
+          <input type="checkbox" id="hsBroken">
+          simulate late virtio-fs mount <span class="chip" id="hsChip"><i style="background:var(--green)"></i>token loaded</span>
+        </label>
+      </div>
+      <div class="hs">
+        <div class="lanehead"><span>host · darwin-node</span><span style="text-align:right">guest · agent (root in-guest)</span></div>
+        <div id="hsOk">
+          <div class="msg toHost"><span class="arrow">GUEST ──▶ HOST · connect</span><div class="bubble">vsock accept — CID assigned by the hypervisor, no IP involved</div></div>
+          <div class="msg toHost"><span class="arrow">GUEST ──▶ HOST · HandshakeReq</span><div class="bubble">{ token:"9f2c71…e5", nonce:"a41f0c…", ver:1 }</div></div>
+          <div class="msg check toHost"><span class="arrow">HOST · verifies</span><div class="bubble">deadline armed (10 s) · token == expected ✓ · nonce unseen ✓ · conns 3/8 ✓</div></div>
+          <div class="msg toGuest"><span class="arrow">HOST ──▶ GUEST · HandshakeRes</span><div class="bubble ok">{ ok:true, metalAvailable:true, proto:1 }</div></div>
+          <div class="msg note"><div class="bubble">the wire is now multiplexed — probes, exec streams, logs and metrics interleave by id, dispatched to independent goroutines behind an 8-slot semaphore</div></div>
+        </div>
+        <div id="hsFail" hidden>
+          <div class="msg toHost"><span class="arrow">GUEST ──▶ HOST · connect</span><div class="bubble">vsock accept — connection accepted, limiter slot taken</div></div>
+          <div class="msg toHost"><span class="arrow">GUEST ──▶ HOST · HandshakeReq</span><div class="bubble">{ token:"9f2c71…e5", nonce:"a41f0c…", ver:1 }</div></div>
+          <div class="msg err check toHost"><span class="arrow">HOST · verifies</span><div class="bubble">configured token == "" ⇒ <b style="color:var(--red)">reject everyone</b></div></div>
+          <div class="msg err toGuest"><span class="arrow">HOST ──▶ GUEST · Error</span><div class="bubble">{ code:"unauthorized", message:"bad token" }</div></div>
+          <div class="msg note"><div class="bubble">the TCP listener was never opened; the guest backs off exponentially and heals itself the moment the control share mounts — degraded means unreachable, never unauthenticated</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 07</b> The original sin of this codebase's ancestor was <code>if h.Token != "" &amp;&amp; req.Token != h.Token</code> — an empty token accepted everyone. The fix wasn't adding a check; it was inverting the default.</div>
+  </div>
+
+  <div class="prose">
+    <p>The token itself is 32 random bytes minted at admission, written
+    <code>0600</code> onto a read-only control share the guest mounts over
+    virtio-fs. Resource ceilings ride the same path, because a workload that
+    floods its own control plane should degrade <em>its own</em> telemetry, not
+    the node's:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <table class="tbl">
+        <thead><tr><th>Ceiling</th><th>Value</th><th>Consequence when hit</th></tr></thead>
+        <tbody>
+          <tr><td>Connections per agent</td><td>8</td><td>new dials get <code>overloaded</code>, limiter frees on close</td></tr>
+          <tr><td>Concurrent execs</td><td>4</td><td>exec refused; probe-exec shares the budget</td></tr>
+          <tr><td>In-flight requests</td><td>8</td><td>per-connection dispatch bound</td></tr>
+          <tr><td>Handshake deadline</td><td>10 s</td><td>unauthenticated sockets cannot loiter</td></tr>
+          <tr><td>Idle timeout</td><td>30 s</td><td>dead peers reap themselves</td></tr>
+          <tr><td>Probe timeout clamp</td><td>60 s</td><td>a hostile spec cannot park a handler forever</td></tr>
+          <tr><td>Log line / ring</td><td>256 KiB / 8 MiB</td><td>long lines split; oldest drops first</td></tr>
+          <tr><td>Exec capture (buffered)</td><td>1 MiB/stream</td><td>streams bypass the cap entirely</td></tr>
+          <tr><td>Frame size</td><td>16 MiB</td><td>protocol-level hard stop</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="figcap"><b>Fig. 08</b> Every ceiling is a denial-of-service that chose to become a config constant instead.</div>
+  </div>
+</section>
+
+<!-- ================================ 06 BOOT ================================ -->
+<section id="boot">
+  <div class="snum">06 · Boot</div>
+  <h2>The boot path, timed</h2>
+
+  <div class="prose">
+    <p>Pod creation is where every subsystem meets, so it deserves a timeline.
+    Every number below is a real configuration value. Press play — the animation
+    compresses roughly 40 seconds of wall-clock into 14:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="btl">
+        <div class="btl-head">
+          <div class="clock">t+<b id="btClock">0.0s</b></div>
+          <div class="ctrlrow" style="margin:0">
+            <button class="btn primary" id="btPlay">▶ play</button>
+            <button class="btn" id="btStep">step ⏭</button>
+            <button class="btn" id="btReset">↺</button>
+          </div>
+        </div>
+        <div id="btPhases"></div>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 09</b> From <code>kubectl apply</code> to Ready. Events appear exactly when the engine emits them; the 45-second dial cap and 10-second handshake deadline are load-bearing.</div>
+  </div>
+
+  <div class="prose">
+    <p>Two details in that waterfall carry disproportionate weight.</p>
+    <p>The <strong>MAC address lease</strong>: each pod UID gets a stable, locally
+    administered MAC persisted across restarts — written via temp-file-rename so a
+    crash mid-write can't corrupt it. DHCP leases stay sticky, the ARP fallback
+    stays meaningful, and a liveness-triggered restart doesn't look like new
+    hardware to the network.</p>
+    <p>The <strong>dial discipline</strong>: early versions tried transports
+    sequentially — vsock accept to completion, then connect, then TCP — which let
+    a wedged vsock consume the entire boot budget before the fallback got its
+    turn, silently, while the user stared at <code>Pending</code>. Today the dial
+    is capped at 45 seconds regardless of caller context; progress is narrated as
+    events (<code>Created → Starting → VMDialing → Started</code>) so
+    <code>kubectl describe</code> reads like a story instead of a shrug; and the
+    host is strictly an <em>acceptor</em> — on timeout the listener closes and any
+    late guest connection is refused. A control channel that connects to whoever
+    knocks first is not a control channel.</p>
+  </div>
+</section>
+
+<!-- ================================ 07 HYBRID ================================ -->
+<section id="hybrid">
+  <div class="snum">07 · Hybrid pods</div>
+  <h2>One foot in each world</h2>
+
+  <div class="prose">
+    <p>The unique capability of this node is that a single pod can straddle two
+    operating systems. Container zero <em>is</em> the Mac VM. Containers one through N
+    are ordinary Linux containers on the host's Docker daemon, wired with the
+    mounts and resource limits from their spec, sharing nothing with the guest
+    but the pod's identity:</p>
+  </div>
+
+<pre class="code reveal"><div class="win"><i></i><i></i><i></i></div><span class="t">spec</span>:
+  <span class="t">containers</span>:
+  - <span class="t">name</span>: builder              <span class="c"># ← macOS VM (containers[0])</span>
+    <span class="t">image</span>: <span class="s">ci/sonoma-xcode16:25.1</span>
+    <span class="t">resources</span>: {<span class="t">requests</span>: {<span class="t">cpu</span>: <span class="s">"6"</span>, <span class="t">memory</span>: <span class="s">24Gi</span>}}
+  - <span class="t">name</span>: artifact-proxy       <span class="c"># ← Linux sidecar on the HOST</span>
+    <span class="t">image</span>: <span class="s">nginx:alpine</span>
+    <span class="t">ports</span>: [{<span class="t">containerPort</span>: <span class="n">8080</span>, <span class="t">hostPort</span>: <span class="n">8080</span>}]
+  <span class="t">initContainers</span>:
+  - <span class="t">name</span>: fetch-manifest       <span class="c"># ← host-side, sequential, must exit 0</span>
+    <span class="t">image</span>: <span class="s">busybox</span></pre>
+
+  <div class="prose">
+    <p>The classic CI topology this enables — a macOS build environment with a thin
+    Linux logging or caching sidecar — used to require two nodes and a service
+    boundary. Here it's one pod, one lifetime, one delete call. Init containers run
+    sequentially on the host before the VM exists, with an explicit guard rejecting
+    VM images in init position, because “init” that boots an operating system is a
+    category error, not a slow start.</p>
+
+    <h3>Volumes, with opinions about secrets</h3>
+    <p>The host materializes everything materializable — emptyDir, allowlisted
+    hostPath, ConfigMaps, Secrets, projected tokens — into a per-UID tree, shares
+    those directories over virtio-fs, and the guest agent places them at the mount
+    paths. Mode selection is a policy statement dressed as an implementation
+    detail:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="duo" style="font-family:var(--mono);font-size:.8rem">
+        <div>
+          <div class="stat" style="letter-spacing:.14em;color:var(--amber)">HOST · cache/pods/&lt;uid&gt;/</div>
+          <div style="line-height:2.1;color:var(--muted);margin-top:.5rem">
+            volumes/<br>
+            &nbsp;&nbsp;build-cache/&nbsp;<span style="color:var(--faint)">— link mode</span><br>
+            &nbsp;&nbsp;tls-secret/<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;ca.crt&nbsp;<span style="color:var(--green)">0644</span>&nbsp;<span style="color:var(--faint)">— COPY mode</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;tls.key&nbsp;<span style="color:var(--green)">0600</span>&nbsp;<span style="color:var(--faint)">— COPY mode</span><br>
+            &nbsp;&nbsp;sa-token/token<br>
+            control/&nbsp;<span style="color:var(--faint)">(read-only share)</span><br>
+            &nbsp;&nbsp;agent-token&nbsp;<span style="color:var(--green)">0600</span>
+          </div>
+        </div>
+        <div>
+          <div class="stat" style="letter-spacing:.14em;color:var(--teal)">GUEST · placed by agent</div>
+          <div style="line-height:2.1;color:var(--muted);margin-top:.5rem">
+            /Volumes/My Shared Files/&lt;vol&gt;<br>
+            &nbsp;&nbsp;└─ <span style="color:var(--blue)">symlink</span> → mount path&nbsp;<span style="color:var(--faint)">(link)</span><br>
+            &nbsp;&nbsp;└─ <span style="color:var(--blue)">byte-for-byte copy</span>&nbsp;<span style="color:var(--faint)">(copy)</span><br><br>
+            <span style="color:var(--faint)">link keeps the share authoritative;</span><br>
+            <span style="color:var(--faint)">copy duplicates secret bytes and leaves</span><br>
+            <span style="color:var(--faint)">the automount as inert scaffolding.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 10</b> Anything carrying credentials always copies. Teardown runs creation in reverse — hook, shutdown, VM stopped, <i>then</i> RemoveAll.</div>
+  </div>
+
+  <div class="prose">
+    <p>Projected service-account tokens are real ones — minted via the TokenRequest
+    API with audience and expiry, not a static string pasted into a file. Bound-token
+    semantics survive the trip into the guest. And deleting files underneath a
+    still-running virtio-fs client is how you turn a clean shutdown into silent
+    data loss, which is why the teardown order above is load-bearing.</p>
+  </div>
+</section>
+
+<!-- ================================ 08 NETWORKING ================================ -->
+<section id="networking">
+  <div class="snum">08 · Networking</div>
+  <h2>Networking without a CNI</h2>
+
+  <div class="prose">
+    <p>There is no CNI plugin for Virtualization.framework. There is, however, a
+    switch in the VM config — and the node refuses to pretend the two settings
+    are interchangeable:</p>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="duo">
+      <div class="netcard">
+        <h4>NAT mode <span style="color:var(--faint);font-weight:400">· default</span></h4>
+        <div class="sub">laptops, CI drivers</div>
+        <div class="netflow">
+          pod VM ─┐<br>
+          pod VM ─┴─▶ <b>vmnet NAT</b> ──▶ Mac's uplink<br><br>
+          PodIP: <b>host-local ONLY</b><br>
+          ✗ cannot back a ClusterIP
+        </div>
+        <span class="taint">tainted: darwin.node/nat-only:NoSchedule</span>
+        <div style="font-size:.78rem;color:var(--faint);margin-top:.4rem">removed only by <code>--allow-nat-workloads</code></div>
+      </div>
+      <div class="netcard">
+        <h4>Bridged mode <span style="color:var(--faint);font-weight:400">· opt-in</span></h4>
+        <div class="sub">production Services</div>
+        <div class="netflow">
+          pod VM ─┐<br>
+          pod VM ─┴─▶ <b>bridge</b> ──▶ LAN / VLAN<br><br>
+          PodIP: <b>routable L2 address</b><br>
+          ✓ a real ClusterIP backend
+        </div>
+        <span class="taint okay">requires com.apple.vm.networking entitlement</span>
+        <div style="font-size:.78rem;color:var(--faint);margin-top:.4rem">Apple-approved; separate from virtualization</div>
+      </div>
+    </div>
+    <div class="figcap" style="margin-top:1rem"><b>Fig. 11</b> The taint is the load-bearing part. The node knows things the scheduler doesn't; it is obliged to say so.</div>
+  </div>
+
+  <div class="prose">
+    <p>NAT mode is perfectly good for <code>kubectl exec</code>, port-forwards, and CI
+    drivers — and perfectly broken for Services, because kube-proxy on some other
+    node cannot route to an address that only exists inside this Mac's NAT. Rather
+    than let users discover that with a weekend of debugging, NAT-only nodes wear
+    the taint until an explicit flag removes it.</p>
+    <p><code>PodIP</code> comes from the horse's mouth — the guest agent reports its
+    interfaces after DHCP — because the alternatives (ARP-table scraping, packet
+    sniffing) are races wearing a trench coat. hostPort is a small userspace TCP
+    proxy that binds on the host and splices bytes toward
+    <code>PodIP:containerPort</code>, re-resolving destinations when a restarted VM
+    changes address. UDP hostPorts fail loudly rather than silently doing nothing.
+    Port-forward remains the one door marked “not yet”: the agent protocol could
+    carry it trivially, the design note is written, and shipping half a feature is
+    worse than documenting an absent one.</p>
+  </div>
+</section>
+
+<!-- ================================ 09 TRUST ================================ -->
+<section id="trust">
+  <div class="snum">09 · Security</div>
+  <h2>Trust boundaries</h2>
+
+  <div class="prose">
+    <p>Security review found its clearest expression as a picture. Three rules
+    govern every boundary in it:</p>
+    <div class="mantra">Fail closed is a verb, not a slogan. Escape hatches must be loud.
+    And anything that can write the cache can rewrite reality.</div>
+  </div>
+
+  <div class="breakout reveal">
+    <div class="fig">
+      <div class="trust">
+        CLUSTER
+        <div class="layer">
+          <h5><span>kube-apiserver ⇄ darwin-node</span><span>mTLS · client-cert verification required · refuses plaintext startup in cluster mode</span></h5>
+          <div class="layer" style="margin-top:1rem">
+            <h5><span>HOST — privileged, Virtualization-entitled</span><span>CacheDir 0700 · bootable OS images are code</span></h5>
+            <ul>
+              <li><b>hostPath:</b> deny-by-default prefix allowlist; <code>/</code> is never permitted, all seven HostPathTypes validated</li>
+              <li><b>secrets at rest:</b> 0700 dirs, 0600 files, removed only after the VM confirms stop, 24 h orphan sweep at boot</li>
+              <li><b>images:</b> provenance anchored at pull time; unrecognized layers reject the pull instead of failing at boot</li>
+            </ul>
+            <div class="layer" style="margin-top:1rem;background:var(--inset)">
+              <h5><span>GUEST — root in-guest ≠ root on-host</span><span>vsock preferred · TCP off unless flagged</span></h5>
+              <ul>
+                <li><b>handshake:</b> per-pod 256-bit token + fresh nonce against a replay window — otherwise total silence</li>
+                <li><b>deadlines:</b> 10 s handshake, 30 s idle, 60 s probe clamp — dead peers and hostile specs self-reap</li>
+                <li><b>exec argv crosses as argv:</b> no shell interpretation anywhere on the path</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="figcap"><b>Fig. 12</b> Every escape hatch requires an explicit flag, and SSH additionally demands a pinned host key and refuses passwords outright. A fallback that activates silently isn't a fallback — it's a second, unaudited product.</div>
+  </div>
+</section>
+
+<!-- ================================ 10 TRUTH ================================ -->
+<section id="truth">
+  <div class="snum">10 · Observability</div>
+  <h2>Telling the truth to the scheduler</h2>
+
+  <div class="prose">
+    <p>Virtual Kubelet's implicit contract is brutal: <strong>the provider is the
+    source of truth for pod status.</strong> Everything downstream — the scheduler's
+    assumptions, metrics-server, the HPA, the human running <code>kubectl top</code>
+    — inherits whatever the provider asserts. Assert fiction and you haven't merely
+    misreported; you've poisoned autoscaling signals cluster-wide.</p>
+
+    <div class="mantra">Never report a number you didn't measure. If the guest agent
+    doesn't answer, that pod's stats are omitted — a gap metrics-server tolerates —
+    rather than replaced with capacity-as-usage, which it does not.</div>
+
+    <p>The reporting layer follows from that one negative rule. Node CPU and memory
+    come from host measurement; pod CPU and memory come from the guest's own sampler
+    across vsock, mirrored into per-container stats because <code>kubectl top pods</code>
+    renders containers, not pods. Conditions and taints recompute from the live slot
+    table on a heartbeat — <code>vm-full</code> appears when the second slot fills,
+    not when the node rebooted. Events narrate the lifecycle in vocabulary operators
+    already know (<code>Pulling</code>, <code>Starting</code>, <code>VMDialing</code>,
+    <code>Started</code>, <code>Killing</code>, <code>ProbeFailed</code>) so
+    <code>kubectl describe pod</code> tells the same story the engine is living.</p>
+
+    <p>The embarrassing part is how late this arrived: the first stats
+    implementation reported host <em>capacity</em> as usage, which made every
+    dashboard show a permanently saturated node and taught us the rule above the
+    expensive way. Honesty requirements that seem obvious in retrospect usually have
+    a scar under them.</p>
+  </div>
+</section>
+
+<!-- ================================ 11 WRONG ================================ -->
+<section id="wrong">
+  <div class="snum">11 · Postmortem</div>
+  <h2>What we got wrong</h2>
+
+  <div class="prose">
+    <p>An architecture post that only lists victories is a brochure. The ledger,
+    in fairness:</p>
+
+    <p><strong>The engine is fire-and-forget where it should be a reconciler.</strong>
+    Pod state is written once during start and amended by probes; the VM's actual
+    power state is read and then discarded in the status path. A guest that panics
+    leaves a pod reporting <code>Running</code> until a probe notices — and
+    “noticing” never escalates to the restart policy the spec asked for. Node-level
+    conditions got their heartbeat; pod-level truth is still waiting for the same
+    treatment. This is the largest open item.</p>
+
+    <p><strong>Identity is keyed by namespace/name while capacity is keyed by UID.</strong>
+    The delete-and-recreate race — a Deployment rolls, old and new briefly share a
+    name — can wedge a record that silently ignores its replacement. Known fix,
+    small, still undone.</p>
+
+    <p><strong>Exec is half-streamed.</strong> stdout/stderr now flow live, but there
+    is no stdin path and no pty, so <code>kubectl exec -it</code> — the first thing
+    every human types — degrades to command-mode. The protocol reserves room for
+    input frames; the plumbing is unfinished.</p>
+
+    <p><strong><code>logs -f</code> returns a snapshot,</strong> and log persistence for
+    previous-container logs rides on the same unbuilt substrate. Designed, deferred,
+    documented — and users still hit it weekly.</p>
+
+    <p><strong>SIGINT kills every VM like a power cut.</strong> The delete path honors
+    grace periods scrupulously; the process-exit path does not. A graceful drain
+    between signal handler and engine is specified and pending.</p>
+
+    <p>None of these are mysteries. They are queued, evidenced, and tracked in the
+    open — which is what an honest backlog looks like.</p>
+  </div>
+</section>
+
+<!-- ================================ 12 PHILOSOPHY ================================ -->
+<section id="philosophy">
+  <div class="snum">12 · Closing</div>
+  <h2>The philosophy</h2>
+
+  <div class="prose">
+    <p>Strip away the Mac-specific machinery and four rules remain. None of them is
+    novel; all of them were expensive to learn.</p>
+
+    <p><strong>Design around the constraint you cannot remove.</strong> The two-VM quota
+    shaped admission, images, boot, and status. Fighting it would have produced a
+    system that lies at every layer. Accepting it produced one that lies at none.</p>
+
+    <p><strong>Make the wrong thing impossible before making the right thing easy.</strong>
+    Fail-closed admission, deny-by-default hostPath, mandatory TLS, accept-only
+    control channels — each removes a failure mode rather than handling it.</p>
+
+    <p><strong>Never report a number you didn't measure.</strong> A virtual node's cardinal
+    sin is feeding the scheduler plausible fiction. Gaps are recoverable; lies
+    compound.</p>
+
+    <p><strong>Boring components, sharp glue.</strong> ORAS, Virtualization.framework,
+    APFS clonefile, virtio-fs, launchd, plain JSON frames — nothing exotic in the
+    inventory. The system's character lives entirely in how the pieces are
+    constrained, ordered, and told the truth about each other.</p>
+
+    <hr class="sep">
+
+    <p>The Mac was never supposed to be a cloud. It has no namespaces, no cgroups,
+    no container ecosystem, a licensing regime instead of a resource manager, and a
+    hypervisor that counts to two. But it has the toolchain a large fraction of the
+    world's mobile software depends on, and hardware that makes Linux runners look
+    like they're wading through syrup.</p>
+
+    <p>Meeting Kubernetes halfway meant building the missing half honestly: a node
+    that admits what it is — two computers, occasionally three processes — and lets
+    the cluster trust it anyway.</p>
+
+    <div class="mantra">That's the whole trick. The rest is plumbing,<br>and the plumbing is open.</div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    darwin-node · Apache-2.0 · built on Virtualization.framework, ORAS, APFS, and
+    stubbornness. Architecture decisions live in <code>docs/adr/</code>; the honest
+    backlog lives in <code>issues/</code>.
+  </div>
+</footer>
+
+<script>
+(function(){
+"use strict";
+var $=function(s){return document.querySelector(s)};
+var $$=function(s){return Array.prototype.slice.call(document.querySelectorAll(s))};
+
+/* ---------- scroll progress ---------- */
+var prog=$("#progress");
+addEventListener("scroll",function(){
+  var h=document.documentElement;
+  var max=h.scrollHeight-h.clientHeight;
+  prog.style.width=(max>0?(h.scrollTop/max*100):0)+"%";
+},{passive:true});
+
+/* ---------- reveal on scroll ---------- */
+var io=new IntersectionObserver(function(es){
+  es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target);} });
+},{threshold:.12});
+$$(".reveal").forEach(function(el){io.observe(el)});
+
+/* ---------- scrollspy ---------- */
+var links=$$("nav.toc a");
+var map={};
+links.forEach(function(a){map[a.getAttribute("href").slice(1)]=a});
+var spy=new IntersectionObserver(function(es){
+  es.forEach(function(e){
+    if(e.isIntersecting){
+      links.forEach(function(a){a.classList.remove("active")});
+      var a=map[e.target.id]; if(a) a.classList.add("active");
+    }
+  });
+},{rootMargin:"-30% 0px -60% 0px"});
+Object.keys(map).forEach(function(id){var el=document.getElementById(id); if(el) spy.observe(el)});
+
+/* ================= Fig 02 · slot table playground ================= */
+(function(){
+  var MAX=2, held=[], seq=0;
+  var s1=$("#slot1"), s2=$("#slot2"), cond=$("#slotCond"),
+      taint=$("#slotTaint"), log=$("#slotLog");
+  function line(txt, cls){
+    var d=document.createElement("div");
+    if(cls) d.className=cls;
+    d.textContent=txt;
+    log.appendChild(d); log.scrollTop=log.scrollHeight;
+  }
+  function render(){
+    [s1,s2].forEach(function(el,i){
+      var uid=held[i];
+      if(uid){ el.className="slotcard held";
+        el.innerHTML="<span>"+uid+"</span><span class='st'>● Running</span>"; }
+      else { el.className="slotcard";
+        el.innerHTML="<span>slot "+(i+1)+" — free</span><span class='st'>—</span>"; }
+    });
+    var full=held.length>=MAX;
+    cond.className="chip "+(full?"on":"ok");
+    cond.innerHTML="<i></i>VMCapacity="+(full?"True":"False");
+    taint.style.visibility=full?"visible":"hidden";
+  }
+  $("#slotApply").addEventListener("click",function(){
+    if(held.length>=MAX){
+      line("VMCapacityExhausted: this host allows at most 2 concurrent macOS VMs","err");
+      line("event Warning · scheduler will see the vm-full taint within 15s","dim");
+      return;
+    }
+    seq++;
+    var uid="pod-"+String.fromCharCode(96+seq)+"-"+Math.random().toString(16).slice(2,6);
+    held.push(uid);
+    line("Created \""+uid+"\" · accepted macOS pod; booting VM  ["+held.length+"/"+MAX+"]","good");
+    render();
+  });
+  $("#slotDelete").addEventListener("click",function(){
+    if(!held.length){ line("nothing to delete — node idle","dim"); return; }
+    var uid=held.shift();
+    line("Killing \""+uid+"\" · preStop → Shutdown → Stop → RemoveAll","dim");
+    line("slot released · allocatable updated on next heartbeat","good");
+    render();
+  });
+})();
+
+/* ================= Fig 03 · sparse stream demo ================= */
+(function(){
+  var N=64, ZERO_P=0.72, bar=$("#sparseBar"), run=$("#sparseRun");
+  var cells=[], timer=null, i=0, resGB=0, holes=0;
+  $("#spLogical").textContent="64.0 GiB"; $("#spTotal").textContent=N;
+  for(var k=0;k<N;k++){var s=document.createElement("span");bar.appendChild(s);cells.push(s);}
+  function reset(){
+    clearInterval(timer); timer=null; i=0; resGB=0; holes=0;
+    cells.forEach(function(c){c.className=""});
+    $("#spResident").textContent="—"; $("#spHoles").textContent="0";
+    run.textContent="stream pull"; run.disabled=false;
+  }
+  run.addEventListener("click",function(){
+    if(timer){reset();return;}
+    reset(); run.textContent="pulling…"; run.disabled=true;
+    timer=setInterval(function(){
+      if(i>=N){
+        clearInterval(timer);timer=null;
+        $("#spResident").textContent=resGB.toFixed(1)+" GiB";
+        run.textContent="↺ replay"; run.disabled=false;
+        return;
+      }
+      var c=cells[i];
+      if(Math.random()<ZERO_P){ c.className="hole"; holes++; }
+      else { c.className="data"; resGB+=0.55+Math.random()*0.45; }
+      $("#spResident").textContent=resGB.toFixed(1)+" GiB";
+      $("#spHoles").textContent=holes;
+      i++;
+    },34);
+  });
+})();
+
+/* ================= Fig 04 · clonefile CoW ================= */
+(function(){
+  var N=24, base=$("#cowBase"), A=$("#cowA"), B=$("#cowB");
+  var ownA={},ownB={},timer=null,turn=0,cntA=0,cntB=0;
+  function row(el){for(var k=0;k<N;k++){var s=document.createElement("span");
+    s.className="shared";el.appendChild(s);}}
+  row(base);row(A);row(B);
+  function kids(el){return Array.prototype.slice.call(el.children)}
+  function reset(){
+    clearInterval(timer);timer=null;ownA={};ownB={};cntA=0;cntB=0;turn=0;
+    kids(A).forEach(function(s){s.className="shared"});
+    kids(B).forEach(function(s){s.className="shared"});
+    $("#cowCntA").textContent="0";$("#cowCntB").textContent="0";
+  }
+  $("#cowReset").addEventListener("click",reset);
+  $("#cowRun").addEventListener("click",function(){
+    if(timer)return;
+    timer=setInterval(function(){
+      var vm=(turn++%2===0)?{own:ownA,el:A,id:"ownA",cnt:"#cowCntA"}
+                           :{own:ownB,el:B,id:"ownB",cnt:"#cowCntB"};
+      for(var tries=0;tries<8;tries++){
+        var idx=Math.floor(Math.random()*N);
+        if(vm.own[idx])continue;
+        vm.own[idx]=1;kids(vm.el)[idx].className=vm.id;
+        if(vm.id==="ownA"){cntA++;$("#cowCntA").textContent=cntA;}
+        else{cntB++;$("#cowCntB").textContent=cntB;}
+        break;
+      }
+      if(Object.keys(ownA).length>=N*0.6&&Object.keys(ownB).length>=N*0.6){
+        clearInterval(timer);timer=null;
+      }
+    },110);
+  });
+})();
+
+/* ================= Fig 07 · handshake flow ================= */
+(function(){
+  var broken=$("#hsBroken"), chip=$("#hsChip"),
+      ok=$("#hsOk"), fail=$("#hsFail"), play=$("#hsPlay");
+  var timers=[];
+  function clearAll(){timers.forEach(clearTimeout);timers=[];}
+  function setSeq(list){
+    Array.prototype.forEach.call(list.children,function(m){m.classList.remove("show")});
+  }
+  function show(list){
+    var msgs=Array.prototype.slice.call(list.children);
+    msgs.forEach(function(m,idx){
+      timers.push(setTimeout(function(){m.classList.add("show")},420*idx));
+    });
+    return 420*msgs.length;
+  }
+  function refreshChip(){
+    if(broken.checked){chip.className="chip on";chip.innerHTML="<i style='background:var(--red)'></i>token absent";}
+    else{chip.className="chip";chip.innerHTML="<i style='background:var(--green)'></i>token loaded";}
+  }
+  broken.addEventListener("change",refreshChip);
+  play.addEventListener("click",function(){
+    clearAll(); ok.hidden=broken.checked; fail.hidden=!broken.checked;
+    var list=broken.checked?fail:ok;
+    setSeq(list); show(list);
+  });
+  $("#hsReset").addEventListener("click",function(){
+    clearAll();setSeq(ok);setSeq(fail);
+  });
+  refreshChip();
+})();
+
+/* ================= Fig 09 · boot timeline ================= */
+(function(){
+  var PHASES=[
+    {label:"Admission",dur:0.8,ev:"Created",
+     desc:"spec validated · ConfigMaps/Secrets/SA token resolved · hostPath policy · slot TryAcquire · hostPort reserved"},
+    {label:"Materialize",dur:1.4,ev:null,
+     desc:"volume trees under cache/pods/<uid>/ · 0600 token onto read-only control share · init containers run to exit 0"},
+    {label:"Image resolve",dur:2.6,ev:"Pulling",
+     desc:"cache fast-path verify (digest+size) · miss → ORAS pull · sparse-gunzip · provenance.json · clonefile overlay"},
+    {label:"VM boot",dur:26,ev:"Starting",
+     desc:"Virtualization.framework config: CPU/mem from pod requests, per-UID MAC, virtio-fs shares, NAT/bridged · guest kernel → launchd → agent"},
+    {label:"Agent dial",dur:6.5,ev:"VMDialing",
+     desc:"host accepts vsock (45 s cap) · Handshake{token,nonce} within 10 s · Ready check"},
+    {label:"Guest setup",dur:3.7,ev:"Started",
+     desc:"Materialize RPC places volumes · NetInfo → PodIP · postStart hook · sidecars created · phase → Running, probes armed"}
+  ];
+  var SCALE=0.34;                 // simulated seconds per real second
+  var wrapEl=$("#btPhases"), clock=$("#btClock"),
+      play=$("#btPlay"), step=$("#btStep"), rst=$("#btReset");
+  var bounds=[],total=0,tSim=0,playing=false,last=null;
+  PHASES.forEach(function(p){bounds.push(total);total+=p.dur});bounds.push(total);
+  PHASES.forEach(function(p,i){
+    var d=document.createElement("div");d.className="phase";
+    d.innerHTML="<div class='pt'><b>"+(i+1)+". "+p.label+
+      (p.ev?"<span class='pev'>"+p.ev+"</span>":"")+
+      "</b><span class='pdur'>~"+p.dur+"s</span></div><div class='pdesc'>"+p.desc+"</div>";
+    wrapEl.appendChild(d);
+  });
+  var els=$$("#btPhases .phase");
+  function paint(){
+    clock.textContent=tSim.toFixed(1)+"s / ~"+total.toFixed(0)+"s";
+    els.forEach(function(el,i){
+      var st=tSim>=bounds[i+1]?"done":(tSim>=bounds[i]?"current":"");
+      el.className="phase"+(st?" "+st:"");
+    });
+  }
+  function stop(){playing=false;play.textContent="▶ play";}
+  function tick(ts){
+    if(!playing)return;
+    if(last!=null)tSim+=(ts-last)/1000*SCALE;
+    last=ts;
+    if(tSim>=total){tSim=total;paint();stop();return;}
+    paint();requestAnimationFrame(tick);
+  }
+  play.addEventListener("click",function(){
+    if(playing){stop();return;}
+    if(tSim>=total)tSim=0;
+    playing=true;play.textContent="❚❚ pause";last=null;requestAnimationFrame(tick);
+  });
+  step.addEventListener("click",function(){
+    stop();
+    for(var i=0;i<bounds.length;i++){if(bounds[i]>tSim){tSim=bounds[i];break;}}
+    paint();
+  });
+  rst.addEventListener("click",function(){stop();tSim=0;paint();});
+  paint();
+})();
+})();
+</script>
+</body>
+</html>

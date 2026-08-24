@@ -1,0 +1,6 @@
+apiVersion: v2
+name: darwin-node
+description: RBAC and documentation skeleton for a darwin-node Mac fleet. The agent itself runs on each Mac via launchd, not as a Linux pod.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

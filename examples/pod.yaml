@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: macos
+spec:
+  containers:
+    - name: macos
+      image: registry.example.com/macos:15
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+          darwin.node/vm: "1"
+          darwin.node/metal: "1"
+      readinessProbe:
+        exec:
+          command: ["/usr/bin/true"]
+        initialDelaySeconds: 30
+        periodSeconds: 10
+  tolerations:
+    - key: darwin.node/macos
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+    - key: virtual-kubelet.io/provider
+      operator: Equal
+      value: darwin-node
+      effect: NoSchedule
+    - key: darwin.node/nat-only
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  nodeSelector:
+    kubernetes.io/os: darwin
