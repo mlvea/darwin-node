@@ -48,6 +48,13 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if err != nil {
 		return nil, err
 	}
+	var cons *serialConsole
+	if r.Opts.SerialConsole {
+		cons, err = attachSerialConsole(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("serial console: %w", err)
+		}
+	}
 	ok, err := cfg.Validate()
 	if err != nil {
 		return nil, err
@@ -59,7 +66,53 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if err != nil {
 		return nil, err
 	}
-	return &machine{id: spec.ID, spec: spec, vm: vm, token: spec.AgentToken}, nil
+	return &machine{id: spec.ID, spec: spec, vm: vm, token: spec.AgentToken, console: cons}, nil
+}
+
+// serialConsole is a raw byte stream to the VM's serial port. Read returns
+// guest output; Write sends bytes into the guest console.
+type serialConsole struct {
+	r *os.File // guest → host
+	w *os.File // host → guest
+}
+
+func (s *serialConsole) Read(p []byte) (int, error)  { return s.r.Read(p) }
+func (s *serialConsole) Write(p []byte) (int, error) { return s.w.Write(p) }
+
+func (s *serialConsole) Close() error {
+	errR := s.r.Close()
+	errW := s.w.Close()
+	if errR != nil {
+		return errR
+	}
+	return errW
+}
+
+func attachSerialConsole(cfg *vz.VirtualMachineConfiguration) (*serialConsole, error) {
+	hostToGuestR, hostToGuestW, err := os.Pipe() // VZ reads R; we write W
+	if err != nil {
+		return nil, err
+	}
+	guestToHostR, guestToHostW, err := os.Pipe() // VZ writes W; we read R
+	if err != nil {
+		_ = hostToGuestR.Close()
+		_ = hostToGuestW.Close()
+		return nil, err
+	}
+	att, err := vz.NewFileHandleSerialPortAttachment(hostToGuestR, guestToHostW)
+	if err != nil {
+		_ = hostToGuestR.Close()
+		_ = hostToGuestW.Close()
+		_ = guestToHostR.Close()
+		_ = guestToHostW.Close()
+		return nil, err
+	}
+	port, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(att)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{port})
+	return &serialConsole{r: guestToHostR, w: hostToGuestW}, nil
 }
 
 type machine struct {
@@ -72,6 +125,7 @@ type machine struct {
 	finished *time.Time
 	ip       string
 	listener net.Listener
+	console  *serialConsole
 }
 
 func (m *machine) ID() types.MachineID { return m.id }
@@ -171,6 +225,15 @@ func (m *machine) Logs() io.ReadCloser {
 		_, _ = io.WriteString(w, "vz runtime: use guest agent for logs\n")
 	}()
 	return r
+}
+
+// Console returns the break-glass serial stream, independent of the in-guest
+// agent. Nil unless the runtime was constructed with SerialConsole enabled.
+func (m *machine) Console() (io.ReadWriteCloser, error) {
+	if m.console == nil {
+		return nil, fmt.Errorf("serial console not enabled (start darwin-node with --serial-console)")
+	}
+	return m.console, nil
 }
 
 func buildConfig(spec types.VMSpec, opts runtime.Options) (*vz.VirtualMachineConfiguration, error) {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 	vknode "github.com/virtual-kubelet/virtual-kubelet/node"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
+	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -59,6 +62,7 @@ func main() {
 	f.IntVar(&cfg.MaxVMs, "max-vms", cfg.MaxVMs, "max concurrent macOS VMs (1 or 2)")
 	f.IntVar(&cfg.WarmSlots, "warm-slots", cfg.WarmSlots, "pre-booted idle VMs kept in free slots (0-2); matching pods adopt them instead of cold-booting")
 	f.StringVar(&cfg.WarmImage, "warm-image", cfg.WarmImage, "image pre-booted into warm slots (default: most recently used image)")
+	f.BoolVar(&cfg.SerialConsole, "serial-console", cfg.SerialConsole, "attach a VM serial port for `darwin-node console` break-glass access")
 	f.StringVar((*string)(&cfg.NetworkMode), "network-mode", string(cfg.NetworkMode), "nat or bridged")
 	f.StringVar(&cfg.BridgeInterface, "bridge-interface", cfg.BridgeInterface, "host interface for bridged mode")
 	f.BoolVar(&cfg.AllowNATWorkloads, "allow-nat-workloads", cfg.AllowNATWorkloads, "do not taint NAT-only nodes")
@@ -74,6 +78,7 @@ func main() {
 	f.StringSliceVar(&cfg.InsecureRegistries, "insecure-registry", cfg.InsecureRegistries, "registries allowed to use plaintext HTTP (loopback is always allowed)")
 
 	cmd.AddCommand(cmdDebugDump(&cfg))
+	cmd.AddCommand(cmdConsole(&cfg))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -158,11 +163,12 @@ func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
 		return fake.New(), nil
 	default:
 		return vzrt.New(runtime.Options{
-			CacheDir:     cfg.CacheDir,
-			NetworkMode:  cfg.NetworkMode,
-			BridgeDevice: cfg.BridgeInterface,
-			Graphics:     cfg.Graphics,
-			HostAgentVer: dnconfig.Version,
+			CacheDir:      cfg.CacheDir,
+			NetworkMode:   cfg.NetworkMode,
+			BridgeDevice:  cfg.BridgeInterface,
+			Graphics:      cfg.Graphics,
+			HostAgentVer:  dnconfig.Version,
+			SerialConsole: cfg.SerialConsole,
 		}), nil
 	}
 }
@@ -213,6 +219,58 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 	}
 	<-n.Done()
 	return n.Err()
+}
+
+func cmdConsole(cfg *dnconfig.Config) *cobra.Command {
+	var ns, name string
+	c := &cobra.Command{
+		Use:   "console",
+		Short: "Attach to a pod VM's break-glass serial console (node must run with --serial-console)",
+		Long: "Bridges this terminal to the VM serial console over the node's local\n" +
+			"unix socket. Works even when the guest agent and SSH are both down.\n" +
+			"Detach with ~. (tilde-dot), like a serial console.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sock := engine.ConsoleSocketPath(name + "@" + ns)
+			conn, err := net.Dial("unix", sock)
+			if err != nil {
+				return fmt.Errorf("console socket: %w (is the pod running with --serial-console?)", err)
+			}
+			defer conn.Close()
+			fmt.Fprintf(os.Stderr, "connected to %s/%s console; detach with ~.\n", ns, name)
+			return bridgeStdio(conn)
+		},
+	}
+	c.Flags().StringVarP(&ns, "namespace", "n", "default", "pod namespace")
+	c.Flags().StringVarP(&name, "name", "p", "", "pod name")
+	_ = c.MarkFlagRequired("name")
+	return c
+}
+
+// bridgeStdio puts the local terminal into raw mode and copies both
+// directions until the remote side closes. Raw mode means ^C and other
+// control bytes reach the guest line discipline untouched.
+func bridgeStdio(conn net.Conn) error {
+	stdinFd := int(os.Stdin.Fd())
+	restore := func() {}
+	if term.IsTerminal(stdinFd) {
+		old, err := term.MakeRaw(stdinFd)
+		if err == nil {
+			restore = func() { _ = term.Restore(stdinFd, old) }
+		}
+	}
+	defer restore()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(conn, os.Stdin)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(os.Stdout, conn)
+		done <- struct{}{}
+	}()
+	<-done
+	return nil
 }
 
 func cmdDebugDump(cfg *dnconfig.Config) *cobra.Command {

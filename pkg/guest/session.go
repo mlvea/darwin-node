@@ -159,10 +159,17 @@ func (s *Session) Call(ctx context.Context, method string, payload any) (Envelop
 }
 
 // Stream sends a request and yields subsequent stream/response frames.
+// The returned id lets the caller push upstream frames (stdin, resize)
+// via WriteStream for the duration of the stream.
 func (s *Session) Stream(ctx context.Context, method string, payload any) (<-chan Envelope, error) {
+	_, ch, err := s.StreamWithID(ctx, method, payload)
+	return ch, err
+}
+
+func (s *Session) StreamWithID(ctx context.Context, method string, payload any) (string, <-chan Envelope, error) {
 	body, err := EncodePayload(payload)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	id := s.id()
 	ch := s.register(id, streamBuf)
@@ -170,7 +177,7 @@ func (s *Session) Stream(ctx context.Context, method string, payload any) (<-cha
 		V: ProtocolVersion, ID: id, Kind: KindRequest, Method: method, Payload: body,
 	}); err != nil {
 		s.unregister(id)
-		return nil, err
+		return "", nil, err
 	}
 	out := make(chan Envelope, streamBuf)
 	go func() {
@@ -199,7 +206,7 @@ func (s *Session) Stream(ctx context.Context, method string, payload any) (<-cha
 			}
 		}
 	}()
-	return out, nil
+	return id, out, nil
 }
 
 // WriteStream lets the caller push stdin (or similar) for an existing id.

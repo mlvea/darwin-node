@@ -1,7 +1,6 @@
 package guest
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -170,6 +169,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	defer wg.Wait()
 
 	inflight := newSemaphore(DefaultMaxInflight)
+	upstream := newUpstreamRouter()
 
 	setConnDeadline(rw, h.handshakeTimeout())
 
@@ -187,13 +187,19 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			}
 			return err
 		}
+		// Client→agent stream frames (stdin, tty resize) route to the
+		// goroutine serving that envelope ID. Unknown IDs are dropped.
+		if env.Kind == KindStream {
+			upstream.forward(env)
+			continue
+		}
 		if env.Kind != KindRequest {
 			continue
 		}
 
 		// Handshake stays serial so later methods cannot race the token check.
 		if env.Method == MethodHandshake || !handshook.Load() {
-			if err := h.writeDispatch(ctx, fc, &handshook, env); err != nil {
+			if err := h.writeDispatch(ctx, fc, &handshook, env, upstream); err != nil {
 				return err
 			}
 			if handshook.Load() {
@@ -210,13 +216,61 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 		go func(env Envelope) {
 			defer wg.Done()
 			defer inflight.Release()
-			_ = h.writeDispatch(ctx, fc, &handshook, env)
+			_ = h.writeDispatch(ctx, fc, &handshook, env, upstream)
 		}(env)
 	}
 }
 
-func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope) error {
-	res, stream := h.dispatch(ctx, handshook, env)
+// upstreamRouter delivers client→agent stream frames to the exec goroutine
+// that owns the envelope ID. Delivery is best-effort with a bounded buffer;
+// a slow consumer drops data rather than stalling the read loop.
+type upstreamRouter struct {
+	mu      sync.Mutex
+	streams map[string]chan Envelope
+}
+
+func newUpstreamRouter() *upstreamRouter {
+	return &upstreamRouter{streams: map[string]chan Envelope{}}
+}
+
+func (u *upstreamRouter) register(id string) <-chan Envelope {
+	ch := make(chan Envelope, 64)
+	u.mu.Lock()
+	u.streams[id] = ch
+	u.mu.Unlock()
+	return ch
+}
+
+func (u *upstreamRouter) unregister(id string) {
+	u.mu.Lock()
+	delete(u.streams, id)
+	u.mu.Unlock()
+}
+
+func (u *upstreamRouter) forward(env Envelope) {
+	u.mu.Lock()
+	ch, ok := u.streams[env.ID]
+	u.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case ch <- env:
+	default:
+		select {
+		case ch <- Envelope{ID: env.ID, Kind: KindStream, Method: env.Method, Payload: mustJSON(ExecStdin{EOF: true})}:
+		default:
+		}
+	}
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, upstream *upstreamRouter) error {
+	res, stream := h.dispatch(ctx, handshook, env, upstream)
 	if stream != nil {
 		for ev := range stream {
 			if err := fc.Write(ev); err != nil {
@@ -228,7 +282,7 @@ func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *a
 	return fc.Write(res)
 }
 
-func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Envelope) (Envelope, <-chan Envelope) {
+func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Envelope, upstream *upstreamRouter) (Envelope, <-chan Envelope) {
 	reply := func(payload any, err *CallError) Envelope {
 		out := Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: env.Method}
 		if err != nil {
@@ -357,7 +411,35 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 				b, _ := json.Marshal(LogsEvent{Line: ln})
 				ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}
 			}
-			ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodLogs}
+			if !req.Follow {
+				ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodLogs}
+				return
+			}
+			// Follow: stream appended lines until the connection ends.
+			notify, cancel := h.LogBuffer.Subscribe()
+			defer cancel()
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ln, ok := <-notify:
+					if !ok {
+						return
+					}
+					b, _ := json.Marshal(LogsEvent{Line: ln})
+					select {
+					case ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}:
+					default:
+						// Consumer too slow for follow; drop rather than block.
+					}
+				case <-ticker.C:
+					if ctx.Err() != nil {
+						return
+					}
+				}
+			}
 		}()
 		return Envelope{}, ch
 
@@ -371,10 +453,22 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			return reply(nil, &CallError{Code: ErrCodeOverloaded, Message: "too many execs"}), nil
 		}
 		ch := make(chan Envelope, 16)
+		var upstreamCh <-chan Envelope
+		interactive := req.Stdin || req.TTY
+		if interactive && upstream != nil {
+			upstreamCh = upstream.register(env.ID)
+			go func() {
+				// Keep the router entry alive until the stream channel closes.
+				for range ch {
+				}
+				upstream.unregister(env.ID)
+			}()
+		}
+		stdinR := newExecStdinReader(upstreamCh, interactive)
 		go func() {
 			defer close(ch)
 			defer release()
-			code, runErr := h.runExec(ctx, req, func(ev ExecEvent) {
+			code, runErr := h.runExec(ctx, req, stdinR, func(ev ExecEvent) {
 				b, _ := json.Marshal(ev)
 				ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodExec, Payload: b}
 			})
@@ -391,14 +485,75 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 	return reply(nil, &CallError{Code: "unknown_method", Message: env.Method}), nil
 }
 
-func (h *Handler) runExec(ctx context.Context, req ExecReq, emit func(ExecEvent)) (int, error) {
+// execStdinReader adapts upstream ExecStdin/TtyResize frames into an
+// io.Reader for the exec'd process. Resize frames are surfaced on the
+// optional resize channel and never enter the byte stream.
+type execStdinReader struct {
+	ch          <-chan Envelope
+	resize      chan<- TtyResize
+	current     []byte
+	eof         bool
+	sawUpstream bool
+}
+
+func newExecStdinReader(ch <-chan Envelope, interactive bool) *execStdinReader {
+	return &execStdinReader{ch: ch, eof: !interactive}
+}
+
+func (r *execStdinReader) pump() {
+	for env := range r.ch {
+		if ev, err := DecodePayload[TtyResize](env); err == nil && (ev.Cols > 0 || ev.Rows > 0) {
+			if r.resize != nil {
+				select {
+				case r.resize <- ev:
+				default:
+				}
+			}
+			continue
+		}
+		ev, err := DecodePayload[ExecStdin](env)
+		if err != nil {
+			continue
+		}
+		r.sawUpstream = true
+		if len(ev.Data) > 0 {
+			r.current = append(r.current, ev.Data...)
+		}
+		if ev.EOF {
+			r.eof = true
+			return
+		}
+		if len(r.current) > 0 {
+			return // yield buffered bytes before blocking again
+		}
+	}
+	// Upstream channel closed without EOF (client vanished): end stdin.
+	r.eof = true
+}
+
+func (r *execStdinReader) Read(p []byte) (int, error) {
+	if r.ch == nil {
+		return 0, io.EOF
+	}
+	for len(r.current) == 0 {
+		if r.eof {
+			return 0, io.EOF
+		}
+		r.pump()
+	}
+	n := copy(p, r.current)
+	r.current = r.current[n:]
+	return n, nil
+}
+
+func (h *Handler) runExec(ctx context.Context, req ExecReq, stdin io.Reader, emit func(ExecEvent)) (int, error) {
 	if len(req.Argv) == 0 {
 		return 1, fmt.Errorf("empty argv")
 	}
 	stdout := &streamWriter{emit: func(b []byte) { emit(ExecEvent{Stdout: append([]byte(nil), b...)}) }}
 	stderr := &streamWriter{emit: func(b []byte) { emit(ExecEvent{Stderr: append([]byte(nil), b...)}) }}
 	if h.ExecFn != nil {
-		return h.ExecFn(ctx, req, bytes.NewReader(nil), stdout, stderr)
+		return h.ExecFn(ctx, req, stdin, stdout, stderr)
 	}
 	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
 	if req.WorkingDir != "" {
@@ -411,8 +566,19 @@ func (h *Handler) runExec(ctx context.Context, req ExecReq, emit func(ExecEvent)
 		}
 		cmd.Env = env
 	}
+
+	// TTY: run the process under a real PTY so line discipline, ^C bytes,
+	// and isatty-dependent tools behave like an ssh session. stdin frames
+	// are written into the PTY master; master output emits as Stdout.
+	if req.TTY {
+		return h.runExecTTY(ctx, cmd, stdin, stdout)
+	}
+
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	err := cmd.Run()
 	if err == nil {
 		return 0, nil
@@ -441,7 +607,7 @@ func (h *Handler) runProbe(ctx context.Context, req ProbeReq) ProbeRes {
 			return ProbeRes{OK: false, Message: ErrCodeOverloaded}
 		}
 		defer release()
-		code, err := h.runExec(pctx, ExecReq{Argv: req.Argv}, func(ExecEvent) {})
+		code, err := h.runExec(pctx, ExecReq{Argv: req.Argv}, nil, func(ExecEvent) {})
 		if err != nil {
 			return ProbeRes{OK: false, Message: err.Error()}
 		}
@@ -626,6 +792,7 @@ type LogBuffer struct {
 	maxBytes int
 	nbytes   int
 	lines    [][]byte
+	subs     []chan []byte
 }
 
 func NewLogBuffer(n int) *LogBuffer {
@@ -656,6 +823,7 @@ func (b *LogBuffer) Write(p []byte) (int, error) {
 		b.lines = append(b.lines, cp)
 		b.nbytes += len(cp)
 		b.dropLocked()
+		b.notifyLocked(cp)
 	}
 	return n, nil
 }
@@ -684,4 +852,39 @@ func (b *LogBuffer) Tail(n int) [][]byte {
 	out := make([][]byte, n)
 	copy(out, b.lines[len(b.lines)-n:])
 	return out
+}
+
+// Subscribe returns a channel receiving every line appended from now on.
+// Delivery is best-effort: a subscriber that falls more than its buffer
+// behind loses lines rather than blocking writers. cancel releases the slot.
+func (b *LogBuffer) Subscribe() (<-chan []byte, func()) {
+	ch := make(chan []byte, 256)
+	b.mu.Lock()
+	b.subs = append(b.subs, ch)
+	b.mu.Unlock()
+	cancel := func() {
+		b.mu.Lock()
+		for i, c := range b.subs {
+			if c == ch {
+				b.subs = append(b.subs[:i], b.subs[i+1:]...)
+				close(ch)
+				break
+			}
+		}
+		b.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (b *LogBuffer) notifyLocked(line []byte) {
+	for i := 0; i < len(b.subs); i++ {
+		select {
+		case b.subs[i] <- line:
+		default:
+			// Subscriber too slow: drop it so follow cannot stall writes.
+			close(b.subs[i])
+			b.subs = append(b.subs[:i], b.subs[i+1:]...)
+			i--
+		}
+	}
 }

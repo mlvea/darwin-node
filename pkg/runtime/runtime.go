@@ -26,6 +26,13 @@ type Machine interface {
 	Logs() io.ReadCloser
 }
 
+// Consoler is the optional break-glass surface: a raw byte stream to the
+// VM's serial console, independent of the in-guest agent and SSH. Machines
+// may implement it; callers must type-assert.
+type Consoler interface {
+	Console() (io.ReadWriteCloser, error)
+}
+
 // Options configure a runtime backend.
 type Options struct {
 	CacheDir     string
@@ -33,4 +40,7 @@ type Options struct {
 	BridgeDevice string
 	Graphics     types.Graphics
 	HostAgentVer string
+	// SerialConsole attaches a VM serial port surfaced via Machine's
+	// Consoler interface (break-glass access independent of the agent).
+	SerialConsole bool
 }

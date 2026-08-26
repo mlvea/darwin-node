@@ -17,7 +17,7 @@ func main() {
 		Use:   "darwin-image",
 		Short: "Bake, inject, pack, and verify darwin-node macOS VM images",
 	}
-	root.AddCommand(cmdVerify(), cmdPack(), cmdInject(), cmdRestore(), cmdPull())
+	root.AddCommand(cmdVerify(), cmdPack(), cmdInject(), cmdRestore(), cmdPull(), cmdDeltaCreate(), cmdDeltaApply())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -163,3 +163,76 @@ const guestLaunchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>
 `
+
+func cmdDeltaCreate() *cobra.Command {
+	var base, target, outDir, name string
+	c := &cobra.Command{
+		Use:   "delta-create --base <image-dir> --target <image-dir> --out <delta-dir>",
+		Short: "Write a verifiable delta that turns the base image into the target",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			man, err := image.ReadDeltaManifest(outDir)
+			if err != nil {
+				man = image.DeltaManifest{}
+			}
+			ref, err := image.CreatePatch(
+				filepath.Join(base, "disk.img"),
+				filepath.Join(target, "disk.img"),
+				outDir, name)
+			if err != nil {
+				return err
+			}
+			man.Patches = append(man.Patches, ref)
+			if err := image.WriteDeltaManifest(outDir, man); err != nil {
+				return err
+			}
+			fmt.Printf("wrote %s (%s -> %s)\n", filepath.Join(outDir, ref.Name+".patch"), shortSHA(ref.BaseSHA), shortSHA(ref.DestSHA))
+			return nil
+		},
+	}
+	c.Flags().StringVar(&base, "base", "", "base image dir (must be present on every applying host)")
+	c.Flags().StringVar(&target, "target", "", "newly baked image dir")
+	c.Flags().StringVar(&outDir, "out", "", "delta output dir")
+	c.Flags().StringVar(&name, "name", "disk.img", "file inside the image dir this patch targets")
+	_ = c.MarkFlagRequired("base")
+	_ = c.MarkFlagRequired("target")
+	_ = c.MarkFlagRequired("out")
+	return c
+}
+
+func cmdDeltaApply() *cobra.Command {
+	var baseDir, deltaDir, out string
+	c := &cobra.Command{
+		Use:   "delta-apply --base <image-dir> --delta <delta-dir> --out <image-dir>",
+		Short: "Apply a delta to a verified base and produce a full image dir",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := image.ApplyDelta(baseDir, deltaDir, out); err != nil {
+				return err
+			}
+			man, err := image.ReadDeltaManifest(deltaDir)
+			if err != nil {
+				return err
+			}
+			img, err := image.LoadDir(out)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("applied %d patches -> %s (disk %s)\n", len(man.Patches), out, img.DiskPath)
+			return nil
+		},
+	}
+	c.Flags().StringVar(&baseDir, "base", "", "verified base image dir")
+	c.Flags().StringVar(&deltaDir, "delta", "", "delta dir containing delta.json")
+	c.Flags().StringVar(&out, "out", "", "destination image dir (must not exist)")
+	_ = c.MarkFlagRequired("base")
+	_ = c.MarkFlagRequired("delta")
+	_ = c.MarkFlagRequired("out")
+	return c
+}
+
+func shortSHA(sha string) string {
+	const prefix = "sha256-"
+	if len(sha) >= len(prefix)+12 {
+		return sha[len(prefix) : len(prefix)+12]
+	}
+	return sha
+}

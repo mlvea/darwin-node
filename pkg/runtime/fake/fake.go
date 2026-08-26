@@ -26,9 +26,41 @@ type Runtime struct {
 
 	starts   int32
 	matCalls int32
+
+	last atomic.Pointer[machine]
 }
 
 func (r *Runtime) MaterializeCalls() int { return int(atomic.LoadInt32(&r.matCalls)) }
+
+func (r *Runtime) Create(_ context.Context, spec types.VMSpec) (runtime.Machine, error) {
+	token := spec.AgentToken
+	if token == "" {
+		token = r.Token
+	}
+	ip := r.IP
+	if ip == "" {
+		ip = "192.168.64.2"
+	}
+	m := &machine{
+		rt:    r,
+		id:    spec.ID,
+		token: token,
+		ip:    ip,
+		mac:   spec.MAC,
+		logs:  guest.NewLogBuffer(64),
+	}
+	r.last.Store(m)
+	return m, nil
+}
+
+// ConsoleGuestEnd returns the simulated guest side of the most recently
+// created machine's serial console pipe. Test support.
+func (r *Runtime) ConsoleGuestEnd() io.ReadWriteCloser {
+	if m := r.last.Load(); m != nil {
+		return m.ConsoleGuestEnd()
+	}
+	return nil
+}
 
 // defaultMetrics is the fake guest agent's known usage. Tests override MetricsFn.
 func defaultMetrics() (guest.MetricsRes, error) {
@@ -43,25 +75,6 @@ func New() *Runtime {
 
 func (r *Runtime) Name() types.RuntimeName { return types.RuntimeFake }
 
-func (r *Runtime) Create(_ context.Context, spec types.VMSpec) (runtime.Machine, error) {
-	token := spec.AgentToken
-	if token == "" {
-		token = r.Token
-	}
-	ip := r.IP
-	if ip == "" {
-		ip = "192.168.64.2"
-	}
-	return &machine{
-		rt:    r,
-		id:    spec.ID,
-		token: token,
-		ip:    ip,
-		mac:   spec.MAC,
-		logs:  guest.NewLogBuffer(64),
-	}, nil
-}
-
 type machine struct {
 	rt    *Runtime
 	id    types.MachineID
@@ -69,6 +82,10 @@ type machine struct {
 	ip    string
 	mac   string
 	logs  *guest.LogBuffer
+
+	consoleOnce  sync.Once
+	consoleHost  io.ReadWriteCloser
+	consoleGuest io.ReadWriteCloser
 
 	mu        sync.Mutex
 	state     types.VMState
@@ -78,6 +95,21 @@ type machine struct {
 	srvCancel context.CancelFunc
 	client    *guest.Client
 	peer      net.Conn
+}
+
+// Console exposes a break-glass serial stream. The guest side is available
+// to tests via ConsoleGuestEnd; in production the guest writes to its own end.
+func (m *machine) Console() (io.ReadWriteCloser, error) {
+	m.consoleOnce.Do(func() {
+		m.consoleHost, m.consoleGuest = net.Pipe()
+	})
+	return m.consoleHost, nil
+}
+
+// ConsoleGuestEnd returns the simulated guest side of the console pipe.
+func (m *machine) ConsoleGuestEnd() io.ReadWriteCloser {
+	_, _ = m.Console()
+	return m.consoleGuest
 }
 
 func (m *machine) ID() types.MachineID { return m.id }

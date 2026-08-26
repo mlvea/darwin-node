@@ -53,6 +53,19 @@ type ExecEvent struct {
 	ExitCode int    `json:"exitCode,omitempty"`
 }
 
+// ExecStdin is a client→agent stream frame carrying exec stdin. Sent on the
+// same envelope ID as the Exec request until EOF.
+type ExecStdin struct {
+	Data []byte `json:"data,omitempty"`
+	EOF  bool   `json:"eof,omitempty"`
+}
+
+// TtyResize is a client→agent stream frame resizing the exec PTY.
+type TtyResize struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
 // LogsReq follows guest logs.
 type LogsReq struct {
 	Follow     bool      `json:"follow"`

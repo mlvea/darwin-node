@@ -73,6 +73,10 @@ type Config struct {
 
 	// AgentTCPFallback enables plaintext TCP to the guest agent (opt-in; vsock is primary).
 	AgentTCPFallback bool
+
+	// SerialConsole attaches a VM serial port for break-glass access via
+	// `darwin-node console`. Opt-in; independent of the guest agent.
+	SerialConsole bool
 }
 
 // Default returns production defaults.
@@ -203,6 +207,9 @@ func (c *Config) ApplyEnv() error {
 	}
 	if v := os.Getenv("DARWIN_NODE_WARM_IMAGE"); v != "" {
 		c.WarmImage = v
+	}
+	if v := os.Getenv("DARWIN_NODE_SERIAL_CONSOLE"); v != "" {
+		c.SerialConsole = v == "true" || v == "1"
 	}
 	return c.Validate()
 }

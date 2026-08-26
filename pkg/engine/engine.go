@@ -4,6 +4,7 @@ package engine
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -87,8 +88,9 @@ type podRecord struct {
 	restartCount    int32
 	initialized     bool
 	sidecarStatuses []sidecar.Status
-	warmDir         string     // set when the VM was adopted from the warm pool
-	adopt           *warmEntry // claimed under capacity pressure, adopted in start()
+	warmDir         string       // set when the VM was adopted from the warm pool
+	adopt           *warmEntry   // claimed under capacity pressure, adopted in start()
+	consoleLn       net.Listener // per-VM unix socket for break-glass console
 }
 
 // New constructs an engine.
@@ -312,6 +314,7 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 		e.fail(rec, err)
 		return
 	}
+	e.serveConsole(rec)
 	e.noteImageRef(pod.Spec.Containers[0].Image)
 	e.runConnected(ctx, rec, pod, creds, machine, token, places)
 }
@@ -333,7 +336,75 @@ func (e *Engine) startAdopted(ctx context.Context, rec *podRecord, pod *corev1.P
 			return
 		}
 	}
+	e.serveConsole(rec)
 	e.runConnected(ctx, rec, pod, creds, entry.machine, entry.token, nil)
+}
+
+// serveConsole exposes the pod's serial console on a host-local unix socket:
+// <cache-dir>/pods/<uid>/console.sock. `darwin-node console` dials it. The
+// socket exists only when --serial-console is enabled and the runtime
+// supports it; everything here is best-effort.
+func (e *Engine) serveConsole(rec *podRecord) {
+	if !e.cfg.SerialConsole {
+		return
+	}
+	rec.mu.Lock()
+	machine := rec.machine
+	pod := rec.pod
+	rec.mu.Unlock()
+	if machine == nil || pod == nil {
+		return
+	}
+	cons, ok := machine.(runtime.Consoler)
+	if !ok {
+		return
+	}
+	consoleConn, err := cons.Console()
+	if err != nil {
+		e.events.Warn(context.Background(), event.ReasonFailed, "console: "+err.Error())
+		return
+	}
+	sockPath := ConsoleSocketPath(pod.Namespace + "@" + pod.Name)
+	_ = os.Remove(sockPath)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		e.events.Warn(context.Background(), event.ReasonFailed, "console socket: "+err.Error())
+		return
+	}
+	rec.mu.Lock()
+	rec.consoleLn = ln
+	rec.mu.Unlock()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go bridgeConsole(consoleConn, c)
+		}
+	}()
+}
+
+// ConsoleSocketPath is where a pod VM's break-glass console is served.
+// Deterministic per pod UID so the CLI resolves it without talking to the
+// node. Lives in TempDir because unix socket paths are limited to 104 bytes
+// on macOS and cache dirs nest deeply.
+func ConsoleSocketPath(uid string) string {
+	sum := sha256.Sum256([]byte(uid))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("darwin-console-%x.sock", sum[:8]))
+}
+
+// bridgeConsole copies between the serial stream and one attached client
+// until either side closes. Concurrent attachments share the console bytes.
+func bridgeConsole(consoleConn io.ReadWriteCloser, client net.Conn) {
+	defer client.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(client, consoleConn)
+	}()
+	_, _ = io.Copy(consoleConn, client)
+	<-done
 }
 
 // runConnected dials the running machine's agent and drives everything from
@@ -465,6 +536,8 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 	warmDir := rec.warmDir
 	rec.agent = nil
 	rec.ready = false
+	consoleLn := rec.consoleLn
+	rec.consoleLn = nil
 	uid := ""
 	ns, name := "", ""
 	if pod != nil {
@@ -475,6 +548,9 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 
 	key := Key(ns, name)
 	e.hostports.Release(key)
+	if consoleLn != nil {
+		_ = consoleLn.Close()
+	}
 	if runHooks && agent != nil && grace > 0 && pod != nil && len(pod.Spec.Containers) > 0 {
 		sctx, cancel := context.WithTimeout(ctx, time.Duration(grace)*time.Second)
 		if lc := pod.Spec.Containers[0].Lifecycle; lc != nil && lc.PreStop != nil && lc.PreStop.Exec != nil {
@@ -679,7 +755,26 @@ func (e *Engine) ExecInVM(ctx context.Context, namespace, name string, cmd []str
 		return nil
 	}
 	req := guest.ExecReq{Argv: cmd, TTY: attach != nil && attach.TTY()}
-	if attach != nil && (attach.Stdout() != nil || attach.Stderr() != nil) {
+	var stdin io.Reader
+	var resize chan guest.TtyResize
+	if attach != nil && attach.Stdin() != nil {
+		stdin = attach.Stdin()
+	}
+	if attach != nil {
+		if rc := attach.Resize(); rc != nil {
+			resize = make(chan guest.TtyResize, 4)
+			go func() {
+				for sz := range rc {
+					select {
+					case resize <- guest.TtyResize{Cols: int(sz.Width), Rows: int(sz.Height)}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
+	}
+	if stdin != nil || resize != nil || (attach != nil && (attach.Stdout() != nil || attach.Stderr() != nil)) {
 		var stdout, stderr io.Writer
 		if attach.Stdout() != nil {
 			stdout = attach.Stdout()
@@ -687,7 +782,7 @@ func (e *Engine) ExecInVM(ctx context.Context, namespace, name string, cmd []str
 		if attach.Stderr() != nil {
 			stderr = attach.Stderr()
 		}
-		code, err := cli.ExecStream(ctx, req, stdout, stderr)
+		code, err := cli.ExecInteractive(ctx, req, stdin, resize, stdout, stderr)
 		if err != nil {
 			return err
 		}
@@ -719,7 +814,22 @@ func (e *Engine) LogsVM(ctx context.Context, namespace, name string, opts api.Co
 	machine := rec.machine
 	rec.mu.Unlock()
 	if cli != nil {
-		lines, err := cli.Logs(ctx, guest.LogsReq{TailLines: opts.Tail, Follow: opts.Follow})
+		if opts.Follow {
+			// True follow: stream lines into the pipe as the guest appends them.
+			r, w := io.Pipe()
+			go func() {
+				fctx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				ferr := cli.LogsFollow(fctx, guest.LogsReq{TailLines: opts.Tail, Follow: true}, w)
+				if ferr != nil && ferr != context.Canceled && ctx.Err() == nil {
+					_ = w.CloseWithError(ferr)
+					return
+				}
+				_ = w.Close()
+			}()
+			return r, nil
+		}
+		lines, err := cli.Logs(ctx, guest.LogsReq{TailLines: opts.Tail})
 		if err != nil {
 			return nil, err
 		}
@@ -748,6 +858,29 @@ func (e *Engine) SidecarLogs(ctx context.Context, ns, name, container string, op
 
 func (e *Engine) ExecInSidecar(ctx context.Context, ns, name, container string, cmd []string, attach api.AttachIO) error {
 	return e.sidecar.Exec(ctx, ns, name, container, cmd, attach)
+}
+
+// Console attaches to the pod VM's break-glass serial console. Requires a
+// runtime whose machines implement runtime.Consoler (vz with
+// --serial-console; the fake runtime in tests).
+func (e *Engine) Console(namespace, name string) (io.ReadWriteCloser, error) {
+	e.mu.RLock()
+	rec, ok := e.pods[Key(namespace, name)]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, errdefs.NotFound("pod not found")
+	}
+	rec.mu.Lock()
+	machine := rec.machine
+	rec.mu.Unlock()
+	if machine == nil {
+		return nil, fmt.Errorf("VM not started")
+	}
+	cons, ok := machine.(runtime.Consoler)
+	if !ok {
+		return nil, fmt.Errorf("runtime %s does not support serial consoles", e.rt.Name())
+	}
+	return cons.Console()
 }
 
 func (e *Engine) dialFallback(ctx context.Context, token string, machine runtime.Machine) (*guest.Client, error) {

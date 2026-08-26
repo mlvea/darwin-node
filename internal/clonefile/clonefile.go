@@ -24,6 +24,46 @@ func File(src, dst string) error {
 	return copyFile(src, dst)
 }
 
+// Dir recursively copies the src tree to dst, clonefile'ing every file
+// (CoW on APFS). dst must not exist.
+func Dir(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", src)
+	}
+	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return filepath.Walk(src, func(path string, fi os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		switch {
+		case fi.IsDir():
+			if rel == "." {
+				return nil
+			}
+			return os.Mkdir(target, fi.Mode().Perm())
+		case fi.Mode()&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		default:
+			return File(path, target)
+		}
+	})
+}
+
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

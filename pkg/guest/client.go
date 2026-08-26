@@ -128,9 +128,26 @@ func (c *Client) Exec(ctx context.Context, req ExecReq) (stdout, stderr []byte, 
 // ExecStream writes exec stdout/stderr through without buffering the whole
 // payload on the host.
 func (c *Client) ExecStream(ctx context.Context, req ExecReq, stdout, stderr io.Writer) (exit int, err error) {
-	ch, err := c.sess.Stream(ctx, MethodExec, req)
+	return c.ExecInteractive(ctx, req, nil, nil, stdout, stderr)
+}
+
+// ExecInteractive runs argv with full duplex streaming: stdin bytes are
+// forwarded to the guest as they arrive (enabling kubectl exec -it when
+// req.TTY is set), resize events reflow the guest PTY, and stdout/stderr
+// stream back until exit.
+func (c *Client) ExecInteractive(ctx context.Context, req ExecReq, stdin io.Reader, resize <-chan TtyResize, stdout, stderr io.Writer) (exit int, err error) {
+	if stdin != nil {
+		req.Stdin = true
+	}
+	id, ch, err := c.sess.StreamWithID(ctx, MethodExec, req)
 	if err != nil {
 		return -1, err
+	}
+	if stdin != nil {
+		go c.pumpStdin(ctx, id, stdin)
+	}
+	if resize != nil {
+		go c.pumpResize(ctx, id, resize)
 	}
 	for env := range ch {
 		if env.Kind == KindError && env.Error != nil {
@@ -157,6 +174,49 @@ func (c *Client) ExecStream(ctx context.Context, req ExecReq, stdout, stderr io.
 	return exit, nil
 }
 
+// pumpStdin forwards a host reader into the running exec as upstream
+// stream frames, terminating with an EOF marker.
+func (c *Client) pumpStdin(ctx context.Context, id string, stdin io.Reader) {
+	defer func() {
+		if ctx.Err() == nil {
+			_ = c.sess.WriteStream(id, ExecStdin{EOF: true})
+		}
+	}()
+	buf := make([]byte, 32<<10)
+	for {
+		n, rerr := stdin.Read(buf)
+		if n > 0 {
+			data := append([]byte(nil), buf[:n]...)
+			if err := c.sess.WriteStream(id, ExecStdin{Data: data}); err != nil {
+				return
+			}
+		}
+		if rerr != nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// pumpResize forwards terminal size changes as upstream stream frames.
+func (c *Client) pumpResize(ctx context.Context, id string, resize <-chan TtyResize) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-resize:
+			if !ok {
+				return
+			}
+			if err := c.sess.WriteStream(id, ev); err != nil {
+				return
+			}
+		}
+	}
+}
+
 type cappedWriter struct {
 	buf   []byte
 	limit int
@@ -178,7 +238,7 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 }
 
 // Logs returns buffered lines (follow is best-effort in this MVP: one snapshot
-// plus response). The engine can poll.
+// plus response). The engine can poll. For true follow, use LogsFollow.
 func (c *Client) Logs(ctx context.Context, req LogsReq) ([][]byte, error) {
 	ch, err := c.sess.Stream(ctx, MethodLogs, req)
 	if err != nil {
@@ -201,6 +261,39 @@ func (c *Client) Logs(ctx context.Context, req LogsReq) ([][]byte, error) {
 		}
 	}
 	return lines, nil
+}
+
+// LogsFollow streams log lines into w: tail snapshot first, then every
+// appended line until ctx is done or the agent closes the stream.
+func (c *Client) LogsFollow(ctx context.Context, req LogsReq, w io.Writer) error {
+	if !req.Follow {
+		req.Follow = true
+	}
+	ch, err := c.sess.Stream(ctx, MethodLogs, req)
+	if err != nil {
+		return err
+	}
+	for env := range ch {
+		if env.Kind == KindError && env.Error != nil {
+			return env.Error
+		}
+		if env.Kind == KindResponse {
+			return nil
+		}
+		ev, err := Decode[LogsEvent](env)
+		if err != nil || len(ev.Line) == 0 {
+			continue
+		}
+		if _, err := w.Write(ev.Line); err != nil {
+			return err
+		}
+		if ev.Line[len(ev.Line)-1] != '\n' {
+			if _, err := w.Write([]byte("\n")); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Client) Close() error {
