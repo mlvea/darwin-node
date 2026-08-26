@@ -30,6 +30,15 @@ const (
 const (
 	AnnotUncompressedDigest = "dev.darwin-node.content.uncompressed-digest"
 	AnnotUncompressedSize   = "dev.darwin-node.content.uncompressed-size"
+
+	// Delta-layer annotations. A delta artifact carries its disk patch as a
+	// MediaTypeDiskDelta layer whose descriptor is annotated with:
+	//   - where the base image lives (base-ref)
+	//   - which base disk content it patches (base-disk-sha256, hex)
+	//   - what the patched disk must hash to (uncompressed-digest/size,
+	//     the same annotations a full disk layer carries)
+	AnnotDeltaBaseRef    = "dev.darwin-node.delta.base-ref"
+	AnnotDeltaBaseDigest = "dev.darwin-node.delta.base-disk-sha256"
 )
 
 // GuestAgentInfo is recorded in the image config when the agent is baked in.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/darwin-node/darwin-node/pkg/capacity"
@@ -63,6 +64,7 @@ func main() {
 	f.IntVar(&cfg.WarmSlots, "warm-slots", cfg.WarmSlots, "pre-booted idle VMs kept in free slots (0-2); matching pods adopt them instead of cold-booting")
 	f.StringVar(&cfg.WarmImage, "warm-image", cfg.WarmImage, "image pre-booted into warm slots (default: most recently used image)")
 	f.BoolVar(&cfg.SerialConsole, "serial-console", cfg.SerialConsole, "attach a VM serial port for `darwin-node console` break-glass access")
+	f.DurationVar(&cfg.ShutdownGrace, "shutdown-grace-period", cfg.ShutdownGrace, "total budget for graceful pod drain on SIGTERM/SIGINT")
 	f.StringVar((*string)(&cfg.NetworkMode), "network-mode", string(cfg.NetworkMode), "nat or bridged")
 	f.StringVar(&cfg.BridgeInterface, "bridge-interface", cfg.BridgeInterface, "host interface for bridged mode")
 	f.BoolVar(&cfg.AllowNATWorkloads, "allow-nat-workloads", cfg.AllowNATWorkloads, "do not taint NAT-only nodes")
@@ -80,8 +82,16 @@ func main() {
 	cmd.AddCommand(cmdDebugDump(&cfg))
 	cmd.AddCommand(cmdConsole(&cfg))
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// Second signal means "leave now": skip the drain, exit immediately.
+	go func() {
+		<-ctx.Done()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		os.Exit(130)
+	}()
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -147,6 +157,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 		debugDir := filepath.Join(cfg.CacheDir, "debug")
 		_ = debug.Capture(cfg, inv, eng).Write(filepath.Join(debugDir, "debug-snapshot.json"))
 		<-ctx.Done()
+		shutdownDrain(cfg, eng)
 		return nil
 	}
 
@@ -154,7 +165,28 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 	if err != nil {
 		return fmt.Errorf("kube client: %w (set KUBECONFIG or pass --standalone)", err)
 	}
-	return runVK(ctx, cfg, k8s, p)
+	if err := runVK(ctx, cfg, k8s, p); err != nil {
+		shutdownDrain(cfg, eng)
+		return err
+	}
+	shutdownDrain(cfg, eng)
+	return nil
+}
+
+// shutdownDrain gives running pods their termination grace periods before
+// the process exits: preStop hooks, guest shutdown RPCs, and cache
+// snapshots all run through the normal delete path.
+func shutdownDrain(cfg dnconfig.Config, eng *engine.Engine) {
+	budget := cfg.ShutdownGrace
+	if budget <= 0 {
+		return // explicit zero disables draining
+	}
+	dctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	if err := eng.Drain(dctx); err != nil {
+		slog.Warn("drain incomplete", "error", err)
+	}
+	eng.Close()
 }
 
 func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {

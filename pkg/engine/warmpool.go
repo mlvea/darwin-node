@@ -145,6 +145,9 @@ func (e *Engine) noteImageRef(ref string) {
 
 // fillWarm tops the pool up while free slots and the configured budget allow.
 func (e *Engine) fillWarm(ctx context.Context) {
+	if e.draining.Load() {
+		return // freed slots during a drain belong to departing pods, not the pool
+	}
 	ref := e.warmImageRef()
 	if ref == "" {
 		return

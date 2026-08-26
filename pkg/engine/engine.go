@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +65,7 @@ type Engine struct {
 	warmCtx    context.Context
 	warmBootWG sync.WaitGroup
 	lastImage  atomic.Value // string: most recently booted image ref
+	draining   atomic.Bool
 
 	mu   sync.RWMutex
 	pods map[string]*podRecord
@@ -141,6 +143,11 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 	if _, exists := e.pods[key]; exists {
 		e.mu.Unlock()
 		return nil
+	}
+	if e.draining.Load() {
+		e.mu.Unlock()
+		e.events.Warn(ctx, event.ReasonDraining, "pod create rejected: node is draining")
+		return fmt.Errorf("node is draining; pod will be scheduled elsewhere")
 	}
 	var adopt *warmEntry
 	acqErr := e.slots.TryAcquire(uid)
@@ -579,6 +586,66 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 		e.slots.Release(uid)
 	}
 }
+
+// Draining reports whether Drain has started. New creates are rejected
+// while draining.
+func (e *Engine) Draining() bool { return e.draining.Load() }
+
+type drainVictim struct {
+	ns, name string
+	grace    int64
+}
+
+// Drain stops every pod gracefully, honoring each pod's termination grace
+// period until the context budget is exhausted. Pods that do not finish
+// within the budget are left running; a subsequent drain (or process exit)
+// handles them. Cache snapshots run as part of the normal delete path, so
+// host reboots and OS updates no longer lose cache state.
+func (e *Engine) Drain(ctx context.Context) error {
+	e.draining.Store(true)
+	e.mu.RLock()
+	victims := make([]drainVictim, 0, len(e.pods))
+	for _, rec := range e.pods {
+		rec.mu.Lock()
+		grace := int64(defaultGracePeriod / time.Second)
+		if rec.pod != nil && rec.pod.Spec.TerminationGracePeriodSeconds != nil {
+			grace = *rec.pod.Spec.TerminationGracePeriodSeconds
+		}
+		if grace < 0 {
+			grace = 0
+		}
+		victims = append(victims, drainVictim{
+			ns:    rec.pod.Namespace,
+			name:  rec.pod.Name,
+			grace: grace,
+		})
+		rec.mu.Unlock()
+	}
+	e.mu.RUnlock()
+	sort.Slice(victims, func(i, j int) bool {
+		if victims[i].ns != victims[j].ns {
+			return victims[i].ns < victims[j].ns
+		}
+		return victims[i].name < victims[j].name
+	})
+
+	e.events.Normal(ctx, event.ReasonDraining,
+		fmt.Sprintf("draining %d pods", len(victims)))
+	var firstErr error
+	for i, v := range victims {
+		if err := ctx.Err(); err != nil {
+			e.events.Warn(ctx, event.ReasonDraining,
+				fmt.Sprintf("drain budget exhausted; %d pods remain", len(victims)-i))
+			return firstErr
+		}
+		if err := e.Delete(ctx, v.ns, v.name, v.grace); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+const defaultGracePeriod = 30 * time.Second
 
 // Delete stops the VM and releases the slot.
 func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64) error {

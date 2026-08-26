@@ -77,6 +77,10 @@ type Config struct {
 	// SerialConsole attaches a VM serial port for break-glass access via
 	// `darwin-node console`. Opt-in; independent of the guest agent.
 	SerialConsole bool
+
+	// ShutdownGrace bounds the total drain budget on SIGTERM/SIGINT: pods
+	// are deleted with their termination grace periods until it runs out.
+	ShutdownGrace time.Duration
 }
 
 // Default returns production defaults.
@@ -103,6 +107,7 @@ func Default() Config {
 		IPTimeout:         60 * time.Second,
 		ProbeInterval:     10 * time.Second,
 		InitTimeout:       2 * time.Minute,
+		ShutdownGrace:     60 * time.Second,
 	}
 }
 
@@ -211,6 +216,13 @@ func (c *Config) ApplyEnv() error {
 	if v := os.Getenv("DARWIN_NODE_SERIAL_CONSOLE"); v != "" {
 		c.SerialConsole = v == "true" || v == "1"
 	}
+	if v := os.Getenv("DARWIN_NODE_SHUTDOWN_GRACE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_SHUTDOWN_GRACE: %w", err)
+		}
+		c.ShutdownGrace = d
+	}
 	return c.Validate()
 }
 
@@ -245,6 +257,9 @@ func (c Config) Validate() error {
 	}
 	if c.WarmSlots < 0 || c.WarmSlots > types.AppleMaxConcurrentVMs {
 		return fmt.Errorf("warm slots must be between 0 and %d (Apple EULA), got %d", types.AppleMaxConcurrentVMs, c.WarmSlots)
+	}
+	if c.ShutdownGrace < 0 {
+		return fmt.Errorf("shutdown grace must not be negative, got %s", c.ShutdownGrace)
 	}
 	switch c.Runtime {
 	case types.RuntimeVZ, types.RuntimeFake, "":

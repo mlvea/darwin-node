@@ -62,4 +62,5 @@ const (
 	ReasonWarmEvicted         = "WarmVMEvicted"
 	ReasonCacheRestored       = "CacheRestored"
 	ReasonCacheSaved          = "CacheSnapshotSaved"
+	ReasonDraining            = "NodeDraining"
 )

@@ -70,6 +70,8 @@ infrastructure.
 **Delta images.** Monthly Xcode bumps become megabyte-scale patches:
 4 MiB chunk diffs against a pinned base, applied copy-on-write and
 verified end to end against the SHA-256 of the whole target disk.
+Registry artifacts carry the patch natively, so fleet hosts pull the
+base once and every later bump costs only the delta.
 
 ## Lineage
 
@@ -198,7 +200,8 @@ Kubernetes API
 | Interactive `kubectl exec -it` (stdin, PTY, resize) | Yes (vsock) |
 | True `logs -f` follow | Yes |
 | Break-glass serial console | Yes (opt-in flag) |
-| Delta image updates | Yes (digest-verified apply) |
+| Delta image updates | Yes (digest-verified apply; pulls too) |
+| Graceful drain on SIGTERM/SIGINT | Yes (`--shutdown-grace-period`) |
 | Hybrid sidecars (mounts + resource requests) | Yes |
 | Host-side init containers | Yes |
 | In-guest probes (exec / httpGet / tcpSocket) | Yes |

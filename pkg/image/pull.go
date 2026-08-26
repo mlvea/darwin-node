@@ -69,7 +69,7 @@ func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ign
 	m.inflight[ref] = w
 	m.mu.Unlock()
 
-	img, err := pullOnce(ctx, m.CacheDir, ref, creds, m.InsecureRegistries)
+	img, err := m.pullOnce(ctx, ref, creds)
 	w.img, w.err = img, err
 	close(w.done)
 
@@ -79,7 +79,7 @@ func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ign
 	return img, err
 }
 
-func pullOnce(ctx context.Context, cacheDir, ref string, creds RegistryCreds, insecure []string) (LocalImage, error) {
+func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds) (LocalImage, error) {
 	repo, err := remote.NewRepository(ref)
 	if err != nil {
 		return LocalImage{}, fmt.Errorf("parse image ref %q: %w", ref, err)
@@ -92,10 +92,10 @@ func pullOnce(ctx context.Context, cacheDir, ref string, creds RegistryCreds, in
 			RefreshToken: creds.IdentityToken,
 		}),
 	}
-	if isPlainHTTP(repo.Reference.Registry, insecure) {
+	if isPlainHTTP(repo.Reference.Registry, m.InsecureRegistries) {
 		repo.PlainHTTP = true
 	}
-	destDir := CacheDir(cacheDir, ref)
+	destDir := CacheDir(m.CacheDir, ref)
 	if err := os.MkdirAll(destDir, cacheDirPerm); err != nil {
 		return LocalImage{}, err
 	}
@@ -127,6 +127,15 @@ func pullOnce(ctx context.Context, cacheDir, ref string, creds RegistryCreds, in
 	copied = append(copied, desc)
 	nodes := copied
 	copiedMu.Unlock()
+
+	deltaInfo, found, derr := findDeltaLayer(nodes)
+	if derr != nil {
+		_ = os.RemoveAll(destDir)
+		return LocalImage{}, fmt.Errorf("pull %s: %w", ref, derr)
+	}
+	if deltaInfo != nil && found {
+		return m.pullDeltaArtifact(ctx, destDir, deltaInfo, creds)
+	}
 
 	prov := provenanceFromDescriptors(nodes)
 	if err := materializePulled(destDir); err != nil {

@@ -76,6 +76,23 @@ sudo launchctl load /Library/LaunchDaemons/io.darwin-node.node.plist
 
 The guest-side plist is installed *inside images* by `darwin-image inject-agent`.
 
+## Shutdown behavior
+
+SIGTERM and SIGINT trigger a graceful drain before the process exits:
+
+1. New pod creates are rejected immediately (the scheduler routes work
+   elsewhere).
+2. Every running pod is deleted through the normal path: preStop hooks,
+   the guest shutdown RPC, and cache-volume snapshots all run.
+3. Each pod gets its `terminationGracePeriodSeconds`; the total budget is
+   `--shutdown-grace-period` (default 60s). Pods that do not finish within
+   the budget are left for the next start's crash recovery.
+4. The warm pool is paused during drain; freed slots go to departing pods,
+   not new warm boots.
+
+A second signal skips the drain and exits immediately (exit code 130).
+Setting `--shutdown-grace-period=0` disables draining entirely.
+
 ## Configuration
 
 Precedence: flags > environment > config file > defaults.
@@ -92,6 +109,8 @@ Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
 | `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | Host keep-away |
 | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Images + overlays |
 | `DARWIN_NODE_GRAPHICS` | `1920x1200@80` | `none` disables Metal |
+| `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM |
+| `DARWIN_NODE_SERIAL_CONSOLE` | `false` | Attach break-glass serial ports |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables traces |
 
 Kubernetes connection (same as Virtual Kubelet):
