@@ -183,6 +183,13 @@ func (s *Session) StreamWithID(ctx context.Context, method string, payload any) 
 	go func() {
 		defer close(out)
 		defer s.unregister(id)
+		defer func() {
+			// Tell the agent to stop producing for this ID. Harmless if the
+			// request already completed or the connection is gone.
+			_ = s.conn.Write(Envelope{
+				V: ProtocolVersion, ID: id, Kind: KindCancel, Method: method,
+			})
+		}()
 		for {
 			select {
 			case <-ctx.Done():

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/darwin-node/darwin-node/internal/leakcheck"
 	"github.com/darwin-node/darwin-node/pkg/capacity"
 	"github.com/darwin-node/darwin-node/pkg/config"
 	"github.com/darwin-node/darwin-node/pkg/event"
@@ -42,6 +43,7 @@ func (c *captureRecorder) has(reason string) bool {
 
 func warmEngine(t *testing.T, slots int, warmSlots int, img string) (*Engine, *fake.Runtime, *captureRecorder) {
 	t.Helper()
+	leakcheck.Check(t)
 	slotTable, err := capacity.New(slots)
 	if err != nil {
 		t.Fatal(err)

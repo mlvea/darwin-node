@@ -526,8 +526,18 @@ func (e *Engine) fail(rec *podRecord, err error) {
 	rec.message = err.Error()
 	rec.failedErr = err
 	rec.ready = false
+	uid := ""
+	if rec.pod != nil {
+		uid = string(rec.pod.UID)
+	}
 	rec.mu.Unlock()
 	e.teardown(context.Background(), rec, 0, false)
+	// A failed pod's overlay can be multiple gigabytes; nothing will ever
+	// restart it, so reclaim the directory now instead of waiting for the
+	// 24h recovery sweep.
+	if uid != "" && !e.slots.Holds(uid) {
+		_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
+	}
 	e.events.Warn(context.Background(), event.ReasonFailed, err.Error())
 }
 

@@ -167,25 +167,26 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	var handshook atomic.Bool
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	defer func() { _ = rw.Close() }()
 
 	inflight := newSemaphore(DefaultMaxInflight)
 	conn := &connState{upstream: newUpstreamRouter()}
 
 	setConnDeadline(rw, h.handshakeTimeout())
 
+	// Idle watchdog instead of per-read deadlines: arming a deadline before
+	// every read raced stream accounting (an open shell is silent by
+	// design). The connection closes only when no frame has arrived for the
+	// idle window AND no interactive stream is running.
+	var lastRead atomic.Int64
+	lastRead.Store(time.Now().UnixNano())
+	wdone := make(chan struct{})
+	defer close(wdone)
+	go h.idleWatchdog(ctx, rw, conn, &lastRead, wdone)
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		// An interactive exec may legitimately stay silent longer than the
-		// idle timeout (an open shell produces no frames until output).
-		// Suppress the deadline while any is running.
-		if handshook.Load() {
-			if conn.liveInteractive.Load() > 0 {
-				setReadDeadline(rw, 0)
-			} else {
-				setReadDeadline(rw, h.idleTimeout())
-			}
 		}
 		env, err := fc.Read()
 		if err != nil {
@@ -200,13 +201,18 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			conn.upstream.forward(env)
 			continue
 		}
+		// One-way cancellation for long-running streams (follows, execs).
+		if env.Kind == KindCancel {
+			conn.cancelByID(env.ID)
+			continue
+		}
 		if env.Kind != KindRequest {
 			continue
 		}
 
 		// Handshake stays serial so later methods cannot race the token check.
 		if env.Method == MethodHandshake || !handshook.Load() {
-			if err := h.writeDispatch(ctx, fc, &handshook, env, conn); err != nil {
+			if err := h.writeDispatch(ctx, fc, &handshook, env, conn, false); err != nil {
 				return err
 			}
 			if handshook.Load() {
@@ -219,12 +225,23 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			_ = fc.Write(overloadedEnvelope(env, "too many in-flight requests"))
 			continue
 		}
+		// Increment BEFORE spawning so the deadline check at the top of this
+		// loop can never observe stale zero during scheduling delay.
+		interactiveReq := false
+		if env.Method == MethodExec {
+			if req, derr := DecodePayload[ExecReq](env); derr == nil {
+				interactiveReq = req.Stdin || req.TTY
+			}
+		}
+		if interactiveReq {
+			conn.liveInteractive.Add(1)
+		}
 		wg.Add(1)
-		go func(env Envelope) {
+		go func(env Envelope, interactive bool) {
 			defer wg.Done()
 			defer inflight.Release()
-			_ = h.writeDispatch(ctx, fc, &handshook, env, conn)
-		}(env)
+			_ = h.writeDispatch(ctx, fc, &handshook, env, conn, interactive)
+		}(env, interactiveReq)
 	}
 }
 
@@ -236,10 +253,61 @@ type upstreamRouter struct {
 	streams map[string]chan Envelope
 }
 
+// idleWatchdog closes rw when the connection has seen no frames for the
+// idle window while no interactive stream is running. It returns when ctx
+// or done fires.
+func (h *Handler) idleWatchdog(ctx context.Context, rw io.ReadWriteCloser, conn *connState, lastRead *atomic.Int64, done <-chan struct{}) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			if conn.liveInteractive.Load() > 0 {
+				continue
+			}
+			idle := h.idleTimeout()
+			if idle <= 0 {
+				continue
+			}
+			if time.Since(time.Unix(0, lastRead.Load())) > idle {
+				_ = rw.Close()
+				return
+			}
+		}
+	}
+}
+
 // connState carries per-connection state into dispatch goroutines.
 type connState struct {
 	upstream        *upstreamRouter
 	liveInteractive atomic.Int32
+
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
+}
+
+func (c *connState) registerCancel(id string, cancel context.CancelFunc) {
+	c.mu.Lock()
+	if c.cancels == nil {
+		c.cancels = map[string]context.CancelFunc{}
+	}
+	c.cancels[id] = cancel
+	c.mu.Unlock()
+}
+
+func (c *connState) cancelByID(id string) {
+
+	c.mu.Lock()
+	cancel, ok := c.cancels[id]
+	delete(c.cancels, id)
+	c.mu.Unlock()
+	if ok {
+		cancel()
+	}
 }
 
 func newUpstreamRouter() *upstreamRouter {
@@ -282,8 +350,16 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, conn *connState) error {
-	res, stream := h.dispatch(ctx, handshook, env, conn)
+func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, conn *connState, interactive bool) error {
+	// Every request gets a derived context that dies with the write side:
+	// if the client vanishes mid-stream, producers blocked on channel sends
+	// are released instead of leaking for the life of the connection.
+	sctx, cancel := context.WithCancel(ctx)
+	conn.registerCancel(env.ID, cancel)
+	defer func() {
+		conn.cancelByID(env.ID)
+	}()
+	res, stream := h.dispatch(sctx, handshook, env, conn)
 	if stream != nil {
 		for ev := range stream {
 			if err := fc.Write(ev); err != nil {
@@ -470,7 +546,6 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		interactive := req.Stdin || req.TTY
 		if interactive && conn != nil {
 			upstreamCh = conn.upstream.register(env.ID)
-			conn.liveInteractive.Add(1)
 			go func() {
 				// Keep the router entry alive until the stream channel closes.
 				for range ch {

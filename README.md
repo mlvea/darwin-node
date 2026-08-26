@@ -202,6 +202,7 @@ Kubernetes API
 | Break-glass serial console | Yes (opt-in flag) |
 | Delta image updates | Yes (digest-verified apply; pulls too) |
 | Graceful drain on SIGTERM/SIGINT | Yes (`--shutdown-grace-period`) |
+| Hardware release gate | Manual: `make test-hardware IMAGE=<dir>` ([docs/stability.md](docs/stability.md)) |
 | Hybrid sidecars (mounts + resource requests) | Yes |
 | Host-side init containers | Yes |
 | In-guest probes (exec / httpGet / tcpSocket) | Yes |
@@ -226,6 +227,7 @@ Kubernetes API
 | [docs/security.md](docs/security.md) | Threat model and fail-closed defaults |
 | [docs/limitations.md](docs/limitations.md) | What Kubernetes this is not |
 | [docs/testing.md](docs/testing.md) | Unit tests, fake runtime, hardware e2e |
+| [docs/stability.md](docs/stability.md) | What is proven, what is not, and the path to beta |
 | [docs/gpu.md](docs/gpu.md) | Shared Metal |
 | [docs/credits.md](docs/credits.md) | Lineage and third-party licenses |
 | [NOTICE](NOTICE) / [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) | Agoda attribution; Go-module licenses |

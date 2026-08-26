@@ -2,7 +2,9 @@ package guest
 
 import (
 	"bytes"
+
 	"context"
+	"github.com/darwin-node/darwin-node/internal/leakcheck"
 	"io"
 	"net"
 	"runtime"
@@ -33,6 +35,7 @@ func (b *lockedBuffer) String() string {
 // serveTestHandler runs Serve over a net.Pipe and returns the host-side client.
 func serveTestHandler(t *testing.T, h Handler) (*Client, *LogBuffer) {
 	t.Helper()
+	leakcheck.Check(t)
 	h.Init()
 	hostC, agentC := net.Pipe()
 	go func() { _ = Serve(context.Background(), agentC, h) }()
@@ -228,10 +231,12 @@ func TestTTYExecSurvivesIdleTimeout(t *testing.T) {
 
 	var out lockedBuffer
 	done := make(chan int, 1)
+	started := time.Now()
 	go func() {
 		code, err := cli.ExecInteractive(ctx,
 			ExecReq{Argv: []string{"/bin/sh", "-c", "sleep 1; echo done"}, TTY: true},
 			nil, nil, &out, io.Discard)
+		t.Logf("exec returned at %+v code=%d err=%v out=%q", time.Since(started), code, err, out.String())
 		if err != nil {
 			t.Errorf("tty exec: %v", err)
 		}
@@ -246,7 +251,7 @@ func TestTTYExecSurvivesIdleTimeout(t *testing.T) {
 			t.Fatalf("missing output: %q", out.String())
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("silent TTY session dropped by idle timeout")
+		t.Fatalf("silent TTY session dropped by idle timeout (out=%q)", out.String())
 	}
 }
 

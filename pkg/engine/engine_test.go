@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/darwin-node/darwin-node/internal/leakcheck"
 	"github.com/darwin-node/darwin-node/pkg/capacity"
 	"github.com/darwin-node/darwin-node/pkg/config"
 	"github.com/darwin-node/darwin-node/pkg/event"
@@ -26,6 +27,7 @@ import (
 
 func testEngine(t *testing.T) *Engine {
 	t.Helper()
+	leakcheck.Check(t)
 	slots, err := capacity.New(2)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +111,7 @@ func TestExecAndLogs(t *testing.T) {
 	if err := e.Create(ctx, samplePod("a", "uid-a"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = e.Delete(context.Background(), "default", "a", 0) })
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		p, err := e.Get("default", "a")
@@ -470,6 +473,7 @@ func TestPostStartHook(t *testing.T) {
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = e.Delete(context.Background(), "default", "ps", 0) })
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		p, err := e.Get("default", "ps")

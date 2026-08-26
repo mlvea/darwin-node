@@ -25,6 +25,10 @@ const (
 	KindResponse Kind = "res"
 	KindStream   Kind = "stream"
 	KindError    Kind = "err"
+	// KindCancel is a one-way client-to-agent frame aborting the request
+	// with the same ID (follows, long execs). Best-effort: unknown or
+	// finished IDs are ignored.
+	KindCancel Kind = "cancel"
 )
 
 // Methods.
