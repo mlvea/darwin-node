@@ -19,9 +19,9 @@ make sign          # ad-hoc sign with Virtualization entitlement
 
 Binaries land in `./bin/`:
 
-- `darwin-node` — host agent
-- `darwin-guest-agent` — injected into images
-- `darwin-image` — bake / pack / pull
+- `darwin-node`, host agent
+- `darwin-guest-agent`, injected into images
+- `darwin-image`, bake / pack / pull
 
 To stage a redistributable directory (binaries plus `LICENSE`,
 `NOTICE`, and `THIRD_PARTY_NOTICES`):

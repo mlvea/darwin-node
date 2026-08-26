@@ -32,7 +32,7 @@ Lineage and third-party licenses: [credits.md](credits.md).
                        │ SSH  (last resort)
                        ▼
                  ┌─────────────────────┐
-                 │   macOS VM (× ≤ 2)  │
+                 │   macOS VM (x <= 2)  │
                  │  darwin-guest-agent │  launchd
                  │  Metal (shared GPU) │
                  └─────────────────────┘
@@ -41,9 +41,9 @@ Lineage and third-party licenses: [credits.md](credits.md).
 ## Hybrid pods
 
 ```
-spec.containers[0]     →  macOS VM via Virtualization.framework
-spec.containers[1..]   →  host Docker (or future containerd) sidecars
-spec.initContainers    →  host-side only (sequential); no extra VM boots
+spec.containers[0]     ->  macOS VM via Virtualization.framework
+spec.containers[1..]   ->  host Docker (or future containerd) sidecars
+spec.initContainers    ->  host-side only (sequential); no extra VM boots
 ```
 
 This is the unique capability. A typical CI pod is a macOS VM plus a logging
@@ -78,10 +78,34 @@ boot entirely. Invariants:
 Pod annotations `cache.darwin.node/<name>: <absolute-guest-path>`
 declare persistent caches. The host restores each one into the pod dir
 with APFS `clonefile` (CoW), shares it read-write over virtio-fs at the
-annotated path (link placement — guest writes land on host disk), and
+annotated path (link placement, guest writes land on host disk), and
 clones the final state back into `<cache-dir>/cache-store/<ns>/<name>/`
 on graceful delete. Failed starts never snapshot. No new guest protocol;
 no PVC/CSI.
+
+## Interactive exec, follow logs, console
+
+- Exec: `ExecReq.Stdin/TTY` + client->agent stream frames
+  (`ExecStdin`, `TtyResize`) ride the same envelope ID as the request.
+  The agent routes them through a per-connection upstream router; TTY
+  execs run under a real PTY (`creack/pty`) so control bytes reach the
+  guest line discipline.
+- Logs: `LogsReq.Follow` subscribes to the guest `LogBuffer`; appends
+  stream until the client disconnects. Slow followers drop rather than
+  block the buffer.
+- Console: with `--serial-console`, vz attaches a serial port backed by
+  pipe pairs (`FileHandleSerialPortAttachment`). The engine bridges it
+  to `darwin-console-<hash>.sock` in TempDir; `darwin-node console`
+  dials and enters raw mode. Independent of agent and SSH by design.
+
+## Delta images
+
+A delta dir carries `delta.json` plus `<name>.patch` files: flat
+[offset][len][data] records at 4 MiB granularity. `ApplyDelta`
+digest-verifies the base, clonefile-clones it, patches in place,
+truncates to target size, and verifies the result SHA-256, so patch
+correctness is checked end to end on every apply. Output is an ordinary
+image dir consumable by the engine's normal resolve path.
 
 ## Package map
 

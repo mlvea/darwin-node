@@ -18,14 +18,14 @@ That project established several ideas this tree still believes in:
   hardware-model blob
 
 darwin-node is a derivative rewrite of that problem, not a fork of
-Agoda’s tree. We rewrote the node agent, added an in-guest control
-plane, and treated Apple’s two-VM cap as a scheduling invariant. Where
-we still speak Agoda’s image media types, it is so operators can
+Agoda's tree. We rewrote the node agent, added an in-guest control
+plane, and treated Apple's two-VM cap as a scheduling invariant. Where
+we still speak Agoda's image media types, it is so operators can
 migrate without a flag day. Source files that still follow Agoda
 algorithms or formats carry a `Derived from Agoda macOS-vz-kubelet
 (Apache-2.0)` comment.
 
-The license obligation — and the thanks — are in [NOTICE](../NOTICE).
+The license obligation, and the thanks, are in [NOTICE](../NOTICE).
 Go-module licenses for binaries are in
 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) (`make licenses`).
 

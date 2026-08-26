@@ -6,7 +6,7 @@ darwin-node exposes the host Apple GPU to each macOS VM through
 ## Model
 
 ```
-Guest Metal  →  VZMacGraphicsDevice  →  host Apple GPU
+Guest Metal  ->  VZMacGraphicsDevice  ->  host Apple GPU
 ```
 
 Both VMs and the host UI share one GPU. There is no exclusive assignment,

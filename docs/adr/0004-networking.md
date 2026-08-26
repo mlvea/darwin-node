@@ -1,4 +1,4 @@
-# ADR 0004 — Networking
+# ADR 0004: Networking
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -58,7 +58,7 @@ IP. Operators can still exec via vsock.
 
 Userspace proxy in `pkg/hostport`: for each `containerPort` with `hostPort`,
 bind `0.0.0.0:hostPort` (or `hostIP`) on the host and splice to
-`podIP:containerPort`. Requires a PodIP (NAT is fine — host-local). Conflicts
+`podIP:containerPort`. Requires a PodIP (NAT is fine, host-local). Conflicts
 fail the pod with an event. This is *not* kube-proxy; it is the kubelet
 hostPort equivalent.
 
@@ -82,4 +82,4 @@ must never share a MAC or Machine Identifier (Apple networking + 2-VM identity).
 
 - Bridged is the production Service path. NAT is the laptop/CI path.
 - hostPort works in both modes once PodIP exists.
-- We drop the hard "no IP → kill VM" behaviour.
+- We drop the hard "no IP -> kill VM" behaviour.

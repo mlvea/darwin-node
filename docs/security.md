@@ -36,7 +36,7 @@
   `hostPath` volume at admission (`ValidatePod`) and again in
   `volume.Materialize`.
 - Allowed prefixes are compared after `filepath.Abs` and `EvalSymlinks`. A
-  path must equal a prefix or be a child (`prefix/` …). Sibling names such
+  path must equal a prefix or be a child (`prefix/` ...). Sibling names such
   as `/Volumes/Workevil` do not match `/Volumes/Work`.
 - The host root `/` is never shared into a guest, even if `/` is on the
   allowlist.

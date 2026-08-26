@@ -25,7 +25,7 @@ helper detects missing entitlements:
 | VZ configuration validate | Virtualization.framework, codesigned test binary |
 | clonefile overlay | APFS volume |
 | vsock round-trip | a running macOS VM with the agent |
-| IPSW restore | an IPSW, 30–60+ minutes, lots of disk |
+| IPSW restore | an IPSW, 30-60+ minutes, lots of disk |
 | Bridged IP | vmnet entitlement, real L2 |
 | Metal selftest | graphics device + guest agent |
 

@@ -1,4 +1,4 @@
-# ADR 0009 — Stay on Go (do not port to Rust)
+# ADR 0009: Stay on Go (do not port to Rust)
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -7,7 +7,7 @@
 ## Context
 
 The host agent, guest agent, and image tool are Go. A full Rust port was
-considered after Phase 0–1. Rust is a reasonable language for a privileged
+considered after Phase 0-1. Rust is a reasonable language for a privileged
 macOS daemon. It is the wrong language for *this* architecture.
 
 ## Decision
@@ -30,13 +30,13 @@ A Rust port would mean one of:
   (leases, SPDY/WebSocket exec, stats summary, token review). That is
   not a port; it is a second kubelet. High semantic risk, years of VK
   edge cases discarded.
-- Speak VK’s HTTP “web provider” protocol. Extra hop, weaker auth
+- Speak VK's HTTP "web provider" protocol. Extra hop, weaker auth
   story, still not the in-process provider we designed.
 - FFI: Rust runtime behind a Go VK. Two languages, two memory
   managers, cgo *and* the objc runtime. Worse than either language
   alone.
 
-The first is the only “real” port. It contradicts the architecture we
+The first is the only "real" port. It contradicts the architecture we
 just accepted.
 
 ### 2. Virtualization.framework production bindings are Go
@@ -45,7 +45,7 @@ The runtime we actually call is Code-Hex/vz (Lima, vfkit, Agoda). It
 already solved vsock-as-`net.Conn`, start/stop, Mac platform, graphics.
 `objc2-virtualization` exists as generated bindings; it is not a
 lifecycle library. Porting is re-validating every API we just mapped
-(`RequestStop`’s two return values, graphics `int64`, typed socket
+(`RequestStop`'s two return values, graphics `int64`, typed socket
 devices, unique machine IDs per overlay).
 
 ### 3. One module, one protocol, one test binary

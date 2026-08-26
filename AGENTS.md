@@ -8,7 +8,7 @@ macOS-vz-kubelet.
 
 Earlier work lived at:
 
-`…/macOS-vz-kubelet/darwin-node`
+`../macOS-vz-kubelet/darwin-node`
 
 That nested layout is gone. This project is now a sibling of any local
 Agoda clone, not a folder inside it.

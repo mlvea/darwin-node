@@ -1,12 +1,12 @@
-# ADR 0008 — Remaining technical debt and next steps
+# ADR 0008: Remaining technical debt and next steps
 
 - Status: Living
 - Date: 2026-08-23
-- Phase: 0–1 (updated as later phases land)
+- Phase: 0-1 (updated as later phases land)
 
-## Done in the foundation (Phase 0–1)
+## Done in the foundation (Phase 0-1)
 
-- ADRs 0001–0007 accepted.
+- ADRs 0001-0007 accepted.
 - Independently buildable Go module with tests for capacity, protocol,
   volumes, image config, fake VM lifecycle, node capacity, hostPort,
   provider Create/status.
@@ -20,12 +20,12 @@
 
 1. **Hardware e2e** of a signed VZ boot against a real IPSW/disk. Code
    path exists (platform, disk, vsock listener, clonefile). Not run here.
-2. **IPSW restore** is a CLI stub pointing at `VZMacOSInstaller` (30–60m,
+2. **IPSW restore** is a CLI stub pointing at `VZMacOSInstaller` (30-60m,
    hardware only).
 3. **ORAS pull** copies via `oras.Copy` into a file store then sparsely
    decompresses gzip. Needs a live registry test; CAS/GC still absent.
 4. **SSH fallback** exec-only; host keys still ignored (documented).
-5. **CRDs / CSI / token rotation / APFS quotas** — Phase 6.
+5. **CRDs / CSI / token rotation / APFS quotas**, Phase 6.
 6. **Codesign/notarization CI** and Homebrew publish.
 
 ## Recommended next implementation slices

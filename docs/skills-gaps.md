@@ -13,8 +13,8 @@ next engineer.
 - macOS guests require `VZMacOSBootLoader` + `VZMacPlatformConfiguration`
   (hardware model from the IPSW restore, auxiliary storage, machine identifier).
 - Two concurrent macOS VMs with the *same* machine identifier misbehave;
-  clonefile of aux is not enough — mint a new machine ID per overlay.
-- Graphics device is mandatory for Metal; 1920×1200@80 is the common default.
+  clonefile of aux is not enough, mint a new machine ID per overlay.
+- Graphics device is mandatory for Metal; 1920x1200@80 is the common default.
 - `VZVirtioFileSystemDeviceConfiguration` + `MacOSGuestAutomountTag` is the
   only first-class share path; guest path is `/Volumes/My Shared Files`.
 - Socket device: host cannot `socket(AF_VSOCK)` (ENODEV). Host uses
@@ -51,7 +51,7 @@ next engineer.
 - Shipping a privileged, entitled binary to third parties (Developer ID +
   notarization + vmnet entitlement approval).
 - Keychain use from a launchd daemon (user vs system domain).
-- Guest agent as root vs a dedicated user with a narrow sudoers — we currently
+- Guest agent as root vs a dedicated user with a narrow sudoers, we currently
   run the agent as root for shutdown/mounts.
 
 ## 3. Virtual Kubelet provider semantics
@@ -61,7 +61,7 @@ next engineer.
 - `CreatePod` must return quickly; long work (image pull, boot) is async,
   reflected through `GetPodStatus`.
 - Returning an error from `CreatePod` after the pod is bound is how we fail
-  closed on capacity — VK will surface it; we also write a Failed phase so
+  closed on capacity, VK will surface it; we also write a Failed phase so
   controllers do not churn forever.
 - `UpdatePod` is unused in practice; recreate is the model.
 - Node conditions must change on heartbeats (`LastHeartbeatTime`) or the
@@ -72,7 +72,7 @@ next engineer.
 
 **Still hard**
 
-- Restart policies (`Always` / `OnFailure`) around a 30–60s VM boot.
+- Restart policies (`Always` / `OnFailure`) around a 30-60s VM boot.
 - ReplicaSet vs Failed pods under a 2-slot node (churn).
 - Projected token rotation without a real kubelet volume manager.
 
@@ -81,7 +81,7 @@ next engineer.
 **Learned**
 
 - virtio-fs automount is the right default.
-- Silent skip of unknown volumes is a production footgun — we fail admission.
+- Silent skip of unknown volumes is a production footgun, we fail admission.
 - Secrets-on-host-disk is unavoidable without vsock-only streaming, which
   still buffers.
 
@@ -165,5 +165,5 @@ next engineer.
 | Phase | Date | What changed in this file |
 |---|---|---|
 | 0 | 2026-08-23 | Initial findings from Agoda + Apple docs + framework behaviour. |
-| 1 | 2026-08-23 | Code-Hex/vz `SocketDevices()` already returns `*VirtioSocketDevice`; `RequestStop` is `(bool, error)`; graphics sizes are `int64`. Virtual Kubelet `nodeutil.Provider` now requires `GetStatsSummary`, `GetMetricsResource`, and `PortForward`. ResourceList index values are not addressable for `Quantity` pointer methods. Agoda OCI cache keys split on every `:`; overlay clones lived in `/tmp`; image `machineIdData` was reused across clonefile overlays (unsafe for two concurrent VMs). Pull is still tag-path, not a CAS — we will not copy that. |
-| 2–5 | 2026-08-23 | `VirtioSocketDevice.Listen` is a `net.Listener` (guest-initiated). Guest `AF_VSOCK` + `SockaddrVM` exist on Darwin (`VMADDR_CID_HOST=2`). Code-Hex/vz deletes the listener cgo handle on the first connection — one agent session per VM, which matches our model. |
+| 1 | 2026-08-23 | Code-Hex/vz `SocketDevices()` already returns `*VirtioSocketDevice`; `RequestStop` is `(bool, error)`; graphics sizes are `int64`. Virtual Kubelet `nodeutil.Provider` now requires `GetStatsSummary`, `GetMetricsResource`, and `PortForward`. ResourceList index values are not addressable for `Quantity` pointer methods. Agoda OCI cache keys split on every `:`; overlay clones lived in `/tmp`; image `machineIdData` was reused across clonefile overlays (unsafe for two concurrent VMs). Pull is still tag-path, not a CAS, we will not copy that. |
+| 2-5 | 2026-08-23 | `VirtioSocketDevice.Listen` is a `net.Listener` (guest-initiated). Guest `AF_VSOCK` + `SockaddrVM` exist on Darwin (`VMADDR_CID_HOST=2`). Code-Hex/vz deletes the listener cgo handle on the first connection, one agent session per VM, which matches our model. |

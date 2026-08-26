@@ -4,7 +4,7 @@ Issues and focused pull requests are welcome.
 
 This project is **alpha**: much of the code was produced with coding
 agents and still needs review and hardware testing. Treat every PR as
-an audit, not a rubber stamp — especially `pkg/engine`, `pkg/guest`,
+an audit, not a rubber stamp, especially `pkg/engine`, `pkg/guest`,
 `pkg/runtime/vz`, and anything that touches TLS or images.
 
 ## Requirements

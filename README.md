@@ -1,6 +1,6 @@
 # darwin-node
 
-**Native macOS workloads on Kubernetes — on Apple Silicon, as pods.**
+Native macOS workloads on Kubernetes, on Apple Silicon, as pods.
 
 > **Alpha.** This is early software. Most of the implementation was
 > written with coding agents and is **pending review and hardware
@@ -13,11 +13,13 @@
 
 `darwin-node` is a node agent for M-series Macs. It joins a cluster as a
 Kubernetes node and runs **at most two** macOS virtual machines at a
-time, using Apple’s
+time through Apple's
 [Virtualization.framework](https://developer.apple.com/documentation/virtualization).
 Optional Linux sidecars run on the host next to the VM. Inside every
-guest, a **Guest Agent** is the control plane for exec, logs, probes,
-and shutdown — vsock first, not a login session.
+guest, a **Guest Agent** (`bin/darwin-guest-agent`, launchd) is the
+control plane for exec, logs, probes, metrics, and shutdown, spoken as a
+length-prefixed JSON protocol over vsock. TCP is an opt-in fallback,
+SSH a last resort; no guest login session is ever used.
 
 > **Hard cap:** two concurrent macOS VMs per physical host (Apple EULA
 > and XNU `hv_apple_isa_vm_quota`). Capacity, taints, and admission are
@@ -26,124 +28,80 @@ and shutdown — vsock first, not a login session.
 Intel Macs, nested virtualization, and exclusive GPU passthrough are
 out of scope. See [docs/limitations.md](docs/limitations.md).
 
-## Why this project exists
+## Design invariants
 
-Apple Silicon can run macOS as a first-class VM, at near-native speed,
-on the same machine that already has Xcode, Metal, and the signing
-stack CI needs. Kubernetes still expects a *node*: honest capacity,
-probes, exec, logs, secrets, and a scheduler that is told the truth.
+- `pods=2` and `darwin.node/vm=2` are real slots from a fail-closed
+  table ([pkg/capacity](pkg/capacity/capacity.go)). Full means the node
+  taints itself `darwin.node/vm-full=true:NoSchedule`; it never queues.
+- The guest boundary is a daemon speaking vsock, not port 22. Exec is
+  full duplex (stdin, PTY, resize); probes run in-guest; shutdown is an
+  RPC, not an SSH kill.
+- Hybrid pods: `containers[0]` is the macOS VM, `containers[1..]` are
+  host Docker sidecars, init containers run host-side only.
+- Operate-first defaults: TLS required on the kubelet HTTP server,
+  hostPath default-deny behind an allowlist, image digests verified,
+  on-disk pod state recovered after a crash, stats report measured
+  usage rather than advertised capacity.
 
-darwin-node is that node. The shape came from asking what a production
-kubelet-equivalent looks like when the runtime is two
-Virtualization.framework guests instead of a container engine:
+## Capabilities beyond the upstream lineage
 
-- **Admission that matches physics.** `pods=2` and `darwin.node/vm=2`
-  are real slots. Full means `NoSchedule`, not a hidden queue.
-- **A Guest Agent as the in-guest kubelet surface.** Exec, logs,
-  readiness/liveness, metrics, and shutdown speak a length-prefixed
-  protocol over vsock (TCP is opt-in; SSH is last resort).
-- **Hybrid pods that CI actually uses.** `containers[0]` is the macOS
-  VM; `containers[1..]` are host Docker sidecars (logs, artifacts,
-  caches) with volume mounts and resource requests.
-- **A kubelet contract you can operate.** TLS on the exec/logs port,
-  hostPath default-deny, image provenance, crash recovery of on-disk
-  pod dirs, and stats that report *usage*, not capacity.
-- **Pods that start like containers.** A warm VM pool pre-boots idle
-  guests into free slots (`--warm-slots`), and matching pods adopt a
-  running VM instead of cold-booting one.
-- **Caches that survive the pod.** Annotation-declared cache volumes
-  restore via APFS `clonefile` before boot and re-snapshot on delete:
-  DerivedData that stays warm across CI runs, with no PVC and no CSI.
+| Capability | Flag / API | Deep dive |
+|---|---|---|
+| Warm VM pool: matching pods adopt a pre-booted guest | `--warm-slots`, `--warm-image` | [docs/warm-pool.md](docs/warm-pool.md) |
+| Cache volumes that survive the pod (CoW restore + snapshot) | `cache.darwin.node/<name>: <guest-path>` annotations | [docs/cache-volumes.md](docs/cache-volumes.md) |
+| Interactive exec: stdin into a guest PTY, resize, true `logs -f` | standard `kubectl exec -it` / `logs -f` | [docs/architecture.md](docs/architecture.md) |
+| Break-glass serial console independent of agent and SSH | `--serial-console`, `darwin-node console` | [docs/console.md](docs/console.md) |
+| Delta image updates: digest-verified CoW patch apply | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
 
-## Two things no SSH-era node can do
+One paragraph each:
 
-**Warm VM pool: pod startup without the cold boot.** Every pod on an
-SSH-driven macOS node pays a full macOS boot before the first command
-runs. darwin-node can keep up to two pre-booted, agent-ready guests idling in
-free slots (`--warm-slots=1 --warm-image=registry.example.com/macos:15`);
-a pod whose image matches adopts one and is Running in seconds. The
-pool obeys every invariant: warm VMs hold real slots from the same
-fail-closed table, the pool only fills capacity pods don't need right
-now, and real demand evicts a warm guest *before* any pod is rejected.
-Only pods whose primary container mounts nothing can adopt — virtio-fs
-shares are fixed at VM creation.
+**Warm VM pool.** A replenisher keeps up to N pre-booted, agent-ready
+guests in slots pods do not need. Adoption matches on image ref and
+adds zero boot work; under capacity pressure real demand reclaims warm
+slots before any pod is rejected. Warm guests hold real slots from the
+same table that fails closed at two.
 
-```bash
-./bin/darwin-node --runtime=vz --allow-nat-workloads \
-  --warm-slots=1 --warm-image=registry.example.com/macos:15
-```
+**Cache volumes.** Annotate a pod and the node restores each declared
+path from its cache store via APFS clonefile before boot, shares it
+read-write over virtio-fs at exactly that path, and re-snapshots on
+graceful delete. DerivedData stays warm across CI runs with no storage
+infrastructure.
 
-**Cache snapshots: warm builds with zero storage infrastructure.**
-Annotate a pod and the node does the rest:
-
-```yaml
-metadata:
-  annotations:
-    cache.darwin.node/derived-data: "/Users/mac/Library/Developer/Xcode/DerivedData"
-    cache.darwin.node/spm: "/Users/mac/Library/Caches/org.swift.swiftpm"
-```
-
-Before the VM boots, each declared path is restored from the node's
-cache store as an APFS clone — instant, copy-on-write. The directory is
-shared read-write over virtio-fs at exactly that guest path, so the
-build writes straight through to host disk. On graceful delete the
-final state is cloned back into the store for the next pod. No PVC, no
-CSI, no registry round-trip — and no equivalent anywhere in the
-upstream lineage, whose guests are pristine and reachable only over
-SSH. See [examples/pod-cache.yaml](examples/pod-cache.yaml).
+**Delta images.** Monthly Xcode bumps become megabyte-scale patches:
+4 MiB chunk diffs against a pinned base, applied copy-on-write and
+verified end to end against the SHA-256 of the whole target disk.
 
 ## Lineage
 
-The first public yes to this idea is Agoda’s
+The first public implementation of this idea is Agoda's
 [macOS-vz-kubelet](https://github.com/agoda-com/macOS-vz-kubelet)
 (Apache License 2.0, 2024): a Virtual Kubelet provider whose pods are
 Virtualization.framework VMs, with host sidecars beside them, disks
-cloned with APFS `clonefile`, and macOS images shipped as OCI
-artifacts.
+cloned with APFS `clonefile`, and macOS images shipped as OCI artifacts.
+This tree exists because three of its central defaults are inverted here:
 
-That yes is why this repo exists. darwin-node is the next question:
-what that node looks like when upstream's three central defaults are
-inverted.
+1. **The guest is a peer, not an SSH target.** Upstream drives exec,
+   readiness, and graceful shutdown over port 22 with credentials from
+   environment variables. darwin-node ships a launchd daemon baked into
+   every image, serving the same surface over vsock with a
+   token-authenticated TCP fallback. There is now a control plane
+   inside the guest with its own binary, lifecycle, and version skew.
+2. **Capacity is enforced, not queued.** Upstream advertises `pods=2`
+   but blocks a third create until a slot frees. darwin-node rejects
+   the third pod, taints the node while both slots are held, and drives
+   admission through an explicit slot table.
+3. **Operability is a default, not a flag.** Plaintext HTTP will not
+   start; digest verification and crash recovery are unconditional;
+   usage stats feed autoscaling instead of static capacity numbers.
 
-**1. The guest is a peer, not an SSH target.** Upstream reaches into
-the VM over SSH: exec sessions, the readiness probe, even graceful
-shutdown dial port 22 with credentials supplied through environment
-variables. darwin-node ships `bin/darwin-guest-agent`, a launchd
-daemon baked into every image (`darwin-image inject-agent`), serving
-exec, logs, probes, metrics, and shutdown over a length-prefixed
-protocol on vsock — a channel reachable only from the host process —
-with a token-authenticated TCP fallback and SSH kept as last resort.
-There is now a control plane *inside* the guest, with its own binary,
-lifecycle, and version-skew story.
-
-**2. Capacity is enforced, not queued.** Both trees respect Apple's
-two-guest ceiling (XNU `hv_apple_isa_vm_quota`) and advertise `pods=2`.
-But upstream blocks a third create until a slot frees — the pod waits.
-darwin-node fails closed: the third pod is rejected
-(`VMCapacityExhausted`), the node taints itself
-`darwin.node/vm-full=true:NoSchedule` while both slots are held, and
-admission goes through an explicit slot table (`pkg/capacity`). The
-scheduler is never left holding a promise the hardware cannot keep.
-
-**3. Operability is a default, not a flag.** The kubelet HTTP server
-refuses to start plaintext; hostPath is default-deny behind an
-allowlist; pulled images are digest-verified; on-disk pod state is
-recovered after an agent crash; and stats report measured *usage*, so
-autoscaling reacts to what the VMs consume rather than the static
-numbers the node advertises.
-
-None of these are additive features. Each rewrites a load-bearing
-contract — where the guest boundary lies, what admission means when a
-slot is gone, which guarantees arrive on by default — which is the
-shape of a fresh Go module honoring upstream's license, not edits
-bolted beside someone else's defaults. Where the ideas still align —
-Virtual Kubelet as the Kubernetes surface, hybrid pods, APFS
-`clonefile` overlays, OCI disk artifacts — they are shared
-deliberately, and Agoda-format artifacts are still accepted on read,
-so existing registries and images migrate without a flag day.
-
-The Apache-2.0 record — the derived-file list, adapted algorithms, and
-license obligations — is in [NOTICE](NOTICE) and
+None of these are additive features; each rewrites a load-bearing
+contract, which is why this is a separate Go module that honors
+upstream's license rather than edits beside someone else's defaults.
+Where ideas still align (Virtual Kubelet as the Kubernetes surface,
+hybrid pods, clonefile overlays, OCI disk artifacts) they are shared
+deliberately, and Agoda-format OCI artifacts remain readable so
+existing registries migrate without a flag day. The complete
+attribution record is in [NOTICE](NOTICE) and
 [docs/credits.md](docs/credits.md).
 
 Thank you to Agoda for publishing that work.
@@ -161,17 +119,16 @@ make sign    # ad-hoc Virtualization.framework entitlement
 |---|---|
 | `bin/darwin-node` | Host node agent |
 | `bin/darwin-guest-agent` | In-guest daemon (bake into images) |
-| `bin/darwin-image` | IPSW restore, agent inject, OCI pack/pull |
+| `bin/darwin-image` | IPSW restore, agent inject, OCI pack/pull, delta create/apply |
 
-**No cluster** (engine + fake runtime):
+No cluster (engine plus fake runtime):
 
 ```bash
 ./bin/darwin-node --runtime=fake --standalone --allow-nat-workloads --nodename=debug-mac
-# capacity pods=2 vm=2 …
+# capacity pods=2 vm=2 ...
 ```
 
-**Join a cluster** (TLS required; the kubelet HTTP server will not
-start plaintext):
+Join a cluster (TLS required; the kubelet HTTP server refuses plaintext):
 
 ```bash
 export APISERVER_CERT_LOCATION=$HOME/.kube/tls.crt
@@ -184,8 +141,8 @@ kubectl get node
 ```
 
 Hardware workloads need `--runtime=vz` (the default on `darwin/arm64`),
-a signed binary, and a baked macOS image (`darwin-image restore` /
-`inject-agent` / `pack`, or an OCI pull). Example manifests:
+a signed binary, and a baked macOS image (`darwin-image restore`,
+`inject-agent`, `pack`, or an OCI pull). Example manifests:
 [examples/pod.yaml](examples/pod.yaml),
 [examples/pod-hybrid.yaml](examples/pod-hybrid.yaml),
 [examples/pod-cache.yaml](examples/pod-cache.yaml).
@@ -197,39 +154,37 @@ Full install, launchd, entitlements, Helm:
 
 ```
 Kubernetes API
-      │
-      ▼
-┌─────────────────────────────────────┐
-│ darwin-node  (Virtual Kubelet)      │
-│   provider → engine → runtime/vz    │
-│   sidecars on host Docker           │
-│   capacity: 2 VM slots, fail-closed │
-│   warm pool: pre-booted, adoptable  │
-│   cache store: CoW snapshots        │
-└──────────────┬──────────────────────┘
-               │ vsock (primary)
-               │ TCP  (opt-in fallback)
-               │ SSH  (last resort)
-               ▼
-┌─────────────────────────────────────┐
-│ macOS VM  (≤ 2 per host)            │
-│   darwin-guest-agent (launchd)      │
-│   paravirtual Metal (shared GPU)    │
-└─────────────────────────────────────┘
+      |
+      v
++-------------------------------------+
+| darwin-node  (Virtual Kubelet)      |
+|   provider -> engine -> runtime/vz  |
+|   sidecars on host Docker           |
+|   capacity: 2 VM slots, fail-closed |
+|   warm pool: pre-booted, adoptable  |
+|   cache store: CoW snapshots        |
++------------------+------------------+
+                   | vsock (primary)
+                   | TCP  (opt-in fallback)
+                   | SSH  (last resort)
+                   v
++-------------------------------------+
+| macOS VM  (< 2 per host)            |
+|   darwin-guest-agent (launchd)      |
+|   paravirtual Metal (shared GPU)    |
++-------------------------------------+
 ```
 
-- **GPU** is paravirtual Metal (`VZMacGraphicsDevice`), shared, never
+- **GPU**: paravirtual Metal (`VZMacGraphicsDevice`), shared, never
   PCIe passthrough. Labels tell the truth. [docs/gpu.md](docs/gpu.md)
 - **Volumes**: emptyDir, hostPath (allowlisted), ConfigMap, Secret,
   projected, downwardAPI. Host materializes; virtio-fs shares; the
-  agent places copies in the guest.
+  agent links or copies into the guest.
 - **Networking**: NAT (laptop/CI) or bridged (Services). hostPort is a
   userspace TCP proxy. PodIP comes from the Guest Agent.
-- **Images**: Darwin-Node OCI media types; Agoda-format artifacts are
-  still accepted on read so existing registries keep working.
-- **Warm pool & caches**: pre-booted guests adopt matching pods;
-  `cache.darwin.node/*` annotations persist guest paths across pods via
-  CoW snapshots. Details in "Two things no SSH-era node can do" above.
+- **Images**: Darwin-Node media types, Agoda-format artifacts accepted
+  on read, per-pod CoW overlays, delta updates on top of cached bases.
+- **Console**: optional serial port per VM for break-glass access.
 
 ## Kubernetes surface
 
@@ -238,58 +193,65 @@ Kubernetes API
 | Node Ready, capacity, taints, labels | Yes |
 | Pod create / delete / status / conditions | Yes |
 | Fail-closed 2-VM admission | Yes |
-| Warm VM pool + adoption (`--warm-slots`) | Yes (matching image; no primary mounts) |
-| Pod cache snapshots (`cache.darwin.node/*` annotations) | Yes — CoW restore/snapshot |
+| Warm VM pool + adoption | Yes (matching image, mount-free primary) |
+| Pod cache snapshots | Yes (annotation-declared, CoW) |
+| Interactive `kubectl exec -it` (stdin, PTY, resize) | Yes (vsock) |
+| True `logs -f` follow | Yes |
+| Break-glass serial console | Yes (opt-in flag) |
+| Delta image updates | Yes (digest-verified apply) |
 | Hybrid sidecars (mounts + resource requests) | Yes |
 | Host-side init containers | Yes |
 | In-guest probes (exec / httpGet / tcpSocket) | Yes |
-| Exec / logs via Guest Agent | Yes (stdout/stderr; follow/TTY still maturing) |
 | Image pull secrets, digest verify, clonefile CoW | Yes |
 | NAT, bridged, TCP hostPort | Yes |
 | Metrics-server summary + Prometheus `/metrics` | Yes |
 | OpenTelemetry traces | Yes (OTLP env) |
-| PVC / CSI | Not shipped |
+| PVC / CSI | Not shipped (cache volumes cover the main demand) |
 | In-place pod updates | Recreate |
-| Interactive `kubectl exec -it` / `logs -f` | Partial — see limitations |
-| >2 VMs, nested VMs, Intel, GPU passthrough | No |
+| More than 2 VMs, nested VMs, Intel, GPU passthrough | No |
 
 ## Documentation
 
 | Doc | What it is |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | How the pieces fit |
+| [docs/architecture.md](docs/architecture.md) | How the pieces fit, package map |
+| [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle, adoption rules, eviction |
+| [docs/cache-volumes.md](docs/cache-volumes.md) | Cache annotation spec and snapshot store |
+| [docs/console.md](docs/console.md) | Serial console socket, CLI, trust model |
+| [docs/delta-images.md](docs/delta-images.md) | Patch format, apply algorithm, ops model |
 | [docs/installation.md](docs/installation.md) | Build, sign, launchd, Helm |
 | [docs/security.md](docs/security.md) | Threat model and fail-closed defaults |
-| [docs/limitations.md](docs/limitations.md) | What Kubernetes this is *not* |
+| [docs/limitations.md](docs/limitations.md) | What Kubernetes this is not |
 | [docs/testing.md](docs/testing.md) | Unit tests, fake runtime, hardware e2e |
 | [docs/gpu.md](docs/gpu.md) | Shared Metal |
 | [docs/credits.md](docs/credits.md) | Lineage and third-party licenses |
 | [NOTICE](NOTICE) / [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) | Agoda attribution; Go-module licenses |
 | [docs/adr/](docs/adr/0000-index.md) | Architecture decision records |
 
-Visual debug (no cluster):
+Visual debug without a cluster:
 
 ```bash
 ./bin/darwin-node debug-dump -o debug-snapshot.json
-open debug.html    # file:// — plain <script src>, not an ES module
+open debug.html    # file:// - plain <script src>, not an ES module
 ```
 
 ## Layout
 
 ```
-cmd/darwin-node      host agent
+cmd/darwin-node      host agent (+ console subcommand)
 cmd/guest-agent      in-guest agent
-cmd/darwin-image     bake / pack / pull
+cmd/darwin-image     bake / pack / pull / delta
 pkg/provider         Virtual Kubelet adapter
-pkg/engine           pod lifecycle
-pkg/runtime          vz + fake
-pkg/guest            agent protocol + vsock/TCP/SSH
+pkg/engine           pod lifecycle, warm pool, caches, console bridge
+pkg/runtime          vz + fake (Consoler for serial)
+pkg/guest            agent protocol, transports, PTY exec
+pkg/image            OCI pull, overlays, deltas
 pkg/capacity         2-VM slot table
 deploy/              launchd, Helm, Homebrew formula
 examples/            pod manifests
 ```
 
-This is the darwin-node repository (standalone; not nested under
+This is the darwin-node repository (standalone, not nested under
 macOS-vz-kubelet).
 
 ## Contributing
@@ -303,12 +265,13 @@ Apache License 2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE), and
 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES). Release archives (`make dist`)
 must ship all three next to the binaries.
 
-This software is provided on an **“AS IS” BASIS, WITHOUT WARRANTIES OR
-CONDITIONS OF ANY KIND**, either express or implied. You are solely
+This software is provided on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. You are solely
 responsible for deciding whether to use it and you assume all risk.
 The authors and contributors are not liable for damages of any kind
 arising from use (or inability to use) this software, including data
 loss, cluster disruption, or hardware issues, even if advised that
-such damage was possible — except where applicable law requires
-otherwise. That is [LICENSE](LICENSE) §§ 7–8 in plain language. Do not
-run this as production kubelet infrastructure unless you accept that.
+such damage was possible, except where applicable law requires
+otherwise. That is sections 7 and 8 of [LICENSE](LICENSE) in plain
+language. Do not run this as production kubelet infrastructure unless
+you accept that.

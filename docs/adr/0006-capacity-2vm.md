@@ -1,4 +1,4 @@
-# ADR 0006 — The 2-VM limit, capacity, and scheduling
+# ADR 0006: The 2-VM limit, capacity, and scheduling
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -36,7 +36,7 @@ error.
 
 | Resource | Capacity | Allocatable |
 |---|---|---|
-| `pods` | `maxVMs` (≤2) | same |
+| `pods` | `maxVMs` (<=2) | same |
 | `darwin.node/vm` | `maxVMs` | same (extended resource) |
 | `darwin.node/metal` | `maxVMs` | same (shared GPU slots, see ADR 0007) |
 | `cpu` | host logical CPUs | host − `ReservedCPU` (default 2) |
@@ -56,7 +56,7 @@ with a matching toleration (and typically `nodeSelector kubernetes.io/os=darwin`
 `CreatePod`:
 
 1. Validate spec (container[0] is the VM, volumes known, resources parse).
-2. `capacity.TryAcquire(podUID)` — if both slots are taken, return a typed
+2. `capacity.TryAcquire(podUID)`, if both slots are taken, return a typed
    `ErrVMCapacityExhausted`. The provider records a Warning event and sets
    the pod to Failed with reason `VMCapacityExhausted`. We do **not** queue.
 3. On DeletePod / runtime failure after acquire, `Release(podUID)`.
@@ -72,7 +72,7 @@ a retryable error; it is a bug if it happens.
 | Type | True when |
 |---|---|
 | `Ready` | provider healthy, VZ available, disk/memory not critical |
-| `VMCapacity` (custom) | `used < max` → False (no pressure); `used == max` → True, reason `SlotsFull` |
+| `VMCapacity` (custom) | `used < max` -> False (no pressure); `used == max` -> True, reason `SlotsFull` |
 | `MemoryPressure` / `DiskPressure` | real host checks, not hardcoded |
 | `GuestRuntime` | Virtualization.framework probe succeeded |
 
@@ -85,7 +85,7 @@ sending work *before* CreatePod rejects. Remove the taint on release.
 Two pods. No weighted fair-share beyond Kubernetes requests. CPU/memory
 requests size the VM (`SetCPUCount` / `SetMemorySize`). Limits: if set, they
 **cap** the VM size; if limit < request, reject. VZ has no hard cap after
-start — the VM gets what it was created with. We do not overcommit vCPUs
+start, the VM gets what it was created with. We do not overcommit vCPUs
 above host allocatable. Two 10-CPU requests on a 12-CPU Mac: the second
 fails resource admission even if a VM slot is free.
 
@@ -100,7 +100,7 @@ label `darwin.node/host-id=<hardware UUID>` so operators can spread.
 - Honest scheduling: a 20-Mac fleet = 40 concurrent macOS pods, full stop.
 - Overscheduled pods fail fast and observably.
 - Host UI/CI remains responsive because of reserved CPU/memory.
-- DaemonSets must tolerate the taint *and* request no `darwin.node/vm` — we
+- DaemonSets must tolerate the taint *and* request no `darwin.node/vm`, we
   reject any DaemonSet-like extra VM. Sidecar-only DaemonSets are not
   supported (container[0] must be a VM). Use a Linux node for node-exporter;
   scrape darwin-node's metrics endpoint instead.

@@ -1,4 +1,4 @@
-# ADR 0002 — Guest Agent language and communication
+# ADR 0002: Guest Agent language and communication
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -71,15 +71,15 @@ Methods:
 | Method | Direction | Notes |
 |---|---|---|
 | `Handshake` | both | token, versions, hostname |
-| `Health` | host→guest | liveness of the agent itself |
-| `Ready` | host→guest | agent-reported workload ready |
-| `Exec` | host→guest, stream | env, cwd, TTY, stdin/stdout/stderr, exit |
-| `Logs` | host→guest, stream | follow, tail, timestamps, since |
-| `Probe` | host→guest | exec / httpGet / tcpSocket |
-| `Metrics` | host→guest | CPU, memory, disk, net, optional GPU |
-| `NetInfo` | host→guest | interface IPs, primary pod IP |
-| `Materialize` | host→guest | map shared-dir entries onto mountPaths |
-| `Shutdown` | host→guest | graceful halt; host then `VM.Stop` |
+| `Health` | host->guest | liveness of the agent itself |
+| `Ready` | host->guest | agent-reported workload ready |
+| `Exec` | host->guest, stream | env, cwd, TTY, stdin/stdout/stderr, exit |
+| `Logs` | host->guest, stream | follow, tail, timestamps, since |
+| `Probe` | host->guest | exec / httpGet / tcpSocket |
+| `Metrics` | host->guest | CPU, memory, disk, net, optional GPU |
+| `NetInfo` | host->guest | interface IPs, primary pod IP |
+| `Materialize` | host->guest | map shared-dir entries onto mountPaths |
+| `Shutdown` | host->guest | graceful halt; host then `VM.Stop` |
 
 ## In-guest lifecycle
 

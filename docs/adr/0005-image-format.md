@@ -1,4 +1,4 @@
-# ADR 0005 — Image format evolution
+# ADR 0005: Image format evolution
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -8,9 +8,9 @@
 
 Agoda stores a macOS VM as an OCI artifact:
 
-- `application/vnd.agoda.macosvz.disk.image.v1` — compressed raw disk
-- `application/vnd.agoda.macosvz.aux.image.v1` — auxiliary/NVRAM
-- `application/vnd.agoda.macosvz.config.v1+json` — hardware model + machine id
+- `application/vnd.agoda.macosvz.disk.image.v1`, compressed raw disk
+- `application/vnd.agoda.macosvz.aux.image.v1`, auxiliary/NVRAM
+- `application/vnd.agoda.macosvz.config.v1+json`, hardware model + machine id
 
 Pull uses ORAS. Decompress (pgzip) on first pull. Integrity: sidecar
 `.digest` files of the *uncompressed* content. Runtime clonefile's the disk
@@ -20,7 +20,7 @@ This is the right shape. Pain points:
 
 - Vendor media types (`vnd.agoda`) block a shared ecosystem.
 - No guest-agent layer; SSH keys baked by hand.
-- No IPSW→image path in-tree (operators use `macosvm` then a forked ORAS CLI).
+- No IPSW->image path in-tree (operators use `macosvm` then a forked ORAS CLI).
 - Overlays land in `os.TempDir()`, which macOS may purge.
 - Config does not record guest-agent version, OS version, or GPU needs.
 
@@ -59,16 +59,16 @@ requirement). Hardware model stays as baked (tied to the IPSW).
 ### Cache and CoW
 
 - Cache root: `~/Library/Caches/io.darwin-node.node/images/` (configurable).
-- Image key: `CacheKey(ref)` — `:` → `--`, `/` → `_`. We do **not** copy
-  Agoda’s `convertToPath` (it turns `127.0.0.1:5000/macos:latest` into
+- Image key: `CacheKey(ref)`, `:` -> `--`, `/` -> `_`. We do **not** copy
+  Agoda's `convertToPath` (it turns `127.0.0.1:5000/macos:latest` into
   `127.0.0.1/5000/macos/latest`).
 - On start: `clonefile` disk + aux into
   `~/Library/Caches/io.darwin-node.node/pods/<uid>/overlay/`. **Not**
   `os.TempDir()`.
 - On stop: delete overlay. Never mutate the cached base.
-- Digest file next to each blob; mismatch → re-pull. Algorithm: sha256.
-- Overlay machine identifier is **minted per pod**. The image’s
-  `machineIdData` is a template only — two concurrent clones of the same
+- Digest file next to each blob; mismatch -> re-pull. Algorithm: sha256.
+- Overlay machine identifier is **minted per pod**. The image's
+  `machineIdData` is a template only, two concurrent clones of the same
   image must not share a machine ID (Apple networking + 2-VM identity).
 - Sparse decompress (64 KiB zero skip) is used on pull so a 128 GiB
   mostly-empty disk does not fill APFS with zeroes.
@@ -93,8 +93,8 @@ launchd plist and a first-boot ssh fallback key, shuts down.
 ### Image pull secrets
 
 Same as kubelet: `kubernetes.io/dockerconfigjson` and `kubernetes.io/dockercfg`
-from `imagePullSecrets` and the ServiceAccount. Missing/invalid → CreatePod
-fails. Other secret types → Warning event, ignored.
+from `imagePullSecrets` and the ServiceAccount. Missing/invalid -> CreatePod
+fails. Other secret types -> Warning event, ignored.
 
 ## Consequences
 

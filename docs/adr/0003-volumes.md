@@ -1,4 +1,4 @@
-# ADR 0003 — Volume strategy for a macOS guest
+# ADR 0003: Volume strategy for a macOS guest
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -11,10 +11,10 @@ A macOS Virtualization.framework guest has no such namespace. The available
 primitives are:
 
 1. **Virtio-fs shared directories** (`VZVirtioFileSystemDeviceConfiguration` +
-   `MacOSGuestAutomountTag`) — automounted in the guest at
+   `MacOSGuestAutomountTag`), automounted in the guest at
    `/Volumes/My Shared Files/<share-name>`.
-2. **Block devices** — extra virtio-blk disks (good for PVC/CSI later).
-3. **Agent-side copy / link** — host materializes files, agent places them at
+2. **Block devices**, extra virtio-blk disks (good for PVC/CSI later).
+3. **Agent-side copy / link**, host materializes files, agent places them at
    the pod's `mountPath`.
 
 Agoda implements (1) for hostPath, emptyDir, and a subset of projected
@@ -26,7 +26,7 @@ Service account tokens are not rotated.
 
 Two-stage mount:
 
-**Stage A — host materialization** (`pkg/volume`)
+**Stage A, host materialization** (`pkg/volume`)
 
 | Volume | Host action |
 |---|---|
@@ -36,12 +36,12 @@ Two-stage mount:
 | `secret` | Same as configMap, mode 0600 default, directory 0700. |
 | `projected` | Union of the above + serviceAccountToken + downwardAPI. Token rotation: rewrite file when the projected volume is refreshed (VK does not rotate; we re-materialize on the provider resync period). |
 | `downwardAPI` | Support `metadata.{name,namespace,uid,labels,annotations}` and resource requests/limits of container[0]. |
-| PVC / CSI | Not in Phase 1–5. Extension: extra virtio-blk + local CSI using APFS clonefile/snapshots (Phase 6+). |
+| PVC / CSI | Not in Phase 1-5. Extension: extra virtio-blk + local CSI using APFS clonefile/snapshots (Phase 6+). |
 
 Unknown volume types **fail pod admission** (CreatePod returns InvalidInput).
 No silent skip.
 
-**Stage B — guest placement** (`pkg/guest` Materialize)
+**Stage B, guest placement** (`pkg/guest` Materialize)
 
 Shares are attached as a single `VZMultipleDirectoryShare` keyed by volume
 name. After the agent handshakes, the host sends:
@@ -52,10 +52,10 @@ name. After the agent handshakes, the host sends:
 
 Modes:
 
-- `link` — symlink `/Volumes/My Shared Files/<name>` → `guestPath` (emptyDir, hostPath).
-- `copy` — recursive copy (secrets, configMaps) so the guest path survives
+- `link`, symlink `/Volumes/My Shared Files/<name>` -> `guestPath` (emptyDir, hostPath).
+- `copy`, recursive copy (secrets, configMaps) so the guest path survives
   share teardown and is not world-readable via the automount folder.
-- `bind` — `mount_null` when available (Phase 4 hardening).
+- `bind`, `mount_null` when available (Phase 4 hardening).
 
 The control share `.darwin-node` (token, downward files) is always attached
 read-only.
@@ -73,7 +73,7 @@ guest IP. virtio-fs is in-framework, automounted, and works before networking.
 3. Runtime attaches it as virtio-blk (block) or virtio-fs (filesystem).
 4. The CRD/controller path can reuse the same attach code.
 
-That work is explicitly out of Phase 1–5; the volume manager's `Attacher`
+That work is explicitly out of Phase 1-5; the volume manager's `Attacher`
 interface is the hook.
 
 ## Consequences

@@ -1,4 +1,4 @@
-# ADR 0001 — Core architecture: enhanced Virtual Kubelet + VM runtime + Guest Agent
+# ADR 0001: Core architecture: enhanced Virtual Kubelet + VM runtime + Guest Agent
 
 - Status: Accepted
 - Date: 2026-08-23
@@ -17,7 +17,7 @@ It is not production-grade as-is:
 - Kubernetes probes are not evaluated.
 - VM container logs are unsupported.
 - Capacity advertises host CPU/memory in full, with `pods=2` and a *queueing*
-  semaphore — overscheduled pods hang instead of failing closed.
+  semaphore, overscheduled pods hang instead of failing closed.
 - Node conditions are hardcoded healthy.
 - Secrets are not mounted; ConfigMaps only as projected sources.
 - IP discovery is ARP/pcap only.
@@ -37,7 +37,7 @@ Linux CRI model does not map onto a 2-VM Apple runtime. Rejected.
 Would give the best API compatibility for *Linux* sidecars, but macOS VMs are
 not OCI runtime spec containers. Hybrid pods (one VM + N host containers) would
 need a fake sandbox and a custom runtime. Stock kubelet still assumes Linux
-cgroups, CNI, and pod PID namespaces. Rejected for Phase 1–6; revisit only if
+cgroups, CNI, and pod PID namespaces. Rejected for Phase 1-6; revisit only if
 Apple ships a CRI-shaped runtime.
 
 ### C. Enhanced Virtual Kubelet provider + internal VM runtime + Guest Agent (chosen)
@@ -54,13 +54,13 @@ the same runtime later without rewriting the provider.
 
 darwin-node is three cooperating programs plus a library:
 
-1. **`darwin-node`** — host node agent. Virtual Kubelet provider. Owns node
+1. **`darwin-node`**, host node agent. Virtual Kubelet provider. Owns node
    identity, capacity, pod lifecycle, sidecars, image cache, host networking,
    observability.
-2. **`darwin-guest-agent`** — in-guest daemon, started by launchd. Owns exec,
+2. **`darwin-guest-agent`**, in-guest daemon, started by launchd. Owns exec,
    logs, probes, metrics, secret/config materialization, graceful shutdown, IP
    reporting.
-3. **`darwin-image`** — image bake/pack/inject tooling (IPSW restore, agent
+3. **`darwin-image`**, image bake/pack/inject tooling (IPSW restore, agent
    injection, OCI push/pull).
 
 Internal layering (host):

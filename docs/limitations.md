@@ -12,7 +12,7 @@ on Apple Silicon macOS VMs; others are degraded. This file is the contract.
 
 | Feature | Why |
 |---|---|
-| More than 2 concurrent macOS VMs per host | Apple EULA + XNU `hv_apple_isa_vm_quota`. Third VM → `VZErrorVirtualMachineLimitExceeded`. |
+| More than 2 concurrent macOS VMs per host | Apple EULA + XNU `hv_apple_isa_vm_quota`. Third VM -> `VZErrorVirtualMachineLimitExceeded`. |
 | Nested virtualization | Virtualization.framework does not nest macOS VMs. |
 | Exclusive GPU passthrough | Only paravirtualized Metal (`VZMacGraphicsDevice`). Shared with host and the other VM. |
 | Intel Macs | Out of scope. Apple Silicon only. |
@@ -47,7 +47,7 @@ on Apple Silicon macOS VMs; others are degraded. This file is the contract.
 | `mount_null` bind in the guest | Phase 4 hardening |
 | Pod recreate with state transfer | Phase 6 |
 
-## What *does* work (Phase 1–5 contract)
+## What *does* work (Phase 1-5 contract)
 
 - Node registration, leases, taints, honest capacity.
 - Create/delete pods, status, conditions, events.
