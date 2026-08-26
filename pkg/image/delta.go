@@ -17,9 +17,7 @@ package image
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +25,7 @@ import (
 	"path/filepath"
 
 	"github.com/darwin-node/darwin-node/internal/clonefile"
+	"github.com/darwin-node/darwin-node/internal/digest"
 )
 
 const (
@@ -93,11 +92,11 @@ func CreatePatch(basePath, targetPath, outDir, name string) (PatchRef, error) {
 	if err != nil {
 		return PatchRef{}, fmt.Errorf("target: %w", err)
 	}
-	baseSum, err := fileSHA256(basePath)
+	baseSum, err := digest.FileSHA256(basePath)
 	if err != nil {
 		return PatchRef{}, err
 	}
-	targetSum, err := fileSHA256(targetPath)
+	targetSum, err := digest.FileSHA256(targetPath)
 	if err != nil {
 		return PatchRef{}, err
 	}
@@ -113,9 +112,9 @@ func CreatePatch(basePath, targetPath, outDir, name string) (PatchRef, error) {
 		name, chunks, patchBytes, targetInfo.Size())
 	ref := PatchRef{
 		Name:     name,
-		BaseSHA:  "sha256-" + hex.EncodeToString(baseSum),
+		BaseSHA:  baseSum.String(),
 		BaseSize: baseInfo.Size(),
-		DestSHA:  "sha256-" + hex.EncodeToString(targetSum),
+		DestSHA:  targetSum.String(),
 		DestSize: targetInfo.Size(),
 	}
 	man, err := ReadDeltaManifest(outDir)
@@ -169,9 +168,7 @@ func writePatchFile(basePath, targetPath string, baseSize, targetSize int64, out
 	for off := int64(0); off < targetSize; off += chunk {
 		nT, rerr := io.ReadFull(targetF, tgtBuf)
 		if rerr != nil && rerr != io.ErrUnexpectedEOF {
-			if nT == 0 {
-				break
-			}
+			return 0, 0, fmt.Errorf("read target at offset %d: %w", off, rerr)
 		}
 		if nT == 0 {
 			break
@@ -241,12 +238,12 @@ func ApplyDelta(baseDir, deltaDir, destDir string) error {
 }
 
 func applyOne(src, dst, patchPath string, p PatchRef) error {
-	sum, err := fileSHA256(src)
+	sum, err := digest.FileSHA256(src)
 	if err != nil {
 		return err
 	}
-	if got := "sha256-" + hex.EncodeToString(sum); got != p.BaseSHA {
-		return fmt.Errorf("%s: base mismatch, have %s want %s", p.Name, got, p.BaseSHA)
+	if sum.String() != p.BaseSHA {
+		return fmt.Errorf("%s: base mismatch, have %s want %s", p.Name, sum.String(), p.BaseSHA)
 	}
 	info, err := os.Stat(src)
 	if err != nil {
@@ -292,25 +289,15 @@ func applyOne(src, dst, patchPath string, p PatchRef) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	result, err := fileSHA256(dst)
+	result, err := digest.FileSHA256(dst)
 	if err != nil {
 		return err
 	}
-	if got := "sha256-" + hex.EncodeToString(result); got != p.DestSHA {
-		return fmt.Errorf("%s: verification failed, have %s want %s", p.Name, got, p.DestSHA)
+	if result.String() != p.DestSHA {
+		return fmt.Errorf("%s: verification failed, have %s want %s", p.Name, result.String(), p.DestSHA)
 	}
-	return nil
-}
-
-func fileSHA256(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
-	}
-	return h.Sum(nil), nil
+	// Refresh the digest sidecar: the clone carried the base's sidecar, and
+	// a stale (matching-length) sidecar would let future verifies accept the
+	// wrong content.
+	return digest.WriteSidecar(dst, result)
 }

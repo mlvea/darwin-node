@@ -5,13 +5,14 @@ package image
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/darwin-node/darwin-node/internal/clonefile"
+
+	"github.com/darwin-node/darwin-node/internal/digest"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -69,6 +70,8 @@ func findDeltaLayer(nodes []ocispec.Descriptor) (info *deltaLayerInfo, found boo
 func (m *Manager) pullDeltaArtifact(ctx context.Context, destDir string, info *deltaLayerInfo, creds RegistryCreds) (LocalImage, error) {
 	fail := func(err error) (LocalImage, error) {
 		_ = os.RemoveAll(destDir)
+		_ = os.RemoveAll(destDir + ".applied")
+		_ = os.RemoveAll(destDir + ".deltastage")
 		return LocalImage{}, err
 	}
 
@@ -76,14 +79,14 @@ func (m *Manager) pullDeltaArtifact(ctx context.Context, destDir string, info *d
 	if err != nil {
 		return fail(fmt.Errorf("delta base %s: %w", info.baseRef, err))
 	}
-	baseSum, err := fileSHA256(baseImg.DiskPath)
+	baseSum, err := digest.FileSHA256(baseImg.DiskPath)
 	if err != nil {
 		return fail(err)
 	}
-	if hex.EncodeToString(baseSum) != info.baseSHAHex {
+	if baseSum.Encoded() != info.baseSHAHex {
 		return fail(fmt.Errorf(
 			"delta base mismatch: cached disk of %s hashes to %s but the patch pins %s",
-			info.baseRef, hex.EncodeToString(baseSum), info.baseSHAHex))
+			info.baseRef, baseSum.Encoded(), info.baseSHAHex))
 	}
 
 	patchPath := filepath.Join(destDir, info.title)
@@ -111,9 +114,9 @@ func (m *Manager) pullDeltaArtifact(ctx context.Context, destDir string, info *d
 		BaseImage: info.baseRef,
 		Patches: []PatchRef{{
 			Name:     "disk.img",
-			BaseSHA:  "sha256-" + info.baseSHAHex,
+			BaseSHA:  "sha256:" + info.baseSHAHex,
 			BaseSize: baseStat.Size(),
-			DestSHA:  "sha256-" + info.destSHAHex,
+			DestSHA:  "sha256:" + info.destSHAHex,
 			DestSize: info.destSize,
 		}},
 	}); err != nil {
@@ -135,6 +138,15 @@ func (m *Manager) pullDeltaArtifact(ctx context.Context, destDir string, info *d
 	}
 	if err := os.Rename(appliedDir, destDir); err != nil {
 		return fail(err)
+	}
+	// The clone carried the base's provenance and sidecars; recompute both
+	// so verification reflects the patched content.
+	prov := Provenance{}
+	if err := completeProvenance(destDir, &prov); err != nil {
+		return LocalImage{}, fmt.Errorf("provenance after apply: %w", err)
+	}
+	if err := WriteProvenance(destDir, prov); err != nil {
+		return LocalImage{}, err
 	}
 	img, err := LoadDir(destDir)
 	if err != nil {

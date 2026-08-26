@@ -188,6 +188,8 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 	if err != nil {
 		e.slots.Release(slotID)
 		_ = os.RemoveAll(root)
+		// resolveImage stages overlays under cache/pods/<slotID>; clean that too.
+		_ = os.RemoveAll(podMACDir(e.cfg.CacheDir, slotID))
 		return err
 	}
 	e.warm.add(&warmEntry{
@@ -267,12 +269,15 @@ func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) 
 	return token, mac, cpu, mem, mach, nil
 }
 
-// takeWarm adopts a pre-booted VM for pod's image, or returns nil.
+// takeWarm adopts a pre-booted VM for pod's image, or returns nil. The warm
+// slot is released here: from this point the pod's own slot (already
+// acquired in Create) covers the machine, and the entry leaves the pool.
 func (e *Engine) takeWarm(imageRef string) *warmEntry {
 	entry := e.warm.take(imageRef)
 	if entry == nil {
 		return nil
 	}
+	e.slots.Release(entry.slotID)
 	e.events.Normal(context.Background(), event.ReasonWarmAdopted,
 		fmt.Sprintf("pod adopted pre-booted VM %s (no cold boot)", entry.slotID))
 	return entry

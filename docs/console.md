@@ -39,8 +39,10 @@ darwin-node console --namespace default --name macos
 The CLI puts the local terminal into raw mode (`x/term.MakeRaw`) and
 copies both directions until the remote side closes. In raw mode ^C and
 other control bytes reach the guest line discipline untouched, which is
-what makes single-user debugging work. Detach by closing the terminal;
-there is deliberately no server-side escape sequence, because the point
+what makes single-user debugging work. Detach with the client-side
+escape sequence `~.` (tilde then period, telnet-style, recognized only
+at the start of a line); there is deliberately no server-side escape
+sequence, because the point
 of this channel is that nothing intercepts it.
 
 ## Trust model

@@ -2,11 +2,11 @@ package image
 
 import (
 	"crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/darwin-node/darwin-node/internal/digest"
 )
 
 // writeImageDirWithDisk writes a minimal valid image dir whose disk.img is
@@ -87,12 +87,11 @@ func TestDeltaRoundTrip(t *testing.T) {
 	if err := ApplyDelta(base, deltaDir, dest); err != nil {
 		t.Fatal(err)
 	}
-	gotSum, err := fileSHA256(filepath.Join(dest, "disk.img"))
+	gotSum, err := digest.FileSHA256(filepath.Join(dest, "disk.img"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSum, _ := hex.DecodeString(ref.DestSHA[len("sha256-"):])
-	if hex.EncodeToString(gotSum) != hex.EncodeToString(wantSum) {
+	if gotSum.String() != ref.DestSHA {
 		t.Fatal("applied disk does not match target")
 	}
 	// The destination must be a loadable image dir.
@@ -179,12 +178,11 @@ func TestDeltaShrinkAndIdenticalBase(t *testing.T) {
 	if info.Size() != int64(len(shrunk)) {
 		t.Fatalf("size %d want %d", info.Size(), len(shrunk))
 	}
-	sum, err := fileSHA256(filepath.Join(dest, "disk.img"))
+	sum, err := digest.FileSHA256(filepath.Join(dest, "disk.img"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, _ := hex.DecodeString(refShrink.DestSHA[len("sha256-"):])
-	if hex.EncodeToString(sum) != hex.EncodeToString(want) {
-		t.Fatal(fmt.Sprintf("shrunk disk mismatch"))
+	if sum.String() != refShrink.DestSHA {
+		t.Fatal("shrunk disk mismatch")
 	}
 }

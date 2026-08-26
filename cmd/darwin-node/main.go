@@ -175,16 +175,15 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 
 // shutdownDrain gives running pods their termination grace periods before
 // the process exits: preStop hooks, guest shutdown RPCs, and cache
-// snapshots all run through the normal delete path.
+// snapshots all run through the normal delete path. The engine is always
+// closed afterwards, whatever the budget.
 func shutdownDrain(cfg dnconfig.Config, eng *engine.Engine) {
-	budget := cfg.ShutdownGrace
-	if budget <= 0 {
-		return // explicit zero disables draining
-	}
-	dctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-	if err := eng.Drain(dctx); err != nil {
-		slog.Warn("drain incomplete", "error", err)
+	if cfg.ShutdownGrace > 0 {
+		dctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+		defer cancel()
+		if err := eng.Drain(dctx); err != nil {
+			slog.Warn("drain incomplete", "error", err)
+		}
 	}
 	eng.Close()
 }
@@ -280,7 +279,8 @@ func cmdConsole(cfg *dnconfig.Config) *cobra.Command {
 
 // bridgeStdio puts the local terminal into raw mode and copies both
 // directions until the remote side closes. Raw mode means ^C and other
-// control bytes reach the guest line discipline untouched.
+// control bytes reach the guest line discipline untouched. Typing the
+// escape sequence ~. (tilde then period) detaches, telnet-style.
 func bridgeStdio(conn net.Conn) error {
 	stdinFd := int(os.Stdin.Fd())
 	restore := func() {}
@@ -294,8 +294,27 @@ func bridgeStdio(conn net.Conn) error {
 
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(conn, os.Stdin)
-		done <- struct{}{}
+		defer func() { done <- struct{}{} }()
+		ef := newEscapeFilter()
+		buf := make([]byte, 512)
+		for {
+			n, rerr := os.Stdin.Read(buf)
+			if n > 0 {
+				out, ok := ef.feed(buf[:n])
+				if !ok {
+					fmt.Fprintln(os.Stderr, "\n~ detached")
+					return
+				}
+				if len(out) > 0 {
+					if _, werr := conn.Write(out); werr != nil {
+						return
+					}
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
 	}()
 	go func() {
 		_, _ = io.Copy(os.Stdout, conn)
@@ -303,6 +322,39 @@ func bridgeStdio(conn net.Conn) error {
 	}()
 	<-done
 	return nil
+}
+
+// escapeFilter forwards stdin bytes but swallows the two-byte detach
+// sequence "~." (only when tilde follows a newline or start of input).
+// It returns ok=false to signal detachment.
+type escapeFilter struct {
+	sawTilde    bool
+	atLineStart bool
+}
+
+func newEscapeFilter() *escapeFilter { return &escapeFilter{atLineStart: true} }
+
+func (f *escapeFilter) feed(p []byte) (out []byte, ok bool) {
+	for _, b := range p {
+		switch {
+		case f.sawTilde:
+			f.sawTilde = false
+			if b == '.' {
+				return out, false // detach requested
+			}
+			out = append(out, '~', b) // not an escape: flush both bytes
+		case b == '~' && f.atLineStart:
+			f.sawTilde = true // hold the byte until we see what follows
+		default:
+			out = append(out, b)
+		}
+		if b == '\r' || b == '\n' {
+			f.atLineStart = true
+		} else if b != '~' {
+			f.atLineStart = false
+		}
+	}
+	return out, true
 }
 
 func cmdDebugDump(cfg *dnconfig.Config) *cobra.Command {

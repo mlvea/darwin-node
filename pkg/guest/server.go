@@ -169,7 +169,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	defer wg.Wait()
 
 	inflight := newSemaphore(DefaultMaxInflight)
-	upstream := newUpstreamRouter()
+	conn := &connState{upstream: newUpstreamRouter()}
 
 	setConnDeadline(rw, h.handshakeTimeout())
 
@@ -177,8 +177,15 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// An interactive exec may legitimately stay silent longer than the
+		// idle timeout (an open shell produces no frames until output).
+		// Suppress the deadline while any is running.
 		if handshook.Load() {
-			setReadDeadline(rw, h.idleTimeout())
+			if conn.liveInteractive.Load() > 0 {
+				setReadDeadline(rw, 0)
+			} else {
+				setReadDeadline(rw, h.idleTimeout())
+			}
 		}
 		env, err := fc.Read()
 		if err != nil {
@@ -190,7 +197,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 		// Client→agent stream frames (stdin, tty resize) route to the
 		// goroutine serving that envelope ID. Unknown IDs are dropped.
 		if env.Kind == KindStream {
-			upstream.forward(env)
+			conn.upstream.forward(env)
 			continue
 		}
 		if env.Kind != KindRequest {
@@ -199,7 +206,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 
 		// Handshake stays serial so later methods cannot race the token check.
 		if env.Method == MethodHandshake || !handshook.Load() {
-			if err := h.writeDispatch(ctx, fc, &handshook, env, upstream); err != nil {
+			if err := h.writeDispatch(ctx, fc, &handshook, env, conn); err != nil {
 				return err
 			}
 			if handshook.Load() {
@@ -216,7 +223,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 		go func(env Envelope) {
 			defer wg.Done()
 			defer inflight.Release()
-			_ = h.writeDispatch(ctx, fc, &handshook, env, upstream)
+			_ = h.writeDispatch(ctx, fc, &handshook, env, conn)
 		}(env)
 	}
 }
@@ -227,6 +234,12 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 type upstreamRouter struct {
 	mu      sync.Mutex
 	streams map[string]chan Envelope
+}
+
+// connState carries per-connection state into dispatch goroutines.
+type connState struct {
+	upstream        *upstreamRouter
+	liveInteractive atomic.Int32
 }
 
 func newUpstreamRouter() *upstreamRouter {
@@ -269,8 +282,8 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, upstream *upstreamRouter) error {
-	res, stream := h.dispatch(ctx, handshook, env, upstream)
+func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, conn *connState) error {
+	res, stream := h.dispatch(ctx, handshook, env, conn)
 	if stream != nil {
 		for ev := range stream {
 			if err := fc.Write(ev); err != nil {
@@ -282,7 +295,7 @@ func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *a
 	return fc.Write(res)
 }
 
-func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Envelope, upstream *upstreamRouter) (Envelope, <-chan Envelope) {
+func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Envelope, conn *connState) (Envelope, <-chan Envelope) {
 	reply := func(payload any, err *CallError) Envelope {
 		out := Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: env.Method}
 		if err != nil {
@@ -455,13 +468,15 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		ch := make(chan Envelope, 16)
 		var upstreamCh <-chan Envelope
 		interactive := req.Stdin || req.TTY
-		if interactive && upstream != nil {
-			upstreamCh = upstream.register(env.ID)
+		if interactive && conn != nil {
+			upstreamCh = conn.upstream.register(env.ID)
+			conn.liveInteractive.Add(1)
 			go func() {
 				// Keep the router entry alive until the stream channel closes.
 				for range ch {
 				}
-				upstream.unregister(env.ID)
+				conn.liveInteractive.Add(-1)
+				conn.upstream.unregister(env.ID)
 			}()
 		}
 		stdinR := newExecStdinReader(upstreamCh, interactive)
@@ -487,21 +502,39 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 
 // execStdinReader adapts upstream ExecStdin/TtyResize frames into an
 // io.Reader for the exec'd process. Resize frames are surfaced on the
-// optional resize channel and never enter the byte stream.
+// optional resize channel and never enter the byte stream. Abort wakes any
+// blocked Read once the command is done, so nothing lingers per session.
 type execStdinReader struct {
 	ch          <-chan Envelope
 	resize      chan<- TtyResize
+	abort       chan struct{}
+	abortOnce   sync.Once
 	current     []byte
 	eof         bool
 	sawUpstream bool
 }
 
 func newExecStdinReader(ch <-chan Envelope, interactive bool) *execStdinReader {
-	return &execStdinReader{ch: ch, eof: !interactive}
+	return &execStdinReader{ch: ch, eof: !interactive, abort: make(chan struct{})}
 }
 
+func (r *execStdinReader) abortNow() { r.abortOnce.Do(func() { close(r.abort) }) }
+
 func (r *execStdinReader) pump() {
-	for env := range r.ch {
+	for {
+		var env Envelope
+		ok := false
+		select {
+		case env, ok = <-r.ch:
+		case <-r.abort:
+			r.eof = true
+			return
+		}
+		if !ok {
+			// Upstream channel closed without EOF (client vanished): end stdin.
+			r.eof = true
+			return
+		}
 		if ev, err := DecodePayload[TtyResize](env); err == nil && (ev.Cols > 0 || ev.Rows > 0) {
 			if r.resize != nil {
 				select {
@@ -527,8 +560,6 @@ func (r *execStdinReader) pump() {
 			return // yield buffered bytes before blocking again
 		}
 	}
-	// Upstream channel closed without EOF (client vanished): end stdin.
-	r.eof = true
 }
 
 func (r *execStdinReader) Read(p []byte) (int, error) {
@@ -539,7 +570,11 @@ func (r *execStdinReader) Read(p []byte) (int, error) {
 		if r.eof {
 			return 0, io.EOF
 		}
+		// pump blocks until data, an EOF marker, upstream close, or abort.
 		r.pump()
+		if r.eof && len(r.current) == 0 {
+			return 0, io.EOF
+		}
 	}
 	n := copy(p, r.current)
 	r.current = r.current[n:]

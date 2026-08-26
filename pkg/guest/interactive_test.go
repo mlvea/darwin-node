@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,5 +204,69 @@ func TestExecStdinReaderDecodesAndEOFs(t *testing.T) {
 	}
 	if _, err := r.Read(buf); err != io.EOF {
 		t.Fatalf("want EOF, got %v", err)
+	}
+}
+
+// A TTY session with no output for longer than IdleTimeout must survive:
+// open shells are silent until something prints.
+func TestTTYExecSurvivesIdleTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pty")
+	}
+	h := Handler{Token: "tok", IdleTimeout: 150 * time.Millisecond}
+	h.LogBuffer = NewLogBuffer(16)
+	hostC, agentC := net.Pipe()
+	serveErr := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { serveErr <- Serve(ctx, agentC, h) }()
+	cli, err := Dial(ctx, hostC, "tok", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	var out lockedBuffer
+	done := make(chan int, 1)
+	go func() {
+		code, err := cli.ExecInteractive(ctx,
+			ExecReq{Argv: []string{"/bin/sh", "-c", "sleep 1; echo done"}, TTY: true},
+			nil, nil, &out, io.Discard)
+		if err != nil {
+			t.Errorf("tty exec: %v", err)
+		}
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out.String(), "done") {
+			t.Fatalf("missing output: %q", out.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("silent TTY session dropped by idle timeout")
+	}
+}
+
+// Aborting the stdin reader must unblock a Read parked on upstream frames.
+func TestExecStdinReaderAbort(t *testing.T) {
+	r := newExecStdinReader(make(chan Envelope), true)
+	errCh := make(chan error, 1)
+	buf := make([]byte, 4)
+	go func() {
+		_, err := r.Read(buf)
+		errCh <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	r.abortNow()
+	select {
+	case err := <-errCh:
+		if err != io.EOF {
+			t.Fatalf("abort should yield EOF, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read not unblocked by abort")
 	}
 }

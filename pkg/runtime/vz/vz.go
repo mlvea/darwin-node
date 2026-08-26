@@ -164,6 +164,11 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 		_ = m.listener.Close()
 		m.listener = nil
 	}
+	if m.console != nil {
+		// Release the pipe pairs so bridges and readers unblock.
+		_ = m.console.Close()
+		m.console = nil
+	}
 	now := time.Now()
 	m.finished = &now
 	return nil

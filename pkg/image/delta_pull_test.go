@@ -180,6 +180,19 @@ func TestPullDeltaArtifactEndToEnd(t *testing.T) {
 	if _, err := LoadDir(img.Dir); err != nil {
 		t.Fatalf("cache entry not a valid image dir: %v", err)
 	}
+	// The cloned base provenance must not survive the patch: a stale
+	// (digest,size) pair passes the sidecar fast path whenever length is
+	// unchanged, silently accepting corrupted content.
+	if err := img.VerifyOptional(); err != nil {
+		t.Fatalf("delta-pulled image fails its own verification: %v", err)
+	}
+	if img.DiskDig.String() != "sha256:"+digestOf(targetDisk) {
+		t.Fatalf("provenance still carries the base digest: %s", img.DiskDig)
+	}
+	b, err := os.ReadFile(filepath.Join(img.Dir, "disk.img.digest"))
+	if err != nil || !strings.HasPrefix(string(b), "sha256:"+digestOf(targetDisk)) {
+		t.Fatalf("sidecar not refreshed: %q %v", b, err)
+	}
 
 	// Second pull must be served entirely from cache.
 	reg.close()

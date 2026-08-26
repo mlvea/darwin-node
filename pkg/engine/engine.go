@@ -1171,10 +1171,14 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	machine := rec.machine
 	pod := rec.pod.DeepCopy()
 	places := append([]volume.Placement(nil), rec.places...)
+	oldAgent := rec.agent
 	rec.agent = nil
 	rec.mu.Unlock()
 	if machine == nil {
 		return fmt.Errorf("no machine to restart")
+	}
+	if oldAgent != nil {
+		_ = oldAgent.Close() // release the pre-restart vsock/TCP connection
 	}
 	_ = machine.Stop(ctx, 5*time.Second)
 	if err := machine.Start(ctx); err != nil {

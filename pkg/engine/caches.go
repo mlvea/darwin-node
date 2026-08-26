@@ -168,14 +168,20 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q clone: %v", c.Name, err))
 			continue
 		}
-		if err := os.RemoveAll(store); err != nil {
+		// Swap with a recovery step: a crash between the two renames leaves
+		// the previous store intact under .old rather than destroyed.
+		_ = os.RemoveAll(store + ".old")
+		if err := os.Rename(store, store+".old"); err != nil && !os.IsNotExist(err) {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
 		if err := os.Rename(tmp, store); err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q swap: %v", c.Name, err))
+			// Best-effort rollback so the old snapshot stays live.
+			_ = os.Rename(store+".old", store)
 			continue
 		}
+		_ = os.RemoveAll(store + ".old")
 		e.events.Normal(context.Background(), event.ReasonCacheSaved, c.GuestPath+" -> "+store)
 	}
 }
