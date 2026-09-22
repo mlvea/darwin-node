@@ -89,8 +89,11 @@ func (m *Manager) pullDeltaArtifact(ctx context.Context, destDir string, info *d
 			info.baseRef, baseSum.Encoded(), info.baseSHAHex))
 	}
 
+	if err := safePathSegment(info.title); err != nil {
+		return fail(fmt.Errorf("delta patch blob name: %w", err))
+	}
 	patchPath := filepath.Join(destDir, info.title)
-	if info.title == "" || !fileExists(patchPath) {
+	if !fileExists(patchPath) {
 		return fail(fmt.Errorf("delta patch blob %q missing after copy", info.title))
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "config.json")); err != nil {

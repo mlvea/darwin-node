@@ -93,6 +93,12 @@ func checkTCP(mp Mapping) error {
 	if proto != "TCP" {
 		return fmt.Errorf("hostPort protocol %s is not supported", mp.Protocol)
 	}
+	if mp.HostPort < 1 || mp.HostPort > 65535 {
+		return fmt.Errorf("hostPort %d is invalid", mp.HostPort)
+	}
+	if mp.ContainerPort < 1 || mp.ContainerPort > 65535 {
+		return fmt.Errorf("containerPort %d is invalid", mp.ContainerPort)
+	}
 	return nil
 }
 

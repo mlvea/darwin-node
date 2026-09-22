@@ -38,6 +38,37 @@ func TestAgentDialContextCapsWhenNoDeadline(t *testing.T) {
 	}
 }
 
+func TestVsockAttemptLeavesTCPReserve(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	ctx, cancel2 := vsockAttemptContext(parent)
+	defer cancel2()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline")
+	}
+	parentDL, _ := parent.Deadline()
+	gap := parentDL.Sub(dl)
+	if gap < 4*time.Second || gap > 6*time.Second {
+		t.Fatalf("vsock deadline is %v before parent, want ~5s", gap)
+	}
+}
+
+func TestVsockAttemptSplitsShortBudget(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	ctx, cancel2 := vsockAttemptContext(parent)
+	defer cancel2()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline")
+	}
+	parentDL, _ := parent.Deadline()
+	if !dl.Before(parentDL) {
+		t.Fatal("short budget must still leave time after the vsock attempt")
+	}
+}
+
 func TestAgentDialContextKeepsCallerDeadline(t *testing.T) {
 	parent, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()

@@ -261,7 +261,7 @@ func cmdConsole(cfg *dnconfig.Config) *cobra.Command {
 			"unix socket. Works even when the guest agent and SSH are both down.\n" +
 			"Detach with ~. (tilde-dot), like a serial console.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock := engine.ConsoleSocketPath(name + "@" + ns)
+			sock := engine.ConsoleSocketPath(ns, name)
 			conn, err := net.Dial("unix", sock)
 			if err != nil {
 				return fmt.Errorf("console socket: %w (is the pod running with --serial-console?)", err)

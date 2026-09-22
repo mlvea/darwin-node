@@ -22,8 +22,18 @@ func ValidatePod(pod *corev1.Pod, allowedHostPaths []string) error {
 	if len(pod.Spec.Containers) == 0 {
 		return fmt.Errorf("pod has no containers")
 	}
-	if pod.UID == "" {
-		return fmt.Errorf("pod uid is required")
+	if err := safeSegment("pod uid", string(pod.UID)); err != nil {
+		return err
+	}
+	if pod.Namespace != "" {
+		if err := safeSegment("namespace", pod.Namespace); err != nil {
+			return err
+		}
+	}
+	if pod.Name != "" {
+		if err := safeSegment("name", pod.Name); err != nil {
+			return err
+		}
 	}
 	if pod.Spec.Containers[0].Image == "" {
 		return fmt.Errorf("container[0] (macOS VM) has no image")
@@ -114,4 +124,14 @@ func VMResources(c corev1.Container) (cpu uint, memory uint64, err error) {
 		}
 	}
 	return cpu, memory, nil
+}
+
+// safeSegment rejects values that would escape cache/pods or cache-store
+// when joined onto a directory. Empty is rejected; callers that allow an
+// unset namespace check that themselves.
+func safeSegment(kind, s string) error {
+	if s == "" || s == "." || s == ".." || strings.ContainsAny(s, `/\`) || strings.ContainsRune(s, 0) {
+		return fmt.Errorf("%s %q is not a single path segment", kind, s)
+	}
+	return nil
 }

@@ -387,6 +387,149 @@ func TestExecStreamAndExecCap(t *testing.T) {
 	}
 }
 
+func TestActiveConnRefreshesIdleDeadline(t *testing.T) {
+	h := Handler{Token: "secret", IdleTimeout: 150 * time.Millisecond}
+	h.Init()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = Serve(ctx, a, h) }()
+	cli, err := Dial(ctx, b, "secret", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	deadline := time.Now().Add(700 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		res, err := cli.Health(ctx)
+		if err != nil || !res.OK {
+			t.Fatalf("health during idle window: %v %+v", err, res)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+}
+
+func TestInteractiveExecKeepsEveryStdoutByte(t *testing.T) {
+	const chunks = 80
+	payload := bytes.Repeat([]byte("01234567"), chunks)
+	h := Handler{
+		Token: "secret",
+		ExecFn: func(ctx context.Context, req ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+			for i := 0; i < len(payload); i += 8 {
+				if _, err := stdout.Write(payload[i : i+8]); err != nil {
+					return 1, err
+				}
+			}
+			return 0, nil
+		},
+	}
+	h.Init()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = Serve(ctx, a, h) }()
+	cli, err := Dial(ctx, b, "secret", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	var got bytes.Buffer
+	code, err := cli.ExecInteractive(ctx, ExecReq{Argv: []string{"cat"}, Stdin: true}, strings.NewReader(""), nil, &got, io.Discard)
+	if err != nil || code != 0 {
+		t.Fatalf("exec code=%d err=%v", code, err)
+	}
+	if got.Len() != len(payload) {
+		t.Fatalf("stdout lost bytes: got %d want %d", got.Len(), len(payload))
+	}
+}
+
+func TestOverloadedInteractiveDoesNotPinConnection(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{})
+	var startOnce sync.Once
+	h := Handler{
+		Token:       "secret",
+		IdleTimeout: 200 * time.Millisecond,
+		Limiter:     NewLimiter(4, 1),
+		ExecFn: func(ctx context.Context, req ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+			startOnce.Do(func() { close(started) })
+			select {
+			case <-block:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+	}
+	h.Init()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = Serve(ctx, a, h) }()
+	cli, err := Dial(ctx, b, "secret", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = cli.ExecInteractive(ctx, ExecReq{Argv: []string{"hold"}, Stdin: true}, strings.NewReader(""), nil, io.Discard, io.Discard)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("exec did not start")
+	}
+	if _, err := cli.ExecInteractive(ctx, ExecReq{Argv: []string{"extra"}, Stdin: true}, strings.NewReader(""), nil, io.Discard, io.Discard); err == nil {
+		t.Fatal("expected overloaded exec")
+	}
+	close(block)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("holding exec did not finish")
+	}
+	time.Sleep(700 * time.Millisecond)
+	hctx, hcancel := context.WithTimeout(context.Background(), time.Second)
+	defer hcancel()
+	if _, err := cli.Health(hctx); err == nil {
+		t.Fatal("connection stayed open after idle; liveInteractive counter leaked")
+	}
+}
+
+func TestMaterializeRefusesToDeleteGuestDir(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "keep")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := defaultMaterialize(MaterializeReq{Volumes: []VolumePlace{{
+		Name: "vol", GuestPath: target, Mode: "link",
+	}}})
+	if res.OK {
+		t.Fatal("expected refusal to replace a real directory")
+	}
+	if b, err := os.ReadFile(filepath.Join(target, "file")); err != nil || string(b) != "x" {
+		t.Fatalf("guest directory was destroyed: %q %v", b, err)
+	}
+	if res := defaultMaterialize(MaterializeReq{Volumes: []VolumePlace{{Name: "vol", GuestPath: "/", Mode: "link"}}}); res.OK {
+		t.Fatal("mount at / must be rejected")
+	}
+	if res := defaultMaterialize(MaterializeReq{Volumes: []VolumePlace{{Name: "../x", GuestPath: "/tmp/x", Mode: "link"}}}); res.OK {
+		t.Fatal("volume name escape must be rejected")
+	}
+}
+
 func TestIdleConnsFreeLimiter(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

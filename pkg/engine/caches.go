@@ -114,6 +114,12 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 	}
 	uid := string(pod.UID)
 	ns := pod.Namespace
+	if err := safeSegment("pod uid", uid); err != nil {
+		return nil, nil, err
+	}
+	if err := safeSegment("namespace", ns); err != nil {
+		return nil, nil, err
+	}
 	var shares []types.Share
 	var places []volume.Placement
 	for _, c := range caches {
@@ -123,7 +129,10 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 			return nil, nil, fmt.Errorf("cache %q: %w", c.Name, err)
 		}
 		if _, err := os.Stat(store); err == nil {
-			if err := clonefile.File(store, hostDir); err != nil {
+			// Cache volumes are directory trees. File() works on Darwin via
+			// directory clonefile(2); on Linux it copyFile's and fails with
+			// "is a directory". Dir walks with per-file CoW/copy fallback.
+			if err := clonefile.Dir(store, hostDir); err != nil {
 				return nil, nil, fmt.Errorf("cache %q restore: %w", c.Name, err)
 			}
 			e.events.Normal(context.Background(), event.ReasonCacheRestored, c.Name+" -> "+c.GuestPath)
@@ -153,6 +162,10 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 		return
 	}
 	uid := string(pod.UID)
+	if err := safeSegment("namespace", pod.Namespace); err != nil {
+		e.events.Warn(context.Background(), event.ReasonCacheSaved, err.Error())
+		return
+	}
 	for _, c := range caches {
 		src := e.cachePodDir(uid, c.Name)
 		if _, err := os.Stat(src); err != nil {
@@ -164,7 +177,7 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
-		if err := clonefile.File(src, tmp); err != nil {
+		if err := clonefile.Dir(src, tmp); err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q clone: %v", c.Name, err))
 			continue
 		}
