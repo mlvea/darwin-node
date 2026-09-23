@@ -63,10 +63,13 @@ Documented failure: a third pod must become Failed `VMCapacityExhausted`.
 ```bash
 ./bin/darwin-node debug-dump -o /tmp/debug-snapshot.json
 # writes /tmp/debug-snapshot.json and /tmp/snapshot.js
-open web/debug.html   # or copy debug.html + debug.js next to snapshot.js and open file://
+mkdir -p web && cp pkg/debug/assets/debug.html pkg/debug/assets/debug.js web/
+open web/debug.html   # or open the copies written next to snapshot.js
 ```
 
-`web/debug.html` uses plain `<script src>` (not ES modules) so `file://` works.
+Embed source of truth is `pkg/debug/assets/` (`go:embed`). Top-level `web/` is a
+gitignored local convenience for `file://` browsing. The page uses plain
+`<script src>` (not ES modules) so `file://` works.
 
 `.github/workflows/ci.yml` at this repository root:
 

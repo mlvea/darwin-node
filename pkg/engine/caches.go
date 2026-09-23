@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -104,6 +105,19 @@ func (e *Engine) cacheStorePath(ns, name string) string {
 	return filepath.Join(e.cfg.CacheDir, cacheStoreDirName, ns, name)
 }
 
+// cloneCacheDir restores a cache tree. On Darwin, prefer a single-shot
+// clonefile(2) of the directory (APFS CoW); fall back to walk+per-file
+// clone/copy when that fails (non-APFS volumes). Elsewhere always use Dir
+// so Linux never hits copy_file_range on a directory.
+func cloneCacheDir(src, dst string) error {
+	if runtime.GOOS == "darwin" {
+		if err := clonefile.File(src, dst); err == nil {
+			return nil
+		}
+	}
+	return clonefile.Dir(src, dst)
+}
+
 // prepareCaches restores each declared cache from the store (CoW clone when
 // present, empty dir otherwise) and returns the virtio-fs shares and link
 // placements that expose them at the annotated guest paths.
@@ -129,10 +143,7 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 			return nil, nil, fmt.Errorf("cache %q: %w", c.Name, err)
 		}
 		if _, err := os.Stat(store); err == nil {
-			// Cache volumes are directory trees. File() works on Darwin via
-			// directory clonefile(2); on Linux it copyFile's and fails with
-			// "is a directory". Dir walks with per-file CoW/copy fallback.
-			if err := clonefile.Dir(store, hostDir); err != nil {
+			if err := cloneCacheDir(store, hostDir); err != nil {
 				return nil, nil, fmt.Errorf("cache %q restore: %w", c.Name, err)
 			}
 			e.events.Normal(context.Background(), event.ReasonCacheRestored, c.Name+" -> "+c.GuestPath)
@@ -177,7 +188,7 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
-		if err := clonefile.Dir(src, tmp); err != nil {
+		if err := cloneCacheDir(src, tmp); err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q clone: %v", c.Name, err))
 			continue
 		}
