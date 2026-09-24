@@ -182,7 +182,14 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	lastRead.Store(time.Now().UnixNano())
 	wdone := make(chan struct{})
 	defer close(wdone)
-	go h.idleWatchdog(ctx, rw, conn, &lastRead, wdone)
+	// Join the watchdog before Serve returns. close(wdone) is deferred
+	// ahead of wg.Wait, so the goroutine observes shutdown and Done
+	// before Wait unblocks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h.idleWatchdog(ctx, rw, conn, &lastRead, wdone)
+	}()
 
 	for {
 		if err := ctx.Err(); err != nil {

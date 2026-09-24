@@ -19,9 +19,20 @@ func serveRaw(t *testing.T) net.Conn {
 	hostC, agentC := net.Pipe()
 	h := Handler{Token: "tok", LogBuffer: NewLogBuffer(16), IdleTimeout: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = Serve(ctx, agentC, h) }()
-	t.Cleanup(func() { _ = hostC.Close() })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = Serve(ctx, agentC, h)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = hostC.Close()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Serve did not exit after cancel/close")
+		}
+	})
 	return hostC
 }
 
