@@ -24,6 +24,11 @@ func LoadDir(dir string) (LocalImage, error) {
 	}
 	img := LocalImage{Dir: dir, Config: cfg}
 	for _, s := range cfg.Storage {
+		if s.File != "" {
+			if err := safePathSegment(s.File); err != nil {
+				return LocalImage{}, fmt.Errorf("image config file: %w", err)
+			}
+		}
 		p := filepath.Join(dir, s.File)
 		switch CanonicalMediaType(s.MediaType) {
 		case MediaTypeDisk:

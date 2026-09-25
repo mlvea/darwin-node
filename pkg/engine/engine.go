@@ -91,8 +91,12 @@ type podRecord struct {
 	initialized     bool
 	sidecarStatuses []sidecar.Status
 	warmDir         string       // set when the VM was adopted from the warm pool
+	warmDisk        string       // cache/pods/<warm-slot> overlay; not the pod uid dir
 	adopt           *warmEntry   // claimed under capacity pressure, adopted in start()
 	consoleLn       net.Listener // per-VM unix socket for break-glass console
+	consoleSock     string
+	consoleHub      *consoleHub
+	startDone       sync.WaitGroup // closed when the async start goroutine returns
 }
 
 // New constructs an engine.
@@ -160,8 +164,7 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 			}
 			if acqErr = e.slots.TryAcquire(uid); acqErr != nil && entry != nil {
 				// Slot raced away; the claimed VM cannot be adopted.
-				_ = entry.machine.Stop(context.Background(), 5*time.Second)
-				_ = os.RemoveAll(entry.root)
+				e.stopWarmEntry(entry)
 				entry = nil
 			} else if acqErr == nil {
 				adopt = entry
@@ -190,16 +193,27 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 	if maps := hostPortReservations(pod); len(maps) > 0 {
 		if err := e.hostports.Reserve(key, maps); err != nil {
 			e.mu.Lock()
+			adopted := rec.adopt
+			rec.adopt = nil
 			delete(e.pods, key)
 			e.mu.Unlock()
 			cancel()
 			e.slots.Release(uid)
+			// The warm VM was already taken out of the pool and its slot
+			// released. Leaving it running would exceed the 2-VM cap.
+			if adopted != nil {
+				e.stopWarmEntry(adopted)
+			}
 			return err
 		}
 	}
 
 	e.events.Normal(ctx, event.ReasonCreated, "accepted macOS pod; booting VM")
-	go e.start(pctx, rec, creds)
+	rec.startDone.Add(1)
+	go func() {
+		defer rec.startDone.Done()
+		e.start(pctx, rec, creds)
+	}()
 	return nil
 }
 
@@ -332,6 +346,7 @@ func (e *Engine) startAdopted(ctx context.Context, rec *podRecord, pod *corev1.P
 	rec.mu.Lock()
 	rec.machine = entry.machine
 	rec.warmDir = entry.root
+	rec.warmDisk = entry.diskDir
 	rec.mu.Unlock()
 
 	e.events.Normal(ctx, event.ReasonStarting, "adopting pre-booted macOS VM")
@@ -371,15 +386,24 @@ func (e *Engine) serveConsole(rec *podRecord) {
 		e.events.Warn(context.Background(), event.ReasonFailed, "console: "+err.Error())
 		return
 	}
-	sockPath := ConsoleSocketPath(pod.Namespace + "@" + pod.Name)
+	sockPath := ConsoleSocketPath(pod.Namespace, pod.Name)
 	_ = os.Remove(sockPath)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		e.events.Warn(context.Background(), event.ReasonFailed, "console socket: "+err.Error())
 		return
 	}
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+		e.events.Warn(context.Background(), event.ReasonFailed, "console socket mode: "+err.Error())
+		return
+	}
+	hub := newConsoleHub(consoleConn)
 	rec.mu.Lock()
 	rec.consoleLn = ln
+	rec.consoleSock = sockPath
+	rec.consoleHub = hub
 	rec.mu.Unlock()
 	go func() {
 		for {
@@ -387,7 +411,7 @@ func (e *Engine) serveConsole(rec *podRecord) {
 			if err != nil {
 				return
 			}
-			go bridgeConsole(consoleConn, c)
+			go hub.attach(c)
 		}
 	}()
 }
@@ -396,22 +420,107 @@ func (e *Engine) serveConsole(rec *podRecord) {
 // Deterministic per pod UID so the CLI resolves it without talking to the
 // node. Lives in TempDir because unix socket paths are limited to 104 bytes
 // on macOS and cache dirs nest deeply.
-func ConsoleSocketPath(uid string) string {
-	sum := sha256.Sum256([]byte(uid))
+func ConsoleSocketPath(namespace, name string) string {
+	sum := sha256.Sum256([]byte(namespace + "/" + name))
 	return filepath.Join(os.TempDir(), fmt.Sprintf("darwin-console-%x.sock", sum[:8]))
 }
 
-// bridgeConsole copies between the serial stream and one attached client
-// until either side closes. Concurrent attachments share the console bytes.
-func bridgeConsole(consoleConn io.ReadWriteCloser, client net.Conn) {
-	defer client.Close()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = io.Copy(client, consoleConn)
-	}()
-	_, _ = io.Copy(consoleConn, client)
-	<-done
+// consoleHub fans one serial stream out to every attached client. A shared
+// io.Copy from the same reader races and delivers each byte to only one of them.
+type consoleHub struct {
+	console io.ReadWriteCloser
+
+	mu      sync.Mutex
+	clients map[net.Conn]struct{}
+	closed  bool
+	once    sync.Once
+}
+
+func newConsoleHub(console io.ReadWriteCloser) *consoleHub {
+	return &consoleHub{console: console, clients: map[net.Conn]struct{}{}}
+}
+
+func (h *consoleHub) attach(c net.Conn) {
+	h.once.Do(func() { go h.readLoop() })
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		_ = c.Close()
+		return
+	}
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := c.Read(buf)
+		if n > 0 {
+			h.mu.Lock()
+			_, werr := h.console.Write(buf[:n])
+			closed := h.closed
+			h.mu.Unlock()
+			if werr != nil || closed {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	h.mu.Lock()
+	delete(h.clients, c)
+	h.mu.Unlock()
+	_ = c.Close()
+}
+
+func (h *consoleHub) readLoop() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := h.console.Read(buf)
+		if n > 0 {
+			chunk := append([]byte(nil), buf[:n]...)
+			h.mu.Lock()
+			clients := make([]net.Conn, 0, len(h.clients))
+			for c := range h.clients {
+				clients = append(clients, c)
+			}
+			h.mu.Unlock()
+			for _, c := range clients {
+				_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				if _, werr := c.Write(chunk); werr != nil {
+					h.mu.Lock()
+					delete(h.clients, c)
+					h.mu.Unlock()
+					_ = c.Close()
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (h *consoleHub) close() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	h.closed = true
+	clients := h.clients
+	h.clients = map[net.Conn]struct{}{}
+	console := h.console
+	h.mu.Unlock()
+	for c := range clients {
+		_ = c.Close()
+	}
+	if console != nil {
+		_ = console.Close()
+	}
 }
 
 // runConnected dials the running machine's agent and drives everything from
@@ -425,8 +534,15 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		dialCtx, cancelDial = context.WithTimeout(ctx, agentDialTimeout)
 	}
 	cli, err := machine.DialAgent(dialCtx)
-	if err != nil {
-		cli, err = e.dialFallback(dialCtx, token, machine)
+	// vsock Accept consumes the whole dial budget on a slow guest. TCP
+	// fallback must get a fresh slice of the pod context or it never dials.
+	if err != nil && ctx.Err() == nil {
+		fbCtx, fbCancel := context.WithTimeout(ctx, tcpFallbackTimeout)
+		cli2, ferr := e.dialFallback(fbCtx, token, machine)
+		fbCancel()
+		if ferr == nil {
+			cli, err = cli2, nil
+		}
 	}
 	cancelDial()
 	if err != nil {
@@ -551,10 +667,15 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 	machine := rec.machine
 	agent := rec.agent
 	warmDir := rec.warmDir
+	warmDisk := rec.warmDisk
 	rec.agent = nil
 	rec.ready = false
 	consoleLn := rec.consoleLn
+	consoleSock := rec.consoleSock
+	consoleHub := rec.consoleHub
 	rec.consoleLn = nil
+	rec.consoleSock = ""
+	rec.consoleHub = nil
 	uid := ""
 	ns, name := "", ""
 	if pod != nil {
@@ -565,8 +686,14 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 
 	key := Key(ns, name)
 	e.hostports.Release(key)
+	if consoleHub != nil {
+		consoleHub.close()
+	}
 	if consoleLn != nil {
 		_ = consoleLn.Close()
+	}
+	if consoleSock != "" {
+		_ = os.Remove(consoleSock)
 	}
 	if runHooks && agent != nil && grace > 0 && pod != nil && len(pod.Spec.Containers) > 0 {
 		sctx, cancel := context.WithTimeout(ctx, time.Duration(grace)*time.Second)
@@ -589,8 +716,12 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 	}
 	_ = e.sidecar.RemovePod(ctx, ns, name, grace)
 	if warmDir != "" {
-		// Adopted VM: its overlay/control tree lives under cache/warm.
+		// Adopted VM: control files live under cache/warm, the CoW disk under
+		// cache/pods/<warm-slot>. Both must go or every adoption leaks a disk.
 		_ = os.RemoveAll(warmDir)
+	}
+	if warmDisk != "" {
+		_ = os.RemoveAll(warmDisk)
 	}
 	if uid != "" {
 		e.slots.Release(uid)
@@ -675,7 +806,10 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
-	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
+	// start() may still be writing the overlay after cancel; wait so RemoveAll
+	// cannot race a late mkdir/write and leave TempDir/cache debris.
+	rec.startDone.Wait()
+	e.snapshotPodCaches(rec) // CoW the final cache state into the store
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
 	e.mu.Lock()
@@ -977,7 +1111,12 @@ func (e *Engine) dialFallback(ctx context.Context, token string, machine runtime
 	return guest.Dial(ctx, conn, token, "darwin-node")
 }
 
-const agentDialTimeout = 45 * time.Second
+// agentDialTimeout and tcpFallbackTimeout are vars so tests can shorten
+// the vsock budget without waiting out a 45s NAT dial.
+var (
+	agentDialTimeout   = 45 * time.Second
+	tcpFallbackTimeout = 5 * time.Second
+)
 
 func podMACDir(cacheDir, uid string) string {
 	return filepath.Join(cacheDir, "pods", uid)

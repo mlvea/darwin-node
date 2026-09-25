@@ -10,6 +10,31 @@ import (
 // did not set a deadline (start() uses an unbounded pod context).
 const defaultAgentDialTimeout = 45 * time.Second
 
+// tcpFallbackReserve is left on the dial deadline so a vsock Accept that
+// nobody answers cannot consume the entire budget before TCP is tried.
+const tcpFallbackReserve = 5 * time.Second
+
+// vsockAttemptContext returns a child of parent that ends tcpFallbackReserve
+// before parent's deadline, when there is room. Shorter budgets are split.
+func vsockAttemptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	dl, ok := parent.Deadline()
+	if !ok {
+		return context.WithCancel(parent)
+	}
+	remain := time.Until(dl)
+	reserve := tcpFallbackReserve
+	if remain <= reserve {
+		if remain <= 0 {
+			return context.WithCancel(parent)
+		}
+		reserve = remain / 2
+		if reserve <= 0 {
+			return context.WithCancel(parent)
+		}
+	}
+	return context.WithDeadline(parent, dl.Add(-reserve))
+}
+
 func agentDialContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return context.WithCancel(ctx)

@@ -143,6 +143,21 @@ func TestVerifyOptionalTamperFailsAgainstProvenance(t *testing.T) {
 	}
 }
 
+func TestLoadDirRejectsStoragePathEscape(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `{
+		"os":"darwin",
+		"hardwareModelData":"abc",
+		"storage":[{"mediatype":"application/vnd.darwin-node.disk.v1","file":"../disk.img"}]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadDir(dir); err == nil {
+		t.Fatal("storage file ../disk.img must be rejected")
+	}
+}
+
 func TestVerifyOptionalSkipsLocalBakeWithoutSidecar(t *testing.T) {
 	dir := t.TempDir()
 	writeTestImage(t, dir, "DISK", "AUX")

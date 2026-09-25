@@ -22,6 +22,18 @@ func TestValidatePod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := ValidatePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "../x", Namespace: "default", UID: "u"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Image: "img"}}},
+	}, nil); err == nil {
+		t.Fatal("pod name with .. must be rejected")
+	}
+	if err := ValidatePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "ok", Namespace: "ns", UID: "a/b"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Image: "img"}}},
+	}, nil); err == nil {
+		t.Fatal("pod uid with a slash must be rejected")
+	}
 }
 
 func TestLooksLikeVMImageAndInitReject(t *testing.T) {

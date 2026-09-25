@@ -22,6 +22,19 @@ func TestConflict(t *testing.T) {
 	}
 }
 
+func TestReserveRejectsBadPorts(t *testing.T) {
+	m := New()
+	if err := m.Reserve("a", []Mapping{{HostPort: 0, ContainerPort: 80}}); err == nil {
+		t.Fatal("hostPort 0")
+	}
+	if err := m.Reserve("a", []Mapping{{HostPort: 80, ContainerPort: 0}}); err == nil {
+		t.Fatal("containerPort 0")
+	}
+	if err := m.Reserve("a", []Mapping{{HostPort: 70000, ContainerPort: 80}}); err == nil {
+		t.Fatal("hostPort 70000")
+	}
+}
+
 func TestReserveRejectsUDP(t *testing.T) {
 	m := New()
 	if err := m.Reserve("a", []Mapping{{HostPort: 8080, ContainerPort: 80, Protocol: "UDP"}}); err == nil {

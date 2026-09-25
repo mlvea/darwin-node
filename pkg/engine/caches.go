@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -104,6 +105,19 @@ func (e *Engine) cacheStorePath(ns, name string) string {
 	return filepath.Join(e.cfg.CacheDir, cacheStoreDirName, ns, name)
 }
 
+// cloneCacheDir restores a cache tree. On Darwin, prefer a single-shot
+// clonefile(2) of the directory (APFS CoW); fall back to walk+per-file
+// clone/copy when that fails (non-APFS volumes). Elsewhere always use Dir
+// so Linux never hits copy_file_range on a directory.
+func cloneCacheDir(src, dst string) error {
+	if runtime.GOOS == "darwin" {
+		if err := clonefile.File(src, dst); err == nil {
+			return nil
+		}
+	}
+	return clonefile.Dir(src, dst)
+}
+
 // prepareCaches restores each declared cache from the store (CoW clone when
 // present, empty dir otherwise) and returns the virtio-fs shares and link
 // placements that expose them at the annotated guest paths.
@@ -114,6 +128,12 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 	}
 	uid := string(pod.UID)
 	ns := pod.Namespace
+	if err := safeSegment("pod uid", uid); err != nil {
+		return nil, nil, err
+	}
+	if err := safeSegment("namespace", ns); err != nil {
+		return nil, nil, err
+	}
 	var shares []types.Share
 	var places []volume.Placement
 	for _, c := range caches {
@@ -123,7 +143,7 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 			return nil, nil, fmt.Errorf("cache %q: %w", c.Name, err)
 		}
 		if _, err := os.Stat(store); err == nil {
-			if err := clonefile.File(store, hostDir); err != nil {
+			if err := cloneCacheDir(store, hostDir); err != nil {
 				return nil, nil, fmt.Errorf("cache %q restore: %w", c.Name, err)
 			}
 			e.events.Normal(context.Background(), event.ReasonCacheRestored, c.Name+" -> "+c.GuestPath)
@@ -153,6 +173,10 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 		return
 	}
 	uid := string(pod.UID)
+	if err := safeSegment("namespace", pod.Namespace); err != nil {
+		e.events.Warn(context.Background(), event.ReasonCacheSaved, err.Error())
+		return
+	}
 	for _, c := range caches {
 		src := e.cachePodDir(uid, c.Name)
 		if _, err := os.Stat(src); err != nil {
@@ -164,7 +188,7 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
-		if err := clonefile.File(src, tmp); err != nil {
+		if err := cloneCacheDir(src, tmp); err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q clone: %v", c.Name, err))
 			continue
 		}

@@ -173,3 +173,66 @@ func TestVerifySizeMismatchRehashes(t *testing.T) {
 		t.Fatal("size mismatch must rehash")
 	}
 }
+
+// A same-size rewrite used to hit the fast path: the sidecar digest still
+// matched expected and the size had not changed, so the new bytes were never
+// hashed. Identity (ctime/mtime/inode) plus a content fingerprint and a
+// process-local MAC closes that — including on overlayfs where timestamps
+// may not bump on overwrite.
+func TestVerifySameSizeOverwriteFails(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "blob")
+	if err := os.WriteFile(p, []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := FileSHA256(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSidecar(p, sum); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("xyz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := HashCount.Load()
+	if err := Verify(p, sum); err == nil {
+		t.Fatal("same-size overwrite must not verify")
+	}
+	if HashCount.Load() == before {
+		t.Fatal("same-size overwrite must rehash")
+	}
+}
+
+func TestVerifyBadMACRehashesThenAccepts(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "blob")
+	if err := os.WriteFile(p, []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := FileSHA256(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSidecar(p, sum); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p + Suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipped := strings.Replace(string(raw), "mac=", "mac=00", 1)
+	if flipped == string(raw) {
+		t.Fatal("sidecar has no mac line")
+	}
+	if err := os.WriteFile(p+Suffix, []byte(flipped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := HashCount.Load()
+	if err := Verify(p, sum); err != nil {
+		t.Fatal(err)
+	}
+	if HashCount.Load() == before {
+		t.Fatal("tampered mac must not take the fast path")
+	}
+}

@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/darwin-node/darwin-node/internal/clonefile"
 	"github.com/darwin-node/darwin-node/internal/digest"
@@ -84,6 +86,9 @@ func ReadDeltaManifest(dir string) (DeltaManifest, error) {
 // outDir/name.patch, appends it to outDir/delta.json, and returns its
 // PatchRef. Both files must exist.
 func CreatePatch(basePath, targetPath, outDir, name string) (PatchRef, error) {
+	if err := safePathSegment(name); err != nil {
+		return PatchRef{}, err
+	}
 	baseInfo, err := os.Stat(basePath)
 	if err != nil {
 		return PatchRef{}, fmt.Errorf("base: %w", err)
@@ -226,7 +231,15 @@ func ApplyDelta(baseDir, deltaDir, destDir string) error {
 		return fmt.Errorf("clone base: %w", err)
 	}
 
+	seen := map[string]struct{}{}
 	for _, p := range man.Patches {
+		if err := safePathSegment(p.Name); err != nil {
+			return fmt.Errorf("delta patch: %w", err)
+		}
+		if _, dup := seen[p.Name]; dup {
+			return fmt.Errorf("delta patch %q listed more than once", p.Name)
+		}
+		seen[p.Name] = struct{}{}
 		if err := applyOne(filepath.Join(baseDir, p.Name), filepath.Join(tmpDir, p.Name), filepath.Join(deltaDir, p.Name+".patch"), p); err != nil {
 			return err
 		}
@@ -265,6 +278,9 @@ func applyOne(src, dst, patchPath string, p PatchRef) error {
 	}
 	defer f.Close()
 
+	if p.DestSize < 0 {
+		return fmt.Errorf("%s: negative destination size", p.Name)
+	}
 	hdr := make([]byte, 12)
 	for {
 		if _, err := io.ReadFull(patch, hdr); err != nil {
@@ -273,8 +289,21 @@ func applyOne(src, dst, patchPath string, p PatchRef) error {
 			}
 			return err
 		}
-		off := int64(binary.BigEndian.Uint64(hdr[:8]))
+		offU := binary.BigEndian.Uint64(hdr[:8])
+		if offU > uint64(math.MaxInt64) {
+			return fmt.Errorf("%s: patch offset overflows", p.Name)
+		}
+		off := int64(offU)
 		length := binary.BigEndian.Uint32(hdr[8:])
+		// Records are one diff chunk. A uint32 length would otherwise allocate
+		// up to 4 GiB before the destination hash is checked.
+		if length == 0 || length > DefaultDeltaChunkSize {
+			return fmt.Errorf("%s: patch record length %d", p.Name, length)
+		}
+		end := off + int64(length)
+		if off < 0 || end < off || end > p.DestSize {
+			return fmt.Errorf("%s: patch write [%d,%d) outside destination size %d", p.Name, off, end, p.DestSize)
+		}
 		data := make([]byte, length)
 		if _, err := io.ReadFull(patch, data); err != nil {
 			return err
@@ -300,4 +329,17 @@ func applyOne(src, dst, patchPath string, p PatchRef) error {
 	// a stale (matching-length) sidecar would let future verifies accept the
 	// wrong content.
 	return digest.WriteSidecar(dst, result)
+}
+
+// safePathSegment rejects absolute paths and any name that is not a single
+// file component. Delta manifests and OCI titles are otherwise joined onto
+// a directory and can write outside it.
+func safePathSegment(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) || strings.ContainsRune(name, 0) {
+		return fmt.Errorf("invalid file name %q", name)
+	}
+	if filepath.Clean(name) != name {
+		return fmt.Errorf("invalid file name %q", name)
+	}
+	return nil
 }
