@@ -9,6 +9,34 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-09-25 ~08:54–09:05 SGT — weekday daily reflection
+- **HEAD (start):** local had rewritten SHAs vs GitHub; synced to `origin/grokbuild/fail-closed-hardening` @ `6de200e`
+- **HEAD (end):** this reflection commit on `grokbuild/fail-closed-hardening` (after push)
+- **What changed today:**
+  1. **Discovery:** [PR #1](https://github.com/mlvea/darwin-node/pull/1) is already open (opened 24 Sep via Cursor agent). Prior status was stale — write auth is no longer the blocker.
+  2. **CI:** macOS `test` job on the merge ref failed once on `TestFailStopsMachineAndFreesSlot` (`TempDir` cleanup: `pods/uid-next` directory not empty). Parallel branch-tip run was green — flake from Delete racing async `Create`/`start` overlay writes.
+  3. **Fix:** `podRecord.startDone` WaitGroup; `Delete` waits after teardown before snapshot/`RemoveAll`. Test waits for `next` → Running before Delete.
+- **Compile / tests (Linux box):**
+  - PASS `go test -count=1 ./pkg/engine/ ./pkg/guest/` (+ earlier core package suite green)
+- **PR / branch:** https://github.com/mlvea/darwin-node/pull/1 — mergeable but `unstable` until CI re-runs green; e2e self-hosted skipped
+- **Grok CLI:** not needed; root cause was clear from CI logs
+
+### Open risks
+- PR #1 CI must go green on Darwin (this fix targets the known flake)
+- Hardware gate (`make test-hardware`), TokenReview authn (TODO S003), and soak remain alpha blockers per `docs/stability.md`
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- Darwin single-shot directory `clonefile` path not runtime-tested on this Linux box
+- Local `gh` CLI still unauthenticated (MCP `user-GitHub-xai` as mlvea used for push)
+
+### Next day priority (Mon 2026-09-28)
+1. Confirm PR #1 Darwin `test` job green after this commit; merge if review-ready
+2. Optional: Darwin-host smoke of cache CoW / `make test-hardware` when a Mac runner is available
+3. Do **not** start TokenReview (S003) or soak until the fail-closed PR is merged
+
+### 2026-09-24 (catch-up; status file was not updated that morning)
+- Commit `40143ca` / remote `6de200e`: Wait for idle watchdog on Serve exit (`pkg/guest`)
+- PR #1 opened with fail-closed hardening (3 commits on top of `main` @ `2bec4b0`)
+
 ### 2026-09-23 ~09:23–09:30 SGT — weekday daily reflection
 - **HEAD (start):** `b2e9cad` on `grokbuild/fail-closed-hardening` (clean; 1 commit ahead of `main`/`origin/main` @ `2bec4b0`)
 - **HEAD (end):** this reflection commit on `grokbuild/fail-closed-hardening` (clean after commit)

@@ -96,6 +96,7 @@ type podRecord struct {
 	consoleLn       net.Listener // per-VM unix socket for break-glass console
 	consoleSock     string
 	consoleHub      *consoleHub
+	startDone       sync.WaitGroup // closed when the async start goroutine returns
 }
 
 // New constructs an engine.
@@ -208,7 +209,11 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 	}
 
 	e.events.Normal(ctx, event.ReasonCreated, "accepted macOS pod; booting VM")
-	go e.start(pctx, rec, creds)
+	rec.startDone.Add(1)
+	go func() {
+		defer rec.startDone.Done()
+		e.start(pctx, rec, creds)
+	}()
 	return nil
 }
 
@@ -801,7 +806,10 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
-	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
+	// start() may still be writing the overlay after cancel; wait so RemoveAll
+	// cannot race a late mkdir/write and leave TempDir/cache debris.
+	rec.startDone.Wait()
+	e.snapshotPodCaches(rec) // CoW the final cache state into the store
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
 	e.mu.Lock()
