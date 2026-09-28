@@ -711,6 +711,12 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 		_ = agent.Shutdown(sctx, guest.ShutdownReq{Reason: "pod deleted"})
 		cancel()
 	}
+	// Always close the agent so Session.readLoop leaves ReadFrame. Skipping
+	// this left TCP/vsock clients parked until the peer idle-timed out —
+	// visible as a leakcheck flake under Darwin CI merge-ref timing.
+	if agent != nil {
+		_ = agent.Close()
+	}
 	if machine != nil {
 		_ = machine.Stop(ctx, time.Duration(grace)*time.Second)
 	}

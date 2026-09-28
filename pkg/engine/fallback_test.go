@@ -55,10 +55,6 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 		t.Skipf("guest tcp port unavailable: %v", err)
 	}
 	srvCtx, srvCancel := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		srvCancel()
-		_ = ln.Close()
-	})
 
 	oldDial := agentDialTimeout
 	agentDialTimeout = 200 * time.Millisecond
@@ -79,14 +75,32 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 	uid := "uid-fb"
 	var accepted sync.Mutex
 	var conns []net.Conn
+	var serveWG sync.WaitGroup
+	acceptDone := make(chan struct{})
+	// Runs before leakcheck (LIFO): cancel Serve, close every accepted
+	// conn, and join Serve so ReadFrame cannot outlive the test.
 	t.Cleanup(func() {
+		srvCancel()
 		accepted.Lock()
-		defer accepted.Unlock()
 		for _, c := range conns {
 			_ = c.Close()
 		}
+		accepted.Unlock()
+		_ = ln.Close()
+		<-acceptDone // no more serveWG.Add after Accept loop exits
+		done := make(chan struct{})
+		go func() {
+			serveWG.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("guest Serve goroutine(s) still running after cancel/close")
+		}
 	})
 	go func() {
+		defer close(acceptDone)
 		for {
 			c, err := ln.Accept()
 			if err != nil {
@@ -95,7 +109,9 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 			accepted.Lock()
 			conns = append(conns, c)
 			accepted.Unlock()
+			serveWG.Add(1)
 			go func(c net.Conn) {
+				defer serveWG.Done()
 				defer c.Close()
 				tokPath := filepath.Join(cfg.CacheDir, "pods", uid, "control", types.GuestAgentTokenFile)
 				var tok string
@@ -108,7 +124,7 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 					}
 					time.Sleep(10 * time.Millisecond)
 				}
-				h := guest.Handler{Token: tok, AgentVersion: "tcp", IdleTimeout: 500 * time.Millisecond}
+				h := guest.Handler{Token: tok, AgentVersion: "tcp", IdleTimeout: 200 * time.Millisecond}
 				h.Init()
 				_ = guest.Serve(srvCtx, c, h)
 			}(c)

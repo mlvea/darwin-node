@@ -9,6 +9,32 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-09-28 ~08:51–09:05 SGT — weekday daily reflection
+- **HEAD (start):** `f44d976` on `grokbuild/fail-closed-hardening` (= origin tip)
+- **HEAD (end):** this reflection commit on `grokbuild/fail-closed-hardening` (after push)
+- **What changed today:**
+  1. **CI discovery:** branch-tip push on `f44d976` was green; merge-ref PR run (`d2fb8de`) failed `TestTCPFallbackAfterExhaustedVsockBudget` with `ReadFrame` leakcheck (0.24s). Flake under Darwin merge-ref timing.
+  2. **Root cause:** `Engine.teardown` nulls `rec.agent` but never `Close()`s it (unlike `restartVM`), so `Session.readLoop` stays in `ReadFrame` until the peer idles out. Leakcheck also exited early on `len(after) <= len(before)` while a new leak signature was still winding down.
+  3. **Fix:** always `agent.Close()` in teardown; wait on the leak *set* in `leakcheck.Check`; fallback test joins Serve via WaitGroup after cancel/close (IdleTimeout 200ms).
+- **Compile / tests (Linux box):**
+  - `go build ./...` OK
+  - PASS `go test -count=10 ./pkg/engine/ -run 'TestTCPFallback|TestFailStops'`
+  - PASS `go test -count=1 ./pkg/engine/ ./pkg/guest/ ./internal/leakcheck/`
+- **PR / branch:** https://github.com/mlvea/darwin-node/pull/1 — push re-triggers CI; e2e self-hosted still skipped
+- **Grok CLI:** not needed; root cause clear from teardown vs restartVM + CI log
+
+### Open risks
+- PR #1 Darwin `test` must go green on merge ref after this commit
+- Hardware gate (`make test-hardware`), TokenReview authn (TODO S003), and soak remain alpha blockers per `docs/stability.md`
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- Darwin single-shot directory `clonefile` path not runtime-tested on this Linux box
+- Local `gh` CLI still unauthenticated (MCP `user-GitHub-xai` as mlvea used for push)
+
+### Next day priority (Tue 2026-09-29)
+1. Confirm PR #1 Darwin `test` green on merge ref; merge if review-ready
+2. Optional: Darwin-host smoke of cache CoW / `make test-hardware` when a Mac runner is available
+3. Do **not** start TokenReview (S003) or soak until the fail-closed PR is merged
+
 ### 2026-09-25 ~08:54–09:05 SGT — weekday daily reflection
 - **HEAD (start):** local had rewritten SHAs vs GitHub; synced to `origin/grokbuild/fail-closed-hardening` @ `6de200e`
 - **HEAD (end):** this reflection commit on `grokbuild/fail-closed-hardening` (after push)
