@@ -2,6 +2,7 @@ package image
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,6 +103,52 @@ func TestDeltaRoundTrip(t *testing.T) {
 	// Applying twice must refuse: destination exists.
 	if err := ApplyDelta(base, deltaDir, dest); err == nil {
 		t.Fatal("second apply should fail")
+	}
+}
+
+func TestDeltaRejectsEscapeAndOversizedRecord(t *testing.T) {
+	if _, err := CreatePatch(filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b"), t.TempDir(), "../evil"); err == nil {
+		t.Fatal("patch name with .. must be rejected")
+	}
+	base := filepath.Join(t.TempDir(), "base")
+	data := []byte("hello-disk-contents!!")
+	writeImageDirWithDisk(t, base, data)
+	sum, err := digest.FileSHA256(filepath.Join(base, "disk.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaDir := t.TempDir()
+	var hdr [12]byte
+	binary.BigEndian.PutUint32(hdr[8:], uint32(DefaultDeltaChunkSize+1))
+	if err := os.WriteFile(filepath.Join(deltaDir, "disk.img.patch"), hdr[:], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteDeltaManifest(deltaDir, DeltaManifest{Patches: []PatchRef{{
+		Name: "disk.img", BaseSHA: sum.String(), BaseSize: int64(len(data)),
+		DestSHA: sum.String(), DestSize: int64(len(data)),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDelta(base, deltaDir, filepath.Join(t.TempDir(), "dest")); err == nil {
+		t.Fatal("oversized patch record must fail before allocation")
+	}
+
+	escapeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(escapeDir, "..patch"), []byte("x"), 0o644); err != nil && !os.IsNotExist(err) {
+		// name is irrelevant; the manifest is rejected before any write
+	}
+	if err := WriteDeltaManifest(escapeDir, DeltaManifest{Patches: []PatchRef{{
+		Name: "../evil", BaseSHA: sum.String(), BaseSize: int64(len(data)),
+		DestSHA: sum.String(), DestSize: int64(len(data)),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(base), "evil")
+	if err := ApplyDelta(base, escapeDir, filepath.Join(t.TempDir(), "escaped")); err == nil {
+		t.Fatal("patch name ../evil must be rejected")
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("escape write landed at %s: %v", outside, err)
 	}
 }
 

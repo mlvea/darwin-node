@@ -2,6 +2,9 @@ package engine
 
 import (
 	"context"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -197,4 +200,95 @@ func TestCloseStopsWarmVMsAndFreesSlots(t *testing.T) {
 	if e.warm.len() != 0 {
 		t.Fatalf("pool not drained: %d", e.warm.len())
 	}
+}
+
+func TestWarmOverlayReapedOnAdoptAndEvict(t *testing.T) {
+	e, _, _ := warmEngine(t, 1, 1, warmImg)
+	waitFor(t, "warm VM", func() bool { return e.warm.len() == 1 })
+	e.cfg.WarmSlots = 0
+	snap := e.warm.snapshot()
+	if len(snap) != 1 || snap[0].diskDir == "" {
+		t.Fatalf("disk dir missing: %+v", snap)
+	}
+	disk := snap[0].diskDir
+	if err := os.MkdirAll(disk, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(disk, "disk.img"), []byte("cow"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pod := samplePod("hot", "uid-hot")
+	pod.Spec.Containers[0].Image = warmImg
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, e, "default", "hot", corev1.PodRunning)
+	if _, err := os.Stat(filepath.Join(disk, "disk.img")); err != nil {
+		t.Fatalf("overlay removed while the adopted VM is running: %v", err)
+	}
+	if err := e.Delete(context.Background(), "default", "hot", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(disk); !os.IsNotExist(err) {
+		t.Fatalf("adopted overlay leaked after delete: %v", err)
+	}
+
+	// Pool refills only when WarmSlots > 0. Re-enable one slot, plant again, evict.
+	e.cfg.WarmSlots = 1
+	waitFor(t, "warm VM after delete", func() bool { return e.warm.len() == 1 })
+	e.cfg.WarmSlots = 0
+	snap = e.warm.snapshot()
+	disk = snap[0].diskDir
+	if err := os.MkdirAll(disk, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(disk, "disk.img"), []byte("cow"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Create(context.Background(), mountedPod("busy", "uid-busy", warmImg), secretCreds); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, e, "default", "busy", corev1.PodRunning)
+	if _, err := os.Stat(disk); !os.IsNotExist(err) {
+		t.Fatalf("evicted overlay leaked: %v", err)
+	}
+	_ = e.Delete(context.Background(), "default", "busy", 0)
+}
+
+func TestHostPortConflictDoesNotLeakAdoptedVM(t *testing.T) {
+	e, rt, _ := warmEngine(t, 2, 1, warmImg)
+	waitFor(t, "warm VM", func() bool { return e.warm.len() == 1 })
+	e.cfg.WarmSlots = 0
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	podA := mountedPod("holder", "uid-holder", "other-image")
+	podA.Spec.Containers[0].Ports = []corev1.ContainerPort{{
+		ContainerPort: 80,
+		HostPort:      int32(port),
+	}}
+	if err := e.Create(context.Background(), podA, secretCreds); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, e, "default", "holder", corev1.PodRunning)
+
+	podB := samplePod("clash", "uid-clash")
+	podB.Spec.Containers[0].Image = warmImg
+	podB.Spec.Containers[0].Ports = []corev1.ContainerPort{{
+		ContainerPort: 80,
+		HostPort:      int32(port),
+	}}
+	if err := e.Create(context.Background(), podB, Credentials{}); err == nil {
+		t.Fatal("expected hostPort conflict")
+	}
+	if running, used := rt.Running(), e.slots.Used(); running > used {
+		t.Fatalf("running VMs %d exceed held slots %d (adopted warm VM leaked)", running, used)
+	}
+	_ = e.Delete(context.Background(), "default", "holder", 0)
 }

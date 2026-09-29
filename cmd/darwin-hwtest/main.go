@@ -200,7 +200,7 @@ func run(cmd *cobra.Command, args []string) error {
 			if !serial {
 				return "" // SKIP
 			}
-			sock := engine.ConsoleSocketPath(namespace + "@" + podName)
+			sock := engine.ConsoleSocketPath(namespace, podName)
 			conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 			if err != nil {
 				return fail(fmt.Errorf("console socket: %w", err))

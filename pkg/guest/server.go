@@ -182,7 +182,14 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	lastRead.Store(time.Now().UnixNano())
 	wdone := make(chan struct{})
 	defer close(wdone)
-	go h.idleWatchdog(ctx, rw, conn, &lastRead, wdone)
+	// Join the watchdog before Serve returns. close(wdone) is deferred
+	// ahead of wg.Wait, so the goroutine observes shutdown and Done
+	// before Wait unblocks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h.idleWatchdog(ctx, rw, conn, &lastRead, wdone)
+	}()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -195,6 +202,10 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			}
 			return err
 		}
+		// Any accepted frame is client activity. The idle watchdog used to
+		// keep the connect-time stamp, so a busy non-interactive session
+		// (probes, health, logs) was closed one IdleTimeout after dial.
+		lastRead.Store(time.Now().UnixNano())
 		// Client→agent stream frames (stdin, tty resize) route to the
 		// goroutine serving that envelope ID. Unknown IDs are dropped.
 		if env.Kind == KindStream {
@@ -262,6 +273,9 @@ func (h *Handler) idleWatchdog(ctx context.Context, rw io.ReadWriteCloser, conn 
 	for {
 		select {
 		case <-ctx.Done():
+			// Unblock Serve's ReadFrame; cancelling ctx alone left the
+			// connection parked until IdleTimeout.
+			_ = rw.Close()
 			return
 		case <-done:
 			return
@@ -351,16 +365,29 @@ func mustJSON(v any) json.RawMessage {
 }
 
 func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, conn *connState, interactive bool) error {
+	// The read loop increments liveInteractive before this runs so the idle
+	// watchdog cannot close the socket during scheduling. Every return path,
+	// including overloaded exec, must decrement or the connection never idles.
+	if interactive && conn != nil {
+		defer conn.liveInteractive.Add(-1)
+	}
 	// Every request gets a derived context that dies with the write side:
 	// if the client vanishes mid-stream, producers blocked on channel sends
 	// are released instead of leaking for the life of the connection.
 	sctx, cancel := context.WithCancel(ctx)
-	conn.registerCancel(env.ID, cancel)
-	defer func() {
-		conn.cancelByID(env.ID)
-	}()
+	if conn != nil {
+		conn.registerCancel(env.ID, cancel)
+		defer conn.cancelByID(env.ID)
+	} else {
+		defer cancel()
+	}
 	res, stream := h.dispatch(sctx, handshook, env, conn)
 	if stream != nil {
+		// Unregister only after the stream has been drained. Doing it from a
+		// second reader on the same channel stole stdout/stderr frames.
+		if interactive && conn != nil {
+			defer conn.upstream.unregister(env.ID)
+		}
 		for ev := range stream {
 			if err := fc.Write(ev); err != nil {
 				return err
@@ -369,6 +396,17 @@ func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *a
 		return nil
 	}
 	return fc.Write(res)
+}
+
+// sendFrame delivers one envelope unless ctx is done. Producers must not
+// block forever when the consumer has stopped reading.
+func sendFrame(ctx context.Context, ch chan<- Envelope, ev Envelope) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case ch <- ev:
+		return true
+	}
 }
 
 func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Envelope, conn *connState) (Envelope, <-chan Envelope) {
@@ -498,10 +536,12 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			lines := h.LogBuffer.Tail(req.TailLines)
 			for _, ln := range lines {
 				b, _ := json.Marshal(LogsEvent{Line: ln})
-				ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}
+				if !sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}) {
+					return
+				}
 			}
 			if !req.Follow {
-				ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodLogs}
+				sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodLogs})
 				return
 			}
 			// Follow: stream appended lines until the connection ends.
@@ -546,28 +586,22 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		interactive := req.Stdin || req.TTY
 		if interactive && conn != nil {
 			upstreamCh = conn.upstream.register(env.ID)
-			go func() {
-				// Keep the router entry alive until the stream channel closes.
-				for range ch {
-				}
-				conn.liveInteractive.Add(-1)
-				conn.upstream.unregister(env.ID)
-			}()
 		}
 		stdinR := newExecStdinReader(upstreamCh, interactive)
 		go func() {
 			defer close(ch)
 			defer release()
-			code, runErr := h.runExec(ctx, req, stdinR, func(ev ExecEvent) {
+			send := func(ev ExecEvent) {
 				b, _ := json.Marshal(ev)
-				ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodExec, Payload: b}
-			})
+				sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodExec, Payload: b})
+			}
+			code, runErr := h.runExec(ctx, req, stdinR, send)
 			if runErr != nil && code == 0 {
 				code = 1
 			}
 			b, _ := json.Marshal(ExecEvent{Exited: true, ExitCode: code})
-			ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodExec, Payload: b}
-			ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodExec, Payload: b}
+			sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodExec, Payload: b})
+			sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodExec, Payload: b})
 		}()
 		return Envelope{}, ch
 	}
@@ -765,27 +799,99 @@ func defaultMaterialize(req MaterializeReq) MaterializeRes {
 	var placed []string
 	root := GuestShareRoot()
 	for _, v := range req.Volumes {
-		src := filepath.Join(root, v.Name)
-		if err := os.MkdirAll(filepath.Dir(v.GuestPath), 0o755); err != nil {
+		dst, err := placeVolume(root, v)
+		if err != nil {
 			return MaterializeRes{OK: false, Message: err.Error()}
 		}
-		switch v.Mode {
-		case "copy":
-			if err := copyPath(src, v.GuestPath); err != nil {
-				return MaterializeRes{OK: false, Message: err.Error()}
-			}
-		default: // link
-			_ = os.RemoveAll(v.GuestPath)
-			if err := os.Symlink(src, v.GuestPath); err != nil {
-				// Fallback: copy if symlink is not permitted.
-				if cErr := copyPath(src, v.GuestPath); cErr != nil {
-					return MaterializeRes{OK: false, Message: err.Error() + "; copy: " + cErr.Error()}
-				}
-			}
-		}
-		placed = append(placed, v.GuestPath)
+		placed = append(placed, dst)
 	}
 	return MaterializeRes{OK: true, Placed: placed}
+}
+
+// placeVolume links or copies one share into the guest. It refuses to delete
+// a real guest directory: a mountPath of an existing folder must not wipe it
+// the way RemoveAll used to. Symlinks we created earlier are replaced.
+func placeVolume(root string, v VolumePlace) (string, error) {
+	if err := safeShareName(v.Name); err != nil {
+		return "", err
+	}
+	dst, err := cleanGuestTarget(v.GuestPath)
+	if err != nil {
+		return "", err
+	}
+	src := filepath.Join(root, v.Name)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", err
+	}
+	switch v.Mode {
+	case "copy":
+		if err := removeReplacableSymlink(dst); err != nil {
+			return "", err
+		}
+		if err := copyPath(src, dst); err != nil {
+			return "", err
+		}
+	default: // link
+		fi, err := os.Lstat(dst)
+		if err == nil {
+			if fi.Mode()&os.ModeSymlink == 0 {
+				return "", fmt.Errorf("refusing to replace existing guest path %s", dst)
+			}
+			if err := os.Remove(dst); err != nil {
+				return "", err
+			}
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		if err := os.Symlink(src, dst); err != nil {
+			// Fallback: copy if symlink is not permitted.
+			if cErr := copyPath(src, dst); cErr != nil {
+				return "", fmt.Errorf("%w; copy: %v", err, cErr)
+			}
+		}
+	}
+	return dst, nil
+}
+
+func safeShareName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("invalid volume name %q", name)
+	}
+	if filepath.Clean(name) != name {
+		return fmt.Errorf("invalid volume name %q", name)
+	}
+	return nil
+}
+
+func cleanGuestTarget(p string) (string, error) {
+	if p == "" || !strings.HasPrefix(filepath.ToSlash(p), "/") {
+		return "", fmt.Errorf("guest path must be absolute")
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("guest path %q contains ..", p)
+		}
+	}
+	cleaned := filepath.Clean(p)
+	switch cleaned {
+	case "/", "/Volumes", GuestShareRoot():
+		return "", fmt.Errorf("refusing guest path %q", cleaned)
+	}
+	return cleaned, nil
+}
+
+func removeReplacableSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	return os.Remove(path)
 }
 
 // GuestShareRoot is the virtio-fs automount.

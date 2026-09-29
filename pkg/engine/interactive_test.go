@@ -137,13 +137,21 @@ func TestConsoleSocketRoundTrip(t *testing.T) {
 	}
 	waitPhase(t, e, "default", "cs", corev1.PodRunning)
 
-	sock := ConsoleSocketPath("default@cs")
+	sock := ConsoleSocketPath("default", "cs")
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(sock); err == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("console socket mode %o, want 0600", fi.Mode().Perm())
 	}
 
 	conn, err := net.Dial("unix", sock)
@@ -178,4 +186,53 @@ func TestConsoleSocketRoundTrip(t *testing.T) {
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Fatalf("socket not removed after delete: %v", err)
 	}
+}
+
+func TestConsoleFanoutReachesEveryClient(t *testing.T) {
+	cfg := config.Default()
+	cfg.Runtime = "fake"
+	cfg.CacheDir = t.TempDir()
+	cfg.AgentReadyTimeout = 5 * time.Second
+	cfg.AllowNATWorkloads = true
+	cfg.SerialConsole = true
+	rt := fake.New()
+	e := newInteractiveEngine(t, cfg, rt)
+
+	pod := samplePod("fan", "uid-fan")
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, e, "default", "fan", corev1.PodRunning)
+	sock := ConsoleSocketPath("default", "fan")
+	waitFor(t, "console socket", func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	})
+	c1, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	c2, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	guestEnd := rt.ConsoleGuestEnd()
+	if guestEnd == nil {
+		t.Fatal("missing guest console")
+	}
+	if _, err := guestEnd.Write([]byte{'Q'}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []net.Conn{c1, c2} {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 1)
+		if _, err := c.Read(buf); err != nil || buf[0] != 'Q' {
+			t.Fatalf("client missed console byte: %v %q", err, buf)
+		}
+	}
+	_ = e.Delete(context.Background(), "default", "fan", 0)
 }

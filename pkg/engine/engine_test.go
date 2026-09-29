@@ -219,6 +219,9 @@ func TestFailStopsMachineAndFreesSlot(t *testing.T) {
 	if err := e.Create(context.Background(), samplePod("next", "uid-next"), Credentials{}); err != nil {
 		t.Fatalf("slot should be free: %v", err)
 	}
+	// Create is async; deleting before start settles races RemoveAll with
+	// overlay writes (Darwin TempDir cleanup then fails "directory not empty").
+	_ = waitPhase(t, e, "default", "next", corev1.PodRunning)
 	_ = e.Delete(context.Background(), "default", "ps", 0)
 	_ = e.Delete(context.Background(), "default", "next", 0)
 }

@@ -33,7 +33,8 @@ type warmEntry struct {
 	seq     int
 	slotID  string // uid holding the slot
 	imgRef  string
-	root    string // cache/warm/<seq> (overlay, control)
+	root    string // cache/warm/<seq> (control files)
+	diskDir string // cache/pods/<slotID> CoW overlay (multi-GB)
 	token   string
 	mac     string
 	cpu     uint
@@ -48,6 +49,7 @@ type warmPool struct {
 	mu      sync.Mutex
 	entries []*warmEntry
 	seq     int
+	closed  bool
 }
 
 func (p *warmPool) len() int {
@@ -100,10 +102,16 @@ func (p *warmPool) drain() []*warmEntry {
 	return out
 }
 
-func (p *warmPool) add(e *warmEntry) {
+// addIfOpen appends e unless shutdown has started. false means the caller
+// still owns e and must stop it.
+func (p *warmPool) addIfOpen(e *warmEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
 	p.entries = append(p.entries, e)
+	return true
 }
 
 // startWarmPool launches the replenisher. Called once from New.
@@ -158,7 +166,7 @@ func (e *Engine) fillWarm(ctx context.Context) {
 			return
 		}
 		if err := e.bootWarm(ctx, ref); err != nil {
-			if !errors.Is(err, capacity.ErrVMCapacityExhausted) {
+			if !errors.Is(err, capacity.ErrVMCapacityExhausted) && !errors.Is(err, context.Canceled) {
 				slog.Warn("warm pool", "boot", err)
 			}
 			return
@@ -167,14 +175,30 @@ func (e *Engine) fillWarm(ctx context.Context) {
 }
 
 // bootWarm pre-boots one idle VM from ref into a freshly acquired slot.
-func (e *Engine) bootWarm(ctx context.Context, ref string) error {
-	if e.warmCtx != nil && e.warmCtx.Err() != nil {
-		return context.Canceled
+// beginWarmBoot reserves a WaitGroup slot unless shutdown has already closed
+// the pool. Add and the closed flag share warm.mu so Wait cannot return
+// before an in-flight boot is tracked.
+func (e *Engine) beginWarmBoot() bool {
+	e.warm.mu.Lock()
+	defer e.warm.mu.Unlock()
+	if e.warm.closed {
+		return false
 	}
 	e.warmBootWG.Add(1)
+	return true
+}
+
+func (e *Engine) bootWarm(ctx context.Context, ref string) error {
+	if !e.beginWarmBoot() {
+		return context.Canceled
+	}
 	defer e.warmBootWG.Done()
 
 	e.warm.mu.Lock()
+	if e.warm.closed {
+		e.warm.mu.Unlock()
+		return context.Canceled
+	}
 	e.warm.seq++
 	seq := e.warm.seq
 	e.warm.mu.Unlock()
@@ -184,21 +208,49 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 		return err
 	}
 	root := filepath.Join(e.cfg.CacheDir, "warm", fmt.Sprint(seq))
+	diskDir := podMACDir(e.cfg.CacheDir, slotID)
 	token, mac, cpu, mem, machine, err := e.bootWarmMachine(ctx, slotID, ref, root)
+	entry := &warmEntry{
+		seq: seq, slotID: slotID, imgRef: ref, root: root, diskDir: diskDir,
+		token: token, mac: mac, cpu: cpu, mem: mem, machine: machine,
+	}
 	if err != nil {
-		e.slots.Release(slotID)
-		_ = os.RemoveAll(root)
-		// resolveImage stages overlays under cache/pods/<slotID>; clean that too.
-		_ = os.RemoveAll(podMACDir(e.cfg.CacheDir, slotID))
+		entry.machine = nil // bootWarmMachine already stopped a half-started VM
+		e.stopWarmEntry(entry)
 		return err
 	}
-	e.warm.add(&warmEntry{
-		seq: seq, slotID: slotID, imgRef: ref, root: root,
-		token: token, mac: mac, cpu: cpu, mem: mem, machine: machine,
-	})
+	if !e.warm.addIfOpen(entry) {
+		e.stopWarmEntry(entry)
+		return context.Canceled
+	}
 	e.events.Normal(context.Background(), event.ReasonWarmBooted,
 		fmt.Sprintf("slot %s pre-booted %q; pods with this image start instantly", slotID, ref))
 	return nil
+}
+
+// stopWarmEntry stops the VM, releases its slot, and deletes both the warm
+// control dir and the CoW overlay. Release is idempotent.
+func (e *Engine) stopWarmEntry(entry *warmEntry) {
+	if entry == nil {
+		return
+	}
+	if entry.machine != nil {
+		_ = entry.machine.Stop(context.Background(), 5*time.Second)
+		entry.machine = nil
+	}
+	if entry.slotID != "" {
+		e.slots.Release(entry.slotID)
+	}
+	if entry.root != "" {
+		_ = os.RemoveAll(entry.root)
+	}
+	disk := entry.diskDir
+	if disk == "" && entry.slotID != "" && e.cfg.CacheDir != "" {
+		disk = podMACDir(e.cfg.CacheDir, entry.slotID)
+	}
+	if disk != "" {
+		_ = os.RemoveAll(disk)
+	}
 }
 
 // bootWarmMachine resolves the image, creates and starts the machine, and
@@ -310,11 +362,10 @@ func (e *Engine) reclaimWarmForPod(ref string, adoptable bool) (entry *warmEntry
 	}
 	if entry = e.warm.popOldest(); entry != nil {
 		slog.Info("warm pool: evicting for pod demand", "slot", entry.slotID)
-		_ = entry.machine.Stop(context.Background(), 5*time.Second)
-		e.slots.Release(entry.slotID)
-		_ = os.RemoveAll(entry.root)
+		id := entry.slotID
+		e.stopWarmEntry(entry)
 		e.events.Normal(context.Background(), event.ReasonWarmEvicted,
-			"reclaimed slot "+entry.slotID+" for a pending pod")
+			"reclaimed slot "+id+" for a pending pod")
 		return nil, true
 	}
 	return nil, false
@@ -326,10 +377,11 @@ func (e *Engine) shutdownWarmPool() {
 	if e.warmCancel != nil {
 		e.warmCancel()
 	}
+	e.warm.mu.Lock()
+	e.warm.closed = true
+	e.warm.mu.Unlock()
 	e.warmBootWG.Wait()
 	for _, entry := range e.warm.drain() {
-		_ = entry.machine.Stop(context.Background(), 5*time.Second)
-		e.slots.Release(entry.slotID)
-		_ = os.RemoveAll(entry.root)
+		e.stopWarmEntry(entry)
 	}
 }

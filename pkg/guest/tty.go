@@ -85,7 +85,7 @@ func (h *Handler) runExecTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader
 			case <-ctx.Done():
 				return
 			case ev := <-resizeCh:
-				_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(ev.Cols), Rows: uint16(ev.Rows)})
+				_ = pty.Setsize(ptmx, winsize(ev))
 			}
 		}
 	}()
@@ -107,4 +107,17 @@ func (h *Handler) runExecTTY(ctx context.Context, cmd *exec.Cmd, stdin io.Reader
 		return ee.ExitCode(), nil
 	}
 	return 1, err
+}
+
+func winsize(ev TtyResize) *pty.Winsize {
+	clamp := func(n int) uint16 {
+		if n < 0 {
+			return 0
+		}
+		if n > 65535 {
+			return 65535
+		}
+		return uint16(n)
+	}
+	return &pty.Winsize{Cols: clamp(ev.Cols), Rows: clamp(ev.Rows)}
 }

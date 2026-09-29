@@ -25,6 +25,7 @@ type Runtime struct {
 	MaterializeFn func(req guest.MaterializeReq) guest.MaterializeRes
 
 	starts   int32
+	running  int32
 	matCalls int32
 
 	last atomic.Pointer[machine]
@@ -69,6 +70,10 @@ func defaultMetrics() (guest.MetricsRes, error) {
 
 func (r *Runtime) Starts() int { return int(atomic.LoadInt32(&r.starts)) }
 
+// Running is how many machines are in Starting or Running. Tests use it to
+// catch VMs that outlive the slot table.
+func (r *Runtime) Running() int { return int(atomic.LoadInt32(&r.running)) }
+
 func New() *Runtime {
 	return &Runtime{Token: "fake-token", IP: "192.168.64.2"}
 }
@@ -92,6 +97,7 @@ type machine struct {
 	started   *time.Time
 	finished  *time.Time
 	agentOK   bool
+	counted   bool
 	srvCancel context.CancelFunc
 	client    *guest.Client
 	peer      net.Conn
@@ -123,6 +129,10 @@ func (m *machine) Start(ctx context.Context) error {
 	m.state = types.VMStarting
 	if m.rt != nil {
 		n := atomic.AddInt32(&m.rt.starts, 1)
+		if !m.counted {
+			atomic.AddInt32(&m.rt.running, 1)
+			m.counted = true
+		}
 		if len(m.rt.IPs) > 0 {
 			m.ip = m.rt.IPs[int(n-1)%len(m.rt.IPs)]
 		}
@@ -193,6 +203,14 @@ func (m *machine) Start(ctx context.Context) error {
 func (m *machine) Stop(_ context.Context, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.counted && m.rt != nil {
+		atomic.AddInt32(&m.rt.running, -1)
+		m.counted = false
+	}
+	if m.state == types.VMStopped || m.state == "" || m.state == types.VMPending {
+		m.state = types.VMStopped
+		return nil
+	}
 	m.state = types.VMStopping
 	if m.client != nil {
 		_ = m.client.Close()

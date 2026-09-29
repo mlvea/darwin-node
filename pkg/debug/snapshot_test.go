@@ -71,7 +71,14 @@ func TestCaptureAndWrite(t *testing.T) {
 }
 
 func TestDebugJSIsNotAModule(t *testing.T) {
-	for _, root := range []string{filepath.Join("assets"), filepath.Join("..", "..", "web")} {
+	// Embed source of truth is pkg/debug/assets (go:embed). Top-level web/ is a
+	// gitignored local convenience for file:// browsing (see .gitignore /docs/testing.md);
+	// only assert it when present so Linux CI stays honest without requiring a mirror.
+	roots := []string{filepath.Join("assets")}
+	if st, err := os.Stat(filepath.Join("..", "..", "web")); err == nil && st.IsDir() {
+		roots = append(roots, filepath.Join("..", "..", "web"))
+	}
+	for _, root := range roots {
 		html, err := os.ReadFile(filepath.Join(root, "debug.html"))
 		if err != nil {
 			t.Fatal(err)

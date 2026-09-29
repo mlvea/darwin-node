@@ -198,12 +198,21 @@ func (m *machine) Status() types.VMStatus {
 func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	dialCtx, cancel := agentDialContext(ctx)
 	defer cancel()
+	m.ensureVsockListener()
 	if m.listener != nil {
-		conn, err := acceptAgent(dialCtx, m.listener)
+		vsockCtx, vcancel := vsockAttemptContext(dialCtx)
+		conn, err := acceptAgent(vsockCtx, m.listener)
+		vcancel()
 		if err == nil {
-			return guest.Dial(dialCtx, conn, m.token, "darwin-node")
-		}
-		if dialCtx.Err() != nil {
+			cli, derr := guest.Dial(dialCtx, conn, m.token, "darwin-node")
+			if derr == nil {
+				return cli, nil
+			}
+			_ = conn.Close()
+		} else if m.listener != nil {
+			// acceptAgent closes the listener on timeout. Drop the reference
+			// so the next attempt can Listen again instead of reusing a dead fd.
+			_ = m.listener.Close()
 			m.listener = nil
 		}
 	}
@@ -221,6 +230,17 @@ func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 		}
 	}
 	return nil, fmt.Errorf("guest agent unreachable over vsock or tcp")
+}
+
+func (m *machine) ensureVsockListener() {
+	if m.listener != nil || m.vm == nil {
+		return
+	}
+	if devs := m.vm.SocketDevices(); len(devs) > 0 {
+		if ln, err := devs[0].Listen(uint32(types.GuestVsockPort)); err == nil {
+			m.listener = ln
+		}
+	}
 }
 
 func (m *machine) Logs() io.ReadCloser {

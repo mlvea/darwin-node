@@ -23,15 +23,18 @@ func Check(t *testing.T) {
 	t.Cleanup(func() {
 		t.Helper()
 		deadline := time.Now().Add(2 * time.Second)
-		var after map[string]int
+		var leaked []string
 		for {
-			after = interesting()
-			if len(after) <= len(before) || time.Now().After(deadline) {
+			leaked = leaks(before, interesting())
+			// Wait until the *leak set* is empty, not until the number of
+			// distinct signatures drops. Comparing len(after)/len(before)
+			// exited early when unrelated stacks vanished while a new
+			// ReadFrame leak was still winding down.
+			if len(leaked) == 0 || time.Now().After(deadline) {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		leaked := leaks(before, after)
 		if len(leaked) > 0 {
 			sort.Strings(leaked)
 			t.Errorf("goroutine leak: %d darwin-node goroutine(s) still running", len(leaked))
