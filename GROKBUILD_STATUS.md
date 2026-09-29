@@ -9,6 +9,29 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-09-29 ~08:55–08:57 SGT — weekday daily reflection
+- **HEAD (start):** `8fe42a7` on `grokbuild/fail-closed-hardening` (= origin tip; local clean)
+- **HEAD (end):** `5a93de1` on `main` (PR #1 squash-merged)
+- **What changed today:**
+  1. **CI confirm:** both Darwin `test` jobs on `8fe42a7` were success (push run ~2m + merge-ref ~4m); `e2e (self-hosted)` skipped; `mergeable_state=clean`.
+  2. **Merged** [PR #1](https://github.com/mlvea/darwin-node/pull/1) via squash → `5a93de1` on `main` ("Fail-closed hardening: digest, volumes, warm pool, guest, image, debug (#1)").
+  3. **Local verify:** `go test -count=1` PASS for `./pkg/engine/ ./pkg/guest/ ./internal/leakcheck/ ./internal/digest/ ./pkg/volume/ ./pkg/hostport/ ./pkg/image/ ./pkg/debug/` on Linux box.
+- **No new code this reflection** beyond the merge — standing TokenReview/soak hold lifted only after merge landed.
+- **Grok CLI:** not needed; CI + mergeable state were decisive.
+
+### Open risks
+- Hardware gate (`make test-hardware`) still unrun on real Apple Silicon; Darwin single-shot `clonefile` CoW not runtime-tested here
+- TokenReview / SubjectAccessReview authn (TODO S003) still unimplemented — now unblocked to start
+- Soak (24h adopt/delete + cache volumes) still required before any "production ready" claim per `docs/stability.md`
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- Local `gh` CLI still unauthenticated (MCP `user-GitHub-xai` as mlvea used for merge/push)
+
+### Next day priority (Wed 2026-09-30)
+1. Start TokenReview (S003) design/implementation behind a clear fail-closed path, or document the exact kubelet auth surface to wire
+2. Optional: Darwin-host smoke of cache CoW / `make test-hardware` when a Mac runner is available
+3. Defer soak until TokenReview skeleton exists or hardware gate has a first PASS
+
+
 ### 2026-09-28 ~08:51–09:05 SGT — weekday daily reflection
 - **HEAD (start):** `f44d976` on `grokbuild/fail-closed-hardening` (= origin tip)
 - **HEAD (end):** this reflection commit on `grokbuild/fail-closed-hardening` (after push)
