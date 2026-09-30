@@ -13,7 +13,7 @@ word "alpha" in the README has a precise meaning.
 | Failure injection (`pkg/engine/inject_test.go`) | Runtime Create/Start/Dial failures: fail closed, slots freed, state reclaimed, node reusable | Green |
 | Adversarial protocol (`pkg/guest/adversarial_test.go`) | Garbage bytes, oversized frames, wrong versions, stray stream frames, unknown methods | Green |
 | Hardware gate (`make test-hardware`) | Real Virtualization.framework boot, agent handshake over vsock, exec through PTY, logs, metrics, console socket, graceful delete | Manual command; requires a baked image and a signed binary. Run it on target hardware before any fleet use |
-| Production authn (TokenReview / SubjectAccessReview) | kubelet HTTP server authentication beyond client certificates | Not implemented (TODO S003). Today the server requires TLS and optionally verifies client certs against ClientCA |
+| Production authn (TokenReview / SubjectAccessReview) | kubelet HTTP authentication and authorization | Wired (S003), unit-tested. With `ClientCA` set, the handler uses `nodeutil.WebhookAuth` (TokenReview + SubjectAccessReview) and that file as the client-certificate CA. With `ClientCA` empty, the handler is `nodeutil.NoAuth` (anonymous after TLS). Not yet soaked against a real API server |
 
 ## What "production ready" requires, in order
 
@@ -21,8 +21,10 @@ word "alpha" in the README has a precise meaning.
    including cold boot after OS updates.
 2. A soak run: 24 hours of continuous adopt/delete cycles with cache
    volumes, watching for fd/dir/slot drift.
-3. TokenReview-based kubelet authentication wired and tested against a
-   real API server.
+3. TokenReview / SubjectAccessReview is wired when `ClientCA` is set and
+   covered by unit tests. A real API-server soak is still required (mTLS
+   client accepted, bearer TokenReview, SubjectAccessReview allow/deny)
+   before this counts as production authn.
 4. At least one external operator runs CI on it for a month.
 
 Until those four lines are checked, the honest label is: **alpha,
