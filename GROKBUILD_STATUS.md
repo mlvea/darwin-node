@@ -20,7 +20,7 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 - **Compile / tests (Linux box):**
   - `go build ./...` OK
   - PASS `go test -count=1 ./cmd/darwin-node/` and the same with `-race`
-- **PR / branch:** `grokbuild/tokenreview-s003` is local only. Do not push from this session.
+- **PR / branch:** https://github.com/mlvea/darwin-node/pull/2 (`grokbuild/tokenreview-s003`)
 - **Grok CLI:** `grok-4.7` / `xhigh` implemented the wiring (~9.5m); parent verified tests and handled push/PR.
 
 ### Open risks
