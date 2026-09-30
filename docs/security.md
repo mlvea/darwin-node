@@ -9,15 +9,20 @@
 - Cluster mode will not start a plaintext kubelet HTTP server. Set
   `APISERVER_CERT_LOCATION` and `APISERVER_KEY_LOCATION` (server cert/key).
   `--standalone` does not serve exec/logs and does not need those files.
-- Set `APISERVER_CA_CERT_LOCATION` so the kubelet HTTP server requires and
-  verifies client certificates (`tls.RequireAndVerifyClientCert`). Without a
-  client CA, the socket is TLS-encrypted but callers are anonymous.
+- Set `APISERVER_CA_CERT_LOCATION` in production. The kubelet HTTP server
+  then requires and verifies client certificates
+  (`tls.RequireAndVerifyClientCert`) and wraps its handler with
+  TokenReview + SubjectAccessReview (`nodeutil.WebhookAuth`), using that
+  file as the client-certificate CA. There is no separate
+  `--authentication-token-webhook` flag; the client CA is what turns
+  webhook auth on.
+- Without a client CA, the socket is TLS-encrypted and the handler is
+  `nodeutil.NoAuth` (anonymous after TLS). Webhook auth is intentionally
+  not installed in that mode: `WebhookAuth` without a client-certificate
+  CA disables mTLS inside the authenticator and would 401 the API server's
+  kubelet client. Do not run without a client CA except on a laptop.
 - Bind with `--listen-address` (default: all interfaces) so the kubelet HTTP
   port is not exposed on untrusted networks.
-- There is no `--authentication-token-webhook` flag. TokenReview /
-  SubjectAccessReview webhook auth is not implemented; production authn is
-  mTLS via the client CA.
-- Do not disable client verification except on a laptop.
 
 ## Guest agent
 

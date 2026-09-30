@@ -22,6 +22,7 @@ require (
 	golang.org/x/term v0.45.0
 	k8s.io/api v0.35.6
 	k8s.io/apimachinery v0.35.6
+	k8s.io/apiserver v0.35.6
 	k8s.io/client-go v0.35.6
 	k8s.io/kubelet v0.35.6
 	oras.land/oras-go/v2 v2.6.1
@@ -123,7 +124,6 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
-	k8s.io/apiserver v0.35.6 // indirect
 	k8s.io/component-base v0.35.6 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kms v0.35.6 // indirect
