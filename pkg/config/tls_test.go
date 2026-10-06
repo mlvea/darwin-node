@@ -52,7 +52,7 @@ func TestTLSConfigClientAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withCA.ClientAuth != tls.RequireAndVerifyClientCert || withCA.ClientCAs == nil {
+	if withCA.ClientAuth != tls.VerifyClientCertIfGiven || withCA.ClientCAs == nil {
 		t.Fatalf("client auth %+v", withCA.ClientAuth)
 	}
 
@@ -95,23 +95,30 @@ func TestTLSConfigHandshake(t *testing.T) {
 		t.Fatalf("trusted client client=%v server=%v", cerr, serr)
 	}
 
-	if _, serr := handshakePair(ln, &tls.Config{
+	// No client certificate: the handshake completes so bearer TokenReview
+	// can run. The handler rejects anonymous callers when webhook auth is on.
+	if cerr, serr := handshakePair(ln, &tls.Config{
 		RootCAs:    roots,
 		ServerName: "localhost",
-	}); serr == nil {
-		t.Fatal("expected missing client cert to fail")
+	}); cerr != nil || serr != nil {
+		t.Fatalf("client without a cert client=%v server=%v", cerr, serr)
 	}
 
 	other, err := tls.LoadX509KeyPair(f.otherCert, f.otherKey)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Certificates is filtered against the server's advertised CAs, so a
+	// default client would send nothing. GetClientCertificate forces the
+	// untrusted chain onto the wire, which the server must reject.
 	if _, serr := handshakePair(ln, &tls.Config{
-		Certificates: []tls.Certificate{other},
-		RootCAs:      roots,
-		ServerName:   "localhost",
+		RootCAs:    roots,
+		ServerName: "localhost",
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &other, nil
+		},
 	}); serr == nil {
-		t.Fatal("expected untrusted client cert to fail")
+		t.Fatal("untrusted client cert was accepted")
 	}
 }
 

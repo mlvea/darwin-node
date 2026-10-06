@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,27 @@ func TestKubeletAuthWebhookRejectsMissingCA(t *testing.T) {
 	err := kubeletAuth("node-a", filepath.Join(t.TempDir(), "missing.pem"))(nc)
 	if err == nil {
 		t.Fatal("missing CA must fail closed")
+	}
+}
+
+func TestHelmClusterRoleAllowsAuthReviews(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller")
+	}
+	path := filepath.Join(filepath.Dir(file), "..", "..", "deploy", "helm", "darwin-node", "templates", "rbac.yaml")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	for _, snippet := range []string{
+		"apiGroups: [\"authentication.k8s.io\"]\n    resources: [\"tokenreviews\"]\n    verbs: [\"create\"]",
+		"apiGroups: [\"authorization.k8s.io\"]\n    resources: [\"subjectaccessreviews\"]\n    verbs: [\"create\"]",
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("helm ClusterRole missing webhook auth rule:\n%s", snippet)
+		}
 	}
 }
 

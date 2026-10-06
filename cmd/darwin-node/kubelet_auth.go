@@ -36,8 +36,12 @@ func selectKubeletAuth(clientCA string) kubeletAuthMode {
 // The handler must already be the provider mux (set before this opt runs).
 // An empty clientCA installs nodeutil.NoAuth (anonymous after TLS).
 // A non-empty clientCA installs nodeutil.WebhookAuth and loads that file
-// as the client-certificate CA ("client-ca"). A missing or unreadable CA
-// fails the opt; it does not fall back to NoAuth.
+// as the client-certificate CA ("client-ca"). A client certificate signed
+// by that CA authenticates as its CommonName. A request with no client
+// certificate is authenticated with a bearer token via TokenReview.
+// A missing or unreadable CA fails the opt; it does not fall back to NoAuth.
+// The client on nc must be allowed to create tokenreviews and
+// subjectaccessreviews.
 func kubeletAuth(nodeName, clientCA string) nodeutil.NodeOpt {
 	clientCA = strings.TrimSpace(clientCA)
 	if selectKubeletAuth(clientCA) == kubeletAuthNoAuth {

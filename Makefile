@@ -15,7 +15,7 @@ ENTITLEMENTS := $(ROOT_DIR)resources/entitlements/darwin-node.entitlements
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X github.com/darwin-node/darwin-node/pkg/config.Version=$(VERSION)
 
-.PHONY: all build build-node build-agent build-image build-hwtest test test-short lint fmt vet tidy sign licenses dist clean help check test-hardware
+.PHONY: all build build-node build-agent build-image build-hwtest test test-short lint fmt vet tidy sign licenses dist clean help check test-hardware test-kubelet-auth
 
 all: fmt vet test build
 
@@ -75,6 +75,19 @@ test: ## Run all unit tests
 
 test-short: ## Run tests that never need hardware
 	$(GOTEST) $(GOFLAGS) -count=1 -short -timeout 60s $(PKG)
+
+# Live kube-apiserver + etcd (controller-runtime envtest). The integration
+# build tag keeps this out of `go test ./...` and the Darwin CI job. Binaries
+# download into .cache/envtest on first run.
+ENVTEST_K8S_VERSION ?= 1.35
+ENVTEST_ASSET_DIR ?= $(ROOT_DIR).cache/envtest
+test-kubelet-auth: ## API-server integration test of kubelet TokenReview and SubjectAccessReview
+	@mkdir -p "$(ENVTEST_ASSET_DIR)"
+	DARWIN_NODE_REQUIRE_ENVTEST=1 \
+	DARWIN_NODE_ENVTEST_DOWNLOAD=1 \
+	DARWIN_NODE_ENVTEST_VERSION=$(ENVTEST_K8S_VERSION) \
+	DARWIN_NODE_ENVTEST_ASSET_DIR="$(ENVTEST_ASSET_DIR)" \
+		$(GOTEST) -tags=integration -count=1 -timeout 300s ./cmd/darwin-node/ -run TestKubeletAuthEnvtest
 
 vet: ## go vet
 	$(GO) vet $(PKG)

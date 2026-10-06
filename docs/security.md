@@ -9,13 +9,25 @@
 - Cluster mode will not start a plaintext kubelet HTTP server. Set
   `APISERVER_CERT_LOCATION` and `APISERVER_KEY_LOCATION` (server cert/key).
   `--standalone` does not serve exec/logs and does not need those files.
-- Set `APISERVER_CA_CERT_LOCATION` in production. The kubelet HTTP server
-  then requires and verifies client certificates
-  (`tls.RequireAndVerifyClientCert`) and wraps its handler with
-  TokenReview + SubjectAccessReview (`nodeutil.WebhookAuth`), using that
-  file as the client-certificate CA. There is no separate
+- Set `APISERVER_CA_CERT_LOCATION` in production. That file is the
+  client-certificate CA. The kubelet HTTP server verifies any client
+  certificate that is presented (`tls.VerifyClientCertIfGiven`) and wraps
+  its handler with TokenReview + SubjectAccessReview
+  (`nodeutil.WebhookAuth`). A connection with no client certificate still
+  completes the TLS handshake, so a bearer token can be reviewed.
+  Anonymous callers receive 401 from the handler. There is no separate
   `--authentication-token-webhook` flag; the client CA is what turns
   webhook auth on.
+- A certificate signed by that CA authenticates as its subject CommonName.
+  When a verified client certificate is present, the handler uses that
+  identity and does not also consult a bearer token. Bearer TokenReview
+  runs for requests that present no client certificate.
+- The node identity must be allowed to `create` `tokenreviews`
+  (`authentication.k8s.io`) and `subjectaccessreviews`
+  (`authorization.k8s.io`). The Helm ClusterRole grants those verbs.
+  Callers need their own RBAC on the node subresource they use
+  (`nodes/log`, `nodes/proxy`, `nodes/stats`, or `nodes/metrics`) for
+  this node's name.
 - Without a client CA, the socket is TLS-encrypted and the handler is
   `nodeutil.NoAuth` (anonymous after TLS). Webhook auth is intentionally
   not installed in that mode: `WebhookAuth` without a client-certificate
@@ -23,6 +35,41 @@
   kubelet client. Do not run without a client CA except on a laptop.
 - Bind with `--listen-address` (default: all interfaces) so the kubelet HTTP
   port is not exposed on untrusted networks.
+
+## API-server auth test
+
+`make test-kubelet-auth` (Linux, `//go:build integration`) downloads
+controller-runtime envtest binaries (kube-apiserver and etcd, Kubernetes
+1.35) and calls the same `kubeletAuth` handler `runVK` installs, over the
+TLS config from `pkg/config.TLSConfig`. The kubelet client in that test
+is a ServiceAccount allowed only to create TokenReview and
+SubjectAccessReview.
+
+Verified when `ClientCA` is set:
+
+- A client certificate signed by that CA is authenticated, and
+  SubjectAccessReview allows `get` on `nodes/log` for this node's name.
+- A bearer token for a real ServiceAccount is authenticated via
+  TokenReview, and SubjectAccessReview allows `get` on `nodes/proxy`
+  for this node's name.
+- SubjectAccessReview denies that certificate on `nodes/proxy`, denies a
+  certificate bound to a different node name, denies a ServiceAccount
+  with no binding, and denies the proxy ServiceAccount on `nodes/log`.
+- Anonymous requests are rejected with 401. An invalid bearer token is
+  rejected with 401. A client certificate signed by a different CA is
+  rejected during the TLS handshake.
+- A missing or invalid client CA fails closed. The auth option returns
+  an error and does not install `NoAuth`.
+
+`go test ./...` does not run this test. Without `KUBEBUILDER_ASSETS` or
+`DARWIN_NODE_ENVTEST_DOWNLOAD=1`, `go test -tags=integration` runs the
+fail-closed CA cases and skips the live API server. The Linux CI job
+`kubelet auth envtest` sets the download flag and fails if the binaries
+cannot be fetched.
+
+Not verified here: `make test-hardware`, and a 24 hour adopt/delete soak.
+Empty `ClientCA` (`NoAuth`, anonymous after TLS) is covered by unit tests
+in `cmd/darwin-node/kubelet_auth_test.go`.
 
 ## Guest agent
 

@@ -9,6 +9,39 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-06 ~08:51–09:10 SGT — TokenReview S003 API-server e2e
+- **HEAD (start):** `0666780` on `grokbuild/tokenreview-s003`
+- **HEAD (end):** this commit on `grokbuild/tokenreview-s003`
+- **What changed:**
+  1. **Live API server:** `cmd/darwin-node/kubelet_auth_envtest_test.go` (`//go:build integration`) starts controller-runtime envtest (kube-apiserver + etcd 1.35) and serves the real `kubeletAuth` handler over `pkg/config.TLSConfig`. `make test-kubelet-auth` downloads the binaries into `.cache/envtest`. `go test ./...` does not build the file. A tagged run with no binaries skips the live cases and still checks fail-closed CA. Linux CI job `kubelet auth envtest` runs the make target.
+  2. **Bug — TLS blocked TokenReview:** `TLSConfig` used `tls.RequireAndVerifyClientCert`, so a bearer-only client never reached `WebhookAuth`. It is now `tls.VerifyClientCertIfGiven`: presented client certificates are still verified, and a connection with no certificate completes the handshake. Anonymous callers get 401 from the handler.
+  3. **Bug — Helm identity could not call the auth webhooks:** the chart ClusterRole had no `create` on `tokenreviews.authentication.k8s.io` or `subjectaccessreviews.authorization.k8s.io`. Those rules are in the chart. The envtest kubelet client is a ServiceAccount with only those two verbs; TokenReview and SubjectAccessReview succeed with it.
+  4. **Docs:** `docs/security.md` and the S003 row in `docs/stability.md` state what the envtest proves. Hardware gate (`make test-hardware`) and the 24h adopt/delete soak are still open.
+- **What the envtest proved (all passed on this Linux box):**
+  - (a) client cert signed by `ClientCA` is authenticated (`GET /logs/` → 204; RBAC is `nodes/log` for this node name)
+  - (b) ServiceAccount bearer token is authenticated via TokenReview (`GET /exec` → 204; RBAC is `nodes/proxy`)
+  - (c) SubjectAccessReview denies the cert user on `nodes/proxy`, denies a cert bound to a different node name, denies an unbound ServiceAccount, and denies the proxy ServiceAccount on `nodes/log` (403)
+  - (d) anonymous request is 401; invalid bearer token is 401
+  - (e) missing CA and invalid CA fail closed
+  - a client certificate signed by a different CA is rejected in the TLS handshake
+- **Compile / tests (Linux box):**
+  - `go test -count=1 ./pkg/config/ ./cmd/darwin-node/` PASS (no integration tag)
+  - `make test-kubelet-auth` PASS
+  - `go vet` and `go vet -tags=integration` on those packages PASS
+- **PR / branch:** https://github.com/mlvea/darwin-node/pull/2 (`grokbuild/tokenreview-s003`)
+
+### Open risks
+- Hardware gate (`make test-hardware`) still unrun on real Apple Silicon
+- 24h adopt/delete soak with cache volumes still required before any production-ready claim
+- A request that presents a valid client certificate is authenticated as that certificate; a bearer token on the same request is not reviewed
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- `make licenses` on this Linux box still refuses to rewrite `THIRD_PARTY_NOTICES` (generator requires the Darwin module graph for the codehex notice). controller-runtime is not yet listed there
+
+### Next priority
+1. Hardware gate (`make test-hardware`) when a Mac with a baked image is available
+2. After that, the 24h adopt/delete soak
+3. Do not call the tree production-ready on the strength of this API-server test
+
 ### 2026-09-30 ~08:57–09:05 SGT — TokenReview S003
 - **HEAD (start):** `20596bc` on `main` (local reflection; origin/main = `5a93de1`)
 - **HEAD (end):** this commit on `grokbuild/tokenreview-s003` (local only, not pushed)

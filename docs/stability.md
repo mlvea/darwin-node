@@ -13,7 +13,7 @@ word "alpha" in the README has a precise meaning.
 | Failure injection (`pkg/engine/inject_test.go`) | Runtime Create/Start/Dial failures: fail closed, slots freed, state reclaimed, node reusable | Green |
 | Adversarial protocol (`pkg/guest/adversarial_test.go`) | Garbage bytes, oversized frames, wrong versions, stray stream frames, unknown methods | Green |
 | Hardware gate (`make test-hardware`) | Real Virtualization.framework boot, agent handshake over vsock, exec through PTY, logs, metrics, console socket, graceful delete | Manual command; requires a baked image and a signed binary. Run it on target hardware before any fleet use |
-| Production authn (TokenReview / SubjectAccessReview) | kubelet HTTP authentication and authorization | Wired (S003), unit-tested. With `ClientCA` set, the handler uses `nodeutil.WebhookAuth` (TokenReview + SubjectAccessReview) and that file as the client-certificate CA. With `ClientCA` empty, the handler is `nodeutil.NoAuth` (anonymous after TLS). Not yet soaked against a real API server |
+| Production authn (TokenReview / SubjectAccessReview) | kubelet HTTP authentication and authorization | API-server integration test passes (`make test-kubelet-auth`, Linux, `//go:build integration`, kube-apiserver + etcd 1.35). With `ClientCA` set: a client cert signed by that CA is authenticated; a ServiceAccount bearer token is authenticated via TokenReview; SubjectAccessReview allows and denies `nodes/log` and `nodes/proxy` for the node name; anonymous requests are 401; a missing or invalid CA fails closed. Empty `ClientCA` stays `nodeutil.NoAuth` (unit tests). Still open: hardware gate `make test-hardware`, 24h adopt/delete soak |
 
 ## What "production ready" requires, in order
 
@@ -21,10 +21,11 @@ word "alpha" in the README has a precise meaning.
    including cold boot after OS updates.
 2. A soak run: 24 hours of continuous adopt/delete cycles with cache
    volumes, watching for fd/dir/slot drift.
-3. TokenReview / SubjectAccessReview is wired when `ClientCA` is set and
-   covered by unit tests. A real API-server soak is still required (mTLS
-   client accepted, bearer TokenReview, SubjectAccessReview allow/deny)
-   before this counts as production authn.
+3. TokenReview / SubjectAccessReview is covered by `make test-kubelet-auth`:
+   client certificate authentication, ServiceAccount bearer TokenReview,
+   SubjectAccessReview allow and deny, anonymous 401, and fail-closed on a
+   missing or invalid CA. That is the API-server check. The hardware gate
+   and the 24h soak are still required before any fleet claim.
 4. At least one external operator runs CI on it for a month.
 
 Until those four lines are checked, the honest label is: **alpha,
