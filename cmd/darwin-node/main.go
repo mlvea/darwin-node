@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -209,6 +210,9 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 	if err != nil {
 		return fmt.Errorf("kubelet tls: %w", err)
 	}
+	// Provider routes (exec, logs, stats) attach to this mux. Auth wraps it;
+	// the mux itself stays the inner handler so routes registered later are served.
+	mux := http.NewServeMux()
 	n, err := nodeutil.NewNode(cfg.NodeName,
 		func(pc nodeutil.ProviderConfig) (nodeutil.Provider, vknode.NodeProvider, error) {
 			if err := p.ConfigureNode(ctx, pc.Node); err != nil {
@@ -218,10 +222,9 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 			np := node.NewStatusProvider(p.Inventory())
 			return p, np, nil
 		},
+		nodeutil.WithClient(k8s),
 		func(nc *nodeutil.NodeConfig) error {
-			return nodeutil.WithClient(k8s)(nc)
-		},
-		func(nc *nodeutil.NodeConfig) error {
+			nc.Handler = mux
 			nc.HTTPListenAddr = cfg.HTTPListenAddr()
 			nc.InformerResyncPeriod = cfg.Resync
 			nc.NumWorkers = cfg.Workers
@@ -230,16 +233,16 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 			}
 			return nil
 		},
-		// TODO(S003): TokenReview + SubjectAccessReview (nodeutil.WebhookAuth +
-		// nodeutil.WithAuth) is not wired. WebhookAuth without a client-certificate
-		// CA provider would 401 the API server's mTLS kubelet client. Production
-		// authn is TLS client certificates when ClientCA is set.
+		// WebhookAuth only when ClientCA is set. Without a CA it would 401
+		// the API server's mTLS kubelet client; empty CA is NoAuth instead.
+		kubeletAuth(cfg.NodeName, cfg.ClientCA),
 		nodeutil.WithTLSConfig(func(c *tls.Config) error {
 			c.Certificates = tlsCfg.Certificates
 			c.ClientCAs = tlsCfg.ClientCAs
 			c.ClientAuth = tlsCfg.ClientAuth
 			return nil
 		}),
+		nodeutil.AttachProviderRoutes(mux),
 	)
 	if err != nil {
 		return err

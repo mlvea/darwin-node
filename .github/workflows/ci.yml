@@ -36,6 +36,19 @@ jobs:
       - name: dist
         run: make dist
 
+  kubelet-auth:
+    name: kubelet auth envtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: kubelet auth integration
+        run: make test-kubelet-auth
+
   e2e:
     name: e2e (self-hosted)
     if: github.event_name == 'workflow_dispatch'

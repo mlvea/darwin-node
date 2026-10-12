@@ -21,7 +21,11 @@ func RequireKubeletTLS(standalone bool, cfg Config) error {
 }
 
 // TLSConfig loads the kubelet HTTP server certificate and, when clientCA is
-// set, a client CA pool with RequireAndVerifyClientCert.
+// set, a client CA pool. Presented client certificates are verified
+// (tls.VerifyClientCertIfGiven). A connection that presents no certificate
+// still completes the handshake so the handler can run bearer TokenReview.
+// RequireAndVerifyClientCert would reject those callers during the handshake,
+// and WebhookAuth's x509 authenticator would then never see a token.
 func TLSConfig(cert, key, clientCA string) (*tls.Config, error) {
 	if strings.TrimSpace(cert) == "" || strings.TrimSpace(key) == "" {
 		return nil, fmt.Errorf("tls cert and key paths are required")
@@ -47,6 +51,6 @@ func TLSConfig(cert, key, clientCA string) (*tls.Config, error) {
 		return nil, fmt.Errorf("parse client CA %q: no certificates", clientCA)
 	}
 	cfg.ClientCAs = pool
-	cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	cfg.ClientAuth = tls.VerifyClientCertIfGiven
 	return cfg, nil
 }
