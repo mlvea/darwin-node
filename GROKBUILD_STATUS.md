@@ -23,7 +23,7 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
   - `go test -count=1 -timeout 60s ./pkg/soak/ ./cmd/darwin-soak/` PASS (`TestImageRejectedOffAppleSilicon` included)
   - `go test -count=5 -timeout 180s ./pkg/soak/` PASS
   - `make soak` PASS: 4 cycles, ~68ms, `runtime=fake`, `slots=0/2`, `fds=8/8`, `cap_rejects=4`, `store_files=4`
-- **PR / branch:** `grokbuild/soak-harness` (not merged)
+- **PR / branch:** https://github.com/mlvea/darwin-node/pull/3 (`grokbuild/soak-harness`, not merged)
 
 ### Open risks
 - Hardware gate (`make test-hardware`) still unrun on real Apple Silicon
