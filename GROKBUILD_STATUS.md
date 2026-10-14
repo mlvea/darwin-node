@@ -9,6 +9,35 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-14 ~08:51 SGT — weekday reflection
+- **HEAD (start):** `c2a5b62` on `main` (PR #2 TokenReview S003 already merged; origin/main unchanged)
+- **HEAD (end):** this commit on `grokbuild/soak-harness`
+- **What changed:**
+  1. **Soak harness:** `pkg/soak` repeatedly creates and deletes cache-volume pods through every configured VM slot (1 or 2, never more). Each cycle execs `/usr/bin/true`, writes a host-side cache marker (the virtio-fs share a guest write lands on), deletes, and fails on fd, directory, slot, live-VM, cache-snapshot, or darwin-node goroutine drift. A create while both slots are held must return `VMCapacityExhausted`. Warm pool stays off: cache volumes cannot adopt a pre-booted VM, and a warm guest would consume one of the two slots.
+  2. **Short path:** `make soak` (default 4 cycles) and `go test ./pkg/soak` use `pkg/runtime/fake`. No image, no signature, no Virtualization.framework. `cmd/darwin-soak` refuses `--image` on a non-darwin/arm64 host.
+  3. **24h path:** `make soak IMAGE=<baked image>` signs `darwin-soak` when `codesign` exists and runs the vz runtime for 24h (override with `SOAK_CYCLES` or `SOAK_DURATION`). Not executed here.
+  4. **Docs:** `docs/stability.md` and `docs/testing.md` describe the harness. The 24h result is still an open production gate.
+- **Compile / tests (Linux box):**
+  - `go vet ./pkg/soak/ ./cmd/darwin-soak/` PASS
+  - `go test -count=1 -race -timeout 180s ./pkg/soak/` PASS
+  - `go test -count=1 -timeout 60s ./pkg/soak/ ./cmd/darwin-soak/` PASS (`TestImageRejectedOffAppleSilicon` included)
+  - `go test -count=5 -timeout 180s ./pkg/soak/` PASS
+  - `make soak` PASS: 4 cycles, ~68ms, `runtime=fake`, `slots=0/2`, `fds=8/8`, `cap_rejects=4`, `store_files=4`
+- **PR / branch:** `grokbuild/soak-harness` (not merged)
+
+### Open risks
+- Hardware gate (`make test-hardware`) still unrun on real Apple Silicon
+- Mac Mini / private workers are offline, so this box cannot boot Virtualization.framework
+- The 24h `make soak IMAGE=...` result is still required before any production-ready claim. The short fake pass does not substitute for it
+- Prior soak agents errored with empty transcripts (`bc-cc33fa88`, `bc-8564da74`, `bc-4fd2ded6`); this branch starts fresh and does not rewrite them
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- `make licenses` on this Linux box still refuses to rewrite `THIRD_PARTY_NOTICES` (generator requires the Darwin module graph for the codehex notice)
+
+### Next priority
+1. Hardware gate (`make test-hardware`) on the Mac Mini once a baked image and a signed binary are available
+2. Then the real 24h soak: `make soak IMAGE=<baked image>`
+3. Do not call the tree production-ready on the strength of the short fake soak
+
 ### 2026-10-06 ~08:51–09:10 SGT — TokenReview S003 API-server e2e
 - **HEAD (start):** `0666780` on `grokbuild/tokenreview-s003`
 - **HEAD (end):** this commit on `grokbuild/tokenreview-s003`
