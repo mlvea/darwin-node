@@ -14,6 +14,22 @@ make test-short
 - Node capacity math (reserved CPU/memory)
 - Fake runtime lifecycle (create/start/stop/IP)
 - hostPort conflict detection (no real bind in short tests)
+- Adopt/delete soak on the fake runtime (`pkg/soak`): both VM slots, cache
+  snapshot/restore, fd/dir/slot drift, a refused third VM, recovery after
+  an injected start failure
+
+## Soak
+
+```bash
+make soak                  # fake runtime, 4 cycles, any OS
+make soak SOAK_CYCLES=8
+make soak IMAGE=out/macos-15                 # 24h, Apple Silicon, baked image
+make soak IMAGE=out/macos-15 SOAK_CYCLES=1   # one real cycle
+```
+
+`make soak` without `IMAGE` is the CI-safe path: it does not boot
+Virtualization.framework. The 24h command is the production gate from
+[stability.md](stability.md). Details and the drift checks live there.
 
 ## What requires Apple Silicon hardware
 
