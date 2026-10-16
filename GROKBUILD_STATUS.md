@@ -9,6 +9,24 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-16 ~08:50 SGT — weekday reflection
+- **HEAD:** `main` still `c2a5b62` (PR #2 TokenReview S003 already merged); PR #3 (`grokbuild/soak-harness`) tip `9f5a4d13` before this docs-only commit
+- **What changed since 2026-10-15:**
+  1. Overnight nothing moved. Still waiting on Madushan's merge call. No open issues besides PR #3. This branch's log already has the 2026-10-14 and 2026-10-15 entries; `main`'s copy is still stuck at 2026-10-06.
+  2. PR #3 https://github.com/mlvea/darwin-node/pull/3 stays open on `grokbuild/soak-harness`: +1540/-7, 11 files, 3 commits. `mergeable=true`, `mergeable_state=clean`, 0 review comments. CI on `9f5a4d13`: `test` success, `kubelet auth envtest` success, `e2e (self-hosted)` skipped (both workflow runs).
+  3. No new code this run. PR #3 remains review-ready. Staying quiet on feature work to avoid churn before the merge decision.
+- **Not run / blocked:** no private Cursor workers online, so the hardware gate and the real 24h vz soak stay blocked. This box still has no local clone, no grok CLI, and no Grok OAuth session.
+
+### Open risks
+- Hardware gate and 24h vz soak are both unproven on Apple Silicon; the fake-runtime soak (`make soak`, 4 cycles) does not substitute for them
+- `e2e (self-hosted)` is always skipped, so nothing in CI touches Virtualization.framework
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- `make licenses` still cannot regenerate `THIRD_PARTY_NOTICES` off Darwin
+
+### Next priority
+1. Madushan's merge call on PR #3
+2. Bring the Mac Mini online as a private worker, then `make test-hardware IMAGE=...`, then the 24h `make soak IMAGE=...`
+
 ### 2026-10-15 ~08:49 SGT — weekday reflection
 - **HEAD:** `main` still `c2a5b62`; PR #3 (`grokbuild/soak-harness`) tip `d3b8583` before this docs-only commit
 - **What changed since 2026-10-14:**
