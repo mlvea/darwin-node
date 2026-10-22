@@ -114,6 +114,26 @@ in `cmd/darwin-node/kubelet_auth_test.go`.
 - Uncompressed sha256 is verified before a VM is started from cache.
 - We do not run untrusted host code from the image; we boot it as a VM.
 
+## Projected service account tokens
+
+- Each `serviceAccountToken` projection is minted with its own audience
+  and expiration. Two paths do not share one token.
+- `TokenRequest` errors and empty tokens fail pod admission. The node
+  does not create the token file in that case.
+- While the pod is running, the watch loop refreshes at half the
+  remaining lifetime, rewrites the host file (mode 0600), and asks the
+  guest agent to copy it again.
+- A failed refresh leaves the previous file in place. Once the recorded
+  expiration has passed, the pod fails and its VM slot is released.
+
+## emptyDir size
+
+`sizeLimit` is enforced by walking the host directory on the probe
+interval. Usage over the limit fails the pod. A symlink whose target
+leaves that directory fails the pod, because the walk cannot account
+for bytes written through it. This is a host-side check between ticks,
+not an APFS quota.
+
 ## SSH fallback
 
 - Off by default. Opt in with `DARWIN_NODE_ENABLE_SSH_FALLBACK=true` and

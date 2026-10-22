@@ -33,6 +33,27 @@ Virtualization.framework. The 24h command is the production gate from
 
 ## What requires Apple Silicon hardware
 
+The commands, the expected output, and the result sheet are in
+[HARDWARE_VALIDATION.md](HARDWARE_VALIDATION.md). Run that checklist
+once the Mac is connected. In short:
+
+```bash
+make test
+make test-hardware IMAGE=out/macos-15
+make soak IMAGE=out/macos-15 SOAK_CYCLES=1
+make soak IMAGE=out/macos-15
+```
+
+`make soak` with no `IMAGE`, and `go test` on Linux, stay green without
+that checklist. They do not mark it done.
+
+Host-side checks that Linux does run:
+
+- `emptyDir.sizeLimit`: directory usage on the probe interval, symlink
+  escape fails the pod and frees the slot
+- Projected ServiceAccount tokens: one token per projection, empty and
+  failed mints refused, refresh rewrites the file before expiry
+
 Tagged `//go:build darwin && arm64` and skipped under `-short` when a
 helper detects missing entitlements:
 
@@ -89,8 +110,9 @@ gitignored local convenience for `file://` browsing. The page uses plain
 
 `.github/workflows/ci.yml` at this repository root:
 
-- `go test ./... -short` on `macos-latest` (compile + unit)
-- `go vet`
+- `go test ./... -short` on `macos-latest` and `ubuntu-latest` (compile + unit)
+- `go vet` on both
+- `make test-kubelet-auth` on `ubuntu-latest`
 - No VM boot on GitHub-hosted runners (Virtualization.framework is not a
   reliable nested target). Real e2e is `workflow_dispatch` on a self-hosted
   `macos-arm64` runner labelled `darwin-node-e2e`.

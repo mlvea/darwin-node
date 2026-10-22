@@ -9,6 +9,11 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-22 — volume contract on the fake runtime
+- **HEAD:** `main` is the squash of PR #3 (24h soak harness). Hardware gate and the 24h `make soak IMAGE=...` run are still blocked on a Mac.
+- **What landed:** host-side `emptyDir.sizeLimit` (directory walk on the watch interval; symlink escape fails the pod and frees the slot) and projected ServiceAccount tokens (one TokenRequest per projection, empty and failed mints refused, refresh at half the remaining lifetime). `docs/HARDWARE_VALIDATION.md` is the one-shot Mac checklist. Linux CI runs `go test ./... -short`.
+- **Still blocked:** `make test-hardware IMAGE=...`, `make soak IMAGE=...` for 24h, APFS quotas, digest fast-path is still a fingerprint plus a process-local MAC.
+
 ### 2026-10-16 ~08:50 SGT — weekday reflection
 - **HEAD:** `main` still `c2a5b62` (PR #2 TokenReview S003 already merged); PR #3 (`grokbuild/soak-harness`) tip `9f5a4d13` before this docs-only commit
 - **What changed since 2026-10-15:**

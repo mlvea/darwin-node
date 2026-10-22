@@ -101,6 +101,9 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	}
 	startupOK := false
 	var startupFails, liveFails int32
+	if !e.enforceVolumeContract(ctx, rec) {
+		return
+	}
 	e.refreshSidecarStatus(ctx, rec)
 	if !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
 		return
@@ -112,6 +115,9 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if !e.enforceVolumeContract(ctx, rec) {
+				return
+			}
 			e.refreshSidecarStatus(ctx, rec)
 			if !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
 				return

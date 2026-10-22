@@ -120,7 +120,7 @@ func TestSubPathIsTheShareNotAGuestSuffix(t *testing.T) {
 		Spec: corev1.PodSpec{
 			Volumes: []corev1.Volume{{Name: "ed", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 			Containers: []corev1.Container{{
-				Name: "macos",
+				Name:         "macos",
 				VolumeMounts: []corev1.VolumeMount{{Name: "ed", MountPath: "/data", SubPath: "cache"}},
 			}},
 		},
@@ -232,6 +232,182 @@ func TestDownwardResourceFieldRef(t *testing.T) {
 	}
 	if string(mem) != "64" {
 		t.Fatalf("mem file %q", mem)
+	}
+}
+
+func TestEmptyDirUsageCountsFilesAndRejectsEscape(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("abcd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nested", "b"), []byte("xy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Directory metadata is not guest payload. A symlink that stays inside
+	// the volume must not be counted twice.
+	if err := os.Symlink("a", filepath.Join(root, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DirUsage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 6 {
+		t.Fatalf("usage %d, want 6", got)
+	}
+
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DirUsage(root); err == nil {
+		t.Fatal("symlink that leaves the volume must fail closed")
+	}
+}
+
+// macOS temp dirs live under /var, which is a symlink to /private/var.
+// EvalSymlinks resolves that ancestor, so the volume root must be resolved
+// the same way or an in-volume symlink looks like an escape.
+func TestDirUsageAllowsSymlinkWhenAncestorIsSymlinked(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "private", "vol")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("private", filepath.Join(base, "var")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "a"), []byte("abcd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a", filepath.Join(real, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DirUsage(filepath.Join(base, "var", "vol"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 4 {
+		t.Fatalf("usage %d, want 4", got)
+	}
+}
+
+func TestEmptyDirLimitsFromPodSpec(t *testing.T) {
+	limit := resource.MustParse("4")
+	mem := resource.MustParse("1Ki")
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &limit}}},
+				{Name: "mem", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &mem}}},
+				{Name: "plain", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: "unmounted", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &limit}}},
+			},
+			Containers: []corev1.Container{{
+				Name: "macos",
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "scratch", MountPath: "/scratch"},
+					{Name: "mem", MountPath: "/mem"},
+					{Name: "plain", MountPath: "/plain"},
+				},
+			}},
+		},
+	}
+	limits, err := EmptyDirLimits(pod, "/cache/pods/uid/volumes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limits) != 2 {
+		t.Fatalf("limits %+v", limits)
+	}
+	if limits[0].Name != "scratch" || limits[0].Bytes != 4 || limits[0].Path != "/cache/pods/uid/volumes/scratch" {
+		t.Fatalf("scratch %+v", limits[0])
+	}
+	if limits[1].Name != "mem" || limits[1].Bytes != 1024 {
+		t.Fatalf("memory medium is still a directory with a limit: %+v", limits[1])
+	}
+}
+
+func TestProjectedTokenRequiresDistinctNonEmptyTokens(t *testing.T) {
+	root := t.TempDir()
+	pod := projectedPod()
+	_, _, err := Materialize(Request{Pod: pod, Container: pod.Spec.Containers[0], RootDir: root})
+	if err == nil {
+		t.Fatal("missing service account token must fail closed")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "proj", "token")); !os.IsNotExist(statErr) {
+		t.Fatal("refused token must not leave a file")
+	}
+
+	_, _, err = Materialize(Request{
+		Pod: pod, Container: pod.Spec.Containers[0], RootDir: root,
+		ServiceToken: "shared",
+	})
+	if err == nil {
+		t.Fatal("one token must not be written to two projected paths")
+	}
+
+	_, _, err = Materialize(Request{
+		Pod: pod, Container: pod.Spec.Containers[0], RootDir: t.TempDir(),
+		Tokens: []ProjectedToken{
+			{Volume: "proj", Path: "token", Token: "audience-a"},
+			{Volume: "proj", Path: "extra", Token: ""},
+		},
+	})
+	if err == nil {
+		t.Fatal("empty projected token must fail closed")
+	}
+
+	dir := t.TempDir()
+	_, _, err = Materialize(Request{
+		Pod: pod, Container: pod.Spec.Containers[0], RootDir: dir,
+		Tokens: []ProjectedToken{
+			{Volume: "proj", Path: "token", Token: "audience-a"},
+			{Volume: "proj", Path: "extra", Token: "audience-b"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.ReadFile(filepath.Join(dir, "proj", "token"))
+	if err != nil || string(a) != "audience-a" {
+		t.Fatalf("token file %q %v", a, err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "proj", "extra"))
+	if err != nil || string(b) != "audience-b" {
+		t.Fatalf("extra file %q %v", b, err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "proj", "token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("token mode %o", info.Mode().Perm())
+	}
+}
+
+func projectedPod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "uid"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{
+				Name: "proj",
+				VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "token", Audience: "a"}},
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "extra", Audience: "b"}},
+				}}},
+			}},
+			Containers: []corev1.Container{{
+				Name:         "macos",
+				VolumeMounts: []corev1.VolumeMount{{Name: "proj", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount"}},
+			}},
+		},
 	}
 }
 

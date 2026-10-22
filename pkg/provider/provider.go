@@ -11,6 +11,7 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/engine"
 	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/node"
+	"github.com/darwin-node/darwin-node/pkg/volume"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -51,7 +52,23 @@ func (p *Provider) Engine() *engine.Engine { return p.engine }
 
 func (p *Provider) Inventory() node.Inventory { return p.inv }
 
-func (p *Provider) SetCredentialResolver(r CredentialResolver) { p.creds = r }
+func (p *Provider) SetCredentialResolver(r CredentialResolver) {
+	p.creds = r
+	if p.engine == nil {
+		return
+	}
+	if r == nil {
+		p.engine.SetTokenMinter(nil)
+		return
+	}
+	p.engine.SetTokenMinter(func(ctx context.Context, pod *corev1.Pod) ([]volume.ProjectedToken, error) {
+		creds, err := r.Resolve(ctx, pod)
+		if err != nil {
+			return nil, err
+		}
+		return creds.Tokens, nil
+	})
+}
 
 func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	var creds engine.Credentials
