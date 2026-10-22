@@ -271,6 +271,33 @@ func TestEmptyDirUsageCountsFilesAndRejectsEscape(t *testing.T) {
 	}
 }
 
+// macOS temp dirs live under /var, which is a symlink to /private/var.
+// EvalSymlinks resolves that ancestor, so the volume root must be resolved
+// the same way or an in-volume symlink looks like an escape.
+func TestDirUsageAllowsSymlinkWhenAncestorIsSymlinked(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "private", "vol")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("private", filepath.Join(base, "var")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "a"), []byte("abcd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a", filepath.Join(real, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DirUsage(filepath.Join(base, "var", "vol"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 4 {
+		t.Fatalf("usage %d, want 4", got)
+	}
+}
+
 func TestEmptyDirLimitsFromPodSpec(t *testing.T) {
 	limit := resource.MustParse("4")
 	mem := resource.MustParse("1Ki")

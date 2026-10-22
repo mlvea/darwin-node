@@ -423,13 +423,26 @@ func DirUsage(root string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	root = abs
-	info, err := os.Lstat(root)
+	info, err := os.Lstat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
 		return 0, err
+	}
+	// Resolve ancestor symlinks (macOS /var -> /private/var) before comparing
+	// a symlink target. EvalSymlinks on the target does the same, so both
+	// sides must be canonical or an in-volume link looks like an escape.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return 0, err
+	}
+	root = resolved
+	if !info.IsDir() {
+		info, err = os.Lstat(root)
+		if err != nil {
+			return 0, err
+		}
 	}
 	if !info.IsDir() {
 		return 0, fmt.Errorf("emptyDir %s is not a directory", root)
