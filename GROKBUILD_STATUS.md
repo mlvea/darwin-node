@@ -9,6 +9,71 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-16 ~08:50 SGT — weekday reflection
+- **HEAD:** `main` still `c2a5b62` (PR #2 TokenReview S003 already merged); PR #3 (`grokbuild/soak-harness`) tip `9f5a4d13` before this docs-only commit
+- **What changed since 2026-10-15:**
+  1. Overnight nothing moved. Still waiting on Madushan's merge call. No open issues besides PR #3. This branch's log already has the 2026-10-14 and 2026-10-15 entries; `main`'s copy is still stuck at 2026-10-06.
+  2. PR #3 https://github.com/mlvea/darwin-node/pull/3 stays open on `grokbuild/soak-harness`: +1540/-7, 11 files, 3 commits. `mergeable=true`, `mergeable_state=clean`, 0 review comments. CI on `9f5a4d13`: `test` success, `kubelet auth envtest` success, `e2e (self-hosted)` skipped (both workflow runs).
+  3. No new code this run. PR #3 remains review-ready. Staying quiet on feature work to avoid churn before the merge decision.
+- **Not run / blocked:** no private Cursor workers online, so the hardware gate and the real 24h vz soak stay blocked. This box still has no local clone, no grok CLI, and no Grok OAuth session.
+
+### Open risks
+- Hardware gate and 24h vz soak are both unproven on Apple Silicon; the fake-runtime soak (`make soak`, 4 cycles) does not substitute for them
+- `e2e (self-hosted)` is always skipped, so nothing in CI touches Virtualization.framework
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- `make licenses` still cannot regenerate `THIRD_PARTY_NOTICES` off Darwin
+
+### Next priority
+1. Madushan's merge call on PR #3
+2. Bring the Mac Mini online as a private worker, then `make test-hardware IMAGE=...`, then the 24h `make soak IMAGE=...`
+
+### 2026-10-15 ~08:49 SGT — weekday reflection
+- **HEAD:** `main` still `c2a5b62`; PR #3 (`grokbuild/soak-harness`) tip `d3b8583` before this docs-only commit
+- **What changed since 2026-10-14:**
+  1. The soak-harness agent (`bc-9293abb7`) finished cleanly, unlike the three earlier attempts, and opened https://github.com/mlvea/darwin-node/pull/3 (+1522/-7, 11 files: `pkg/soak`, `cmd/darwin-soak`, `make soak`, docs).
+  2. CI on `d3b8583`: `test` and `kubelet auth envtest` pass on both workflow runs; `e2e (self-hosted)` skipped (no Mac runner online).
+  3. No new code this run. The PR is reviewable as-is, and piling more on it before the merge decision would only add churn.
+- **Not run / blocked:** no private workers (Mac Mini) connected, so `make test-hardware` and the real 24h `make soak IMAGE=...` stay unrun. This box still has no clone, no grok CLI, and no Grok OAuth session.
+
+### Open risks
+- Hardware gate and 24h vz soak are both unproven on Apple Silicon; the fake-runtime soak (`make soak`, 4 cycles) does not substitute for them
+- `e2e (self-hosted)` is skipped on every PR, so nothing in CI touches Virtualization.framework
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- `make licenses` still cannot regenerate `THIRD_PARTY_NOTICES` off Darwin
+
+### Next priority
+1. Madushan's call on merging PR #3 (CI green; the agent advises not to treat the fake pass as the production soak)
+2. Bring the Mac Mini online as a private worker (`agent worker start`), then `make test-hardware IMAGE=<baked image>` and the 24h `make soak IMAGE=<baked image>`
+
+### 2026-10-14 ~08:51 SGT — weekday reflection
+- **HEAD (start):** `c2a5b62` on `main` (PR #2 TokenReview S003 already merged; origin/main unchanged)
+- **HEAD (end):** this commit on `grokbuild/soak-harness`
+- **What changed:**
+  1. **Soak harness:** `pkg/soak` repeatedly creates and deletes cache-volume pods through every configured VM slot (1 or 2, never more). Each cycle execs `/usr/bin/true`, writes a host-side cache marker (the virtio-fs share a guest write lands on), deletes, and fails on fd, directory, slot, live-VM, cache-snapshot, or darwin-node goroutine drift. A create while both slots are held must return `VMCapacityExhausted`. Warm pool stays off: cache volumes cannot adopt a pre-booted VM, and a warm guest would consume one of the two slots.
+  2. **Short path:** `make soak` (default 4 cycles) and `go test ./pkg/soak` use `pkg/runtime/fake`. No image, no signature, no Virtualization.framework. `cmd/darwin-soak` refuses `--image` on a non-darwin/arm64 host.
+  3. **24h path:** `make soak IMAGE=<baked image>` signs `darwin-soak` when `codesign` exists and runs the vz runtime for 24h (override with `SOAK_CYCLES` or `SOAK_DURATION`). Not executed here.
+  4. **Docs:** `docs/stability.md` and `docs/testing.md` describe the harness. The 24h result is still an open production gate.
+- **Compile / tests (Linux box):**
+  - `go vet ./pkg/soak/ ./cmd/darwin-soak/` PASS
+  - `go test -count=1 -race -timeout 180s ./pkg/soak/` PASS
+  - `go test -count=1 -timeout 60s ./pkg/soak/ ./cmd/darwin-soak/` PASS (`TestImageRejectedOffAppleSilicon` included)
+  - `go test -count=5 -timeout 180s ./pkg/soak/` PASS
+  - `make soak` PASS: 4 cycles, ~68ms, `runtime=fake`, `slots=0/2`, `fds=8/8`, `cap_rejects=4`, `store_files=4`
+- **PR / branch:** https://github.com/mlvea/darwin-node/pull/3 (`grokbuild/soak-harness`, not merged)
+
+### Open risks
+- Hardware gate (`make test-hardware`) still unrun on real Apple Silicon
+- Mac Mini / private workers are offline, so this box cannot boot Virtualization.framework
+- The 24h `make soak IMAGE=...` result is still required before any production-ready claim. The short fake pass does not substitute for it
+- Prior soak agents errored with empty transcripts (`bc-cc33fa88`, `bc-8564da74`, `bc-4fd2ded6`); this branch starts fresh and does not rewrite them
+- Digest fingerprint is fail-closed but not a full rehash; MAC key is process-local
+- `make licenses` on this Linux box still refuses to rewrite `THIRD_PARTY_NOTICES` (generator requires the Darwin module graph for the codehex notice)
+
+### Next priority
+1. Hardware gate (`make test-hardware`) on the Mac Mini once a baked image and a signed binary are available
+2. Then the real 24h soak: `make soak IMAGE=<baked image>`
+3. Do not call the tree production-ready on the strength of the short fake soak
+
 ### 2026-10-06 ~08:51–09:10 SGT — TokenReview S003 API-server e2e
 - **HEAD (start):** `0666780` on `grokbuild/tokenreview-s003`
 - **HEAD (end):** this commit on `grokbuild/tokenreview-s003`

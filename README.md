@@ -203,6 +203,7 @@ Kubernetes API
 | Delta image updates | Yes (digest-verified apply; pulls too) |
 | Graceful drain on SIGTERM/SIGINT | Yes (`--shutdown-grace-period`) |
 | Hardware release gate | Manual: `make test-hardware IMAGE=<dir>` ([docs/stability.md](docs/stability.md)) |
+| Adopt/delete soak | Short: `make soak`. 24h: `make soak IMAGE=<dir>` ([docs/stability.md](docs/stability.md)) |
 | Hybrid sidecars (mounts + resource requests) | Yes |
 | Host-side init containers | Yes |
 | In-guest probes (exec / httpGet / tcpSocket) | Yes |

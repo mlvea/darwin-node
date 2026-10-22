@@ -67,7 +67,7 @@ fail-closed CA cases and skips the live API server. The Linux CI job
 `kubelet auth envtest` sets the download flag and fails if the binaries
 cannot be fetched.
 
-Not verified here: `make test-hardware`, and a 24 hour adopt/delete soak.
+Not verified here: `make test-hardware`, and a 24 hour `make soak IMAGE=...` result. The short fake-runtime soak is `make soak`.
 Empty `ClientCA` (`NoAuth`, anonymous after TLS) is covered by unit tests
 in `cmd/darwin-node/kubelet_auth_test.go`.
 
