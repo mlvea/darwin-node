@@ -37,6 +37,10 @@ control-plane verified, hardware pending**.
 
 ## Running the hardware gate
 
+The full procedure, including the 24 hour soak and the result sheet, is
+[HARDWARE_VALIDATION.md](HARDWARE_VALIDATION.md). The commands below are
+the same gate.
+
 ```bash
 # Bake an image once (needs macOS IPSW):
 bin/darwin-image restore --ipsw <path> --out out/macos-15

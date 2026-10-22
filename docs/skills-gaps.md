@@ -74,7 +74,10 @@ next engineer.
 
 - Restart policies (`Always` / `OnFailure`) around a 30-60s VM boot.
 - ReplicaSet vs Failed pods under a 2-slot node (churn).
-- Projected token rotation without a real kubelet volume manager.
+- Projected ServiceAccount tokens are minted per projection and refreshed
+  from the watch loop at half their remaining lifetime. This is not
+  kubelet's projected-volume reconciler; configMap and secret bytes are
+  still fixed at pod start.
 
 ## 4. Volumes into a macOS guest
 
@@ -87,7 +90,9 @@ next engineer.
 
 **Still hard**
 
-- APFS quotas for `emptyDir.sizeLimit`.
+- APFS quotas for `emptyDir.sizeLimit`. The watch loop already fails a
+  pod whose host directory exceeds the limit, and fails one whose
+  symlink leaves the volume. That check runs between ticks.
 - `mount_null` reliability inside the guest across macOS versions.
 - PVC/CSI design that does not fight Time Machine / local snapshots.
 

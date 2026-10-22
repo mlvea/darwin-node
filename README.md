@@ -228,6 +228,7 @@ Kubernetes API
 | [docs/security.md](docs/security.md) | Threat model and fail-closed defaults |
 | [docs/limitations.md](docs/limitations.md) | What Kubernetes this is not |
 | [docs/testing.md](docs/testing.md) | Unit tests, fake runtime, hardware e2e |
+| [docs/HARDWARE_VALIDATION.md](docs/HARDWARE_VALIDATION.md) | One-shot Mac checklist: `make test-hardware` and the 24h soak |
 | [docs/stability.md](docs/stability.md) | What is proven, what is not, and the path to beta |
 | [docs/gpu.md](docs/gpu.md) | Shared Metal |
 | [docs/credits.md](docs/credits.md) | Lineage and third-party licenses |
