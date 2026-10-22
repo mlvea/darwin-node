@@ -73,6 +73,14 @@ func interesting() map[string]int {
 		if !strings.Contains(g, marker) {
 			continue
 		}
+		// runtime.Stack includes the goroutine taking the snapshot. On a
+		// checkout whose path does not itself contain "/darwin-node/", the
+		// two frames are Check/Check.func1 and interesting, which looks like
+		// a new leak. GitHub's runner path contains the repo name, so the
+		// source line used to crowd that signature out and CI stayed green.
+		if strings.Contains(g, "internal/leakcheck.Check") || strings.Contains(g, "internal/leakcheck.interesting(") {
+			continue
+		}
 		sig := signature(g)
 		out[sig]++
 	}
