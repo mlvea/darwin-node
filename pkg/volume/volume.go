@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/darwin-node/darwin-node/pkg/types"
 
@@ -38,7 +40,25 @@ type Request struct {
 	ConfigMaps       map[string]*corev1.ConfigMap
 	Secrets          map[string]*corev1.Secret
 	ServiceToken     string
+	Tokens           []ProjectedToken
 	AllowedHostPaths []string // empty denies all hostPath
+}
+
+// ProjectedToken is one service-account token file inside a projected volume.
+// An empty Token is refused. ExpiresAt is zero when the issuer did not say.
+type ProjectedToken struct {
+	Volume    string
+	Path      string
+	Token     string
+	ExpiresAt time.Time
+}
+
+// EmptyDirLimit is a mounted emptyDir whose sizeLimit is enforced by
+// directory walk. Medium Memory is still a directory; this is not an APFS quota.
+type EmptyDirLimit struct {
+	Name  string
+	Path  string
+	Bytes int64
 }
 
 // Materialize writes volume contents and returns shares + guest placements.
@@ -156,7 +176,7 @@ func materializeOne(req Request, mount corev1.VolumeMount, src *corev1.VolumeSou
 
 	case src.Projected != nil:
 		hostPath = filepath.Join(req.RootDir, mount.Name)
-		return hostPath, true, "copy", writeProjected(req, hostPath, src.Projected)
+		return hostPath, true, "copy", writeProjected(req, mount.Name, hostPath, src.Projected)
 
 	case src.DownwardAPI != nil:
 		hostPath = filepath.Join(req.RootDir, mount.Name)
@@ -234,7 +254,7 @@ func writeSecret(dir string, sec *corev1.Secret, items []corev1.KeyToPath, def o
 	return nil
 }
 
-func writeProjected(req Request, dir string, proj *corev1.ProjectedVolumeSource) error {
+func writeProjected(req Request, volumeName, dir string, proj *corev1.ProjectedVolumeSource) error {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return err
 	}
@@ -245,7 +265,11 @@ func writeProjected(req Request, dir string, proj *corev1.ProjectedVolumeSource)
 			if path == "" {
 				path = "token"
 			}
-			if err := writeVolumeFile(dir, path, []byte(req.ServiceToken), secretPerm); err != nil {
+			tok, ok := projectedToken(req, volumeName, path, proj)
+			if !ok || strings.TrimSpace(tok) == "" {
+				return fmt.Errorf("projected service account token %q: refusing to write an empty token", path)
+			}
+			if err := writeVolumeFile(dir, path, []byte(tok), secretPerm); err != nil {
 				return err
 			}
 		case s.ConfigMap != nil:
@@ -279,6 +303,176 @@ func writeProjected(req Request, dir string, proj *corev1.ProjectedVolumeSource)
 		}
 	}
 	return nil
+}
+
+func projectedToken(req Request, volume, path string, proj *corev1.ProjectedVolumeSource) (string, bool) {
+	for _, t := range req.Tokens {
+		p := t.Path
+		if p == "" {
+			p = "token"
+		}
+		if t.Volume == volume && p == path {
+			return t.Token, true
+		}
+	}
+	// A single projection may still use the legacy pod-level token. Two
+	// projections would otherwise be handed the same credential.
+	if serviceAccountProjectionCount(proj) == 1 && strings.TrimSpace(req.ServiceToken) != "" {
+		return req.ServiceToken, true
+	}
+	return "", false
+}
+
+func serviceAccountProjectionCount(proj *corev1.ProjectedVolumeSource) int {
+	if proj == nil {
+		return 0
+	}
+	n := 0
+	for _, s := range proj.Sources {
+		if s.ServiceAccountToken != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// WriteProjectedTokens rewrites token files under root/<volume>/<path>.
+// It does not create an empty file, and it does not touch other volume contents.
+func WriteProjectedTokens(root string, tokens []ProjectedToken) error {
+	for _, t := range tokens {
+		if err := safeVolumeName(t.Volume); err != nil {
+			return err
+		}
+		if strings.TrimSpace(t.Token) == "" {
+			return fmt.Errorf("projected service account token %s/%s: refusing to write an empty token", t.Volume, t.Path)
+		}
+		path := t.Path
+		if path == "" {
+			path = "token"
+		}
+		if err := writeVolumeFile(filepath.Join(root, t.Volume), path, []byte(t.Token), secretPerm); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EmptyDirLimits lists mounted emptyDirs that declared sizeLimit.
+// An unmounted volume has no directory to account, so it is skipped.
+func EmptyDirLimits(pod *corev1.Pod, root string) ([]EmptyDirLimit, error) {
+	if pod == nil {
+		return nil, nil
+	}
+	var out []EmptyDirLimit
+	for i := range pod.Spec.Volumes {
+		v := &pod.Spec.Volumes[i]
+		if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil {
+			continue
+		}
+		if !volumeMounted(pod, v.Name) {
+			continue
+		}
+		if err := safeVolumeName(v.Name); err != nil {
+			return nil, err
+		}
+		q := v.EmptyDir.SizeLimit
+		if q.Sign() < 0 {
+			return nil, fmt.Errorf("emptyDir %q sizeLimit is negative", v.Name)
+		}
+		n, ok := q.AsInt64()
+		if !ok || n < 0 {
+			return nil, fmt.Errorf("emptyDir %q sizeLimit is not a byte count", v.Name)
+		}
+		out = append(out, EmptyDirLimit{
+			Name:  v.Name,
+			Path:  filepath.Join(root, v.Name),
+			Bytes: n,
+		})
+	}
+	return out, nil
+}
+
+func volumeMounted(pod *corev1.Pod, name string) bool {
+	check := func(mounts []corev1.VolumeMount) bool {
+		for _, m := range mounts {
+			if m.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if check(c.VolumeMounts) {
+			return true
+		}
+	}
+	for _, c := range pod.Spec.Containers {
+		if check(c.VolumeMounts) {
+			return true
+		}
+	}
+	return false
+}
+
+// DirUsage is the sum of regular-file sizes under root. Directory metadata
+// is not counted. A symlink whose target leaves root is an error: the walk
+// cannot account for bytes written through it, so the caller fails closed.
+// A missing root is zero bytes.
+func DirUsage(root string) (int64, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return 0, err
+	}
+	root = abs
+	info, err := os.Lstat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("emptyDir %s is not a directory", root)
+	}
+	var n int64
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		st, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return fmt.Errorf("emptyDir symlink %s: %w", path, err)
+			}
+			target, err = filepath.Abs(target)
+			if err != nil {
+				return err
+			}
+			if !pathWithin(root, target) {
+				return fmt.Errorf("emptyDir symlink %s escapes the volume", path)
+			}
+			return nil
+		}
+		if !st.Mode().IsRegular() {
+			return nil
+		}
+		if n > math.MaxInt64-st.Size() {
+			return fmt.Errorf("emptyDir usage overflow")
+		}
+		n += st.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func writeDownward(pod *corev1.Pod, containerName, dir string, items []corev1.DownwardAPIVolumeFile) error {

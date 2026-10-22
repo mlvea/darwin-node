@@ -3,14 +3,18 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/darwin-node/darwin-node/pkg/engine"
 	"github.com/darwin-node/darwin-node/pkg/image"
+	"github.com/darwin-node/darwin-node/pkg/volume"
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 // CredentialResolver loads Secrets, ConfigMaps, SA tokens, and pull creds for a pod.
@@ -40,6 +44,7 @@ func (r KubeResolver) Resolve(ctx context.Context, pod *corev1.Pod) (engine.Cred
 	}
 	ns := pod.Namespace
 	core := r.Client.CoreV1()
+	seenToken := map[string]struct{}{}
 
 	addCM := func(name string, optional bool) error {
 		if name == "" || creds.ConfigMaps[name] != nil {
@@ -96,20 +101,17 @@ func (r KubeResolver) Resolve(ctx context.Context, pod *corev1.Pod) (engine.Cred
 						return engine.Credentials{}, err
 					}
 				}
-				if s.ServiceAccountToken != nil && creds.ServiceToken == "" {
-					sa := pod.Spec.ServiceAccountName
-					if sa == "" {
-						sa = "default"
+				if s.ServiceAccountToken != nil {
+					tok, err := mintServiceAccountToken(ctx, core, ns, pod.Spec.ServiceAccountName, v.Name, s.ServiceAccountToken)
+					if err != nil {
+						return engine.Credentials{}, err
 					}
-					tr := &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{
-						ExpirationSeconds: s.ServiceAccountToken.ExpirationSeconds,
-					}}
-					if s.ServiceAccountToken.Audience != "" {
-						tr.Spec.Audiences = []string{s.ServiceAccountToken.Audience}
+					key := tok.Volume + "\x00" + tok.Path
+					if _, dup := seenToken[key]; dup {
+						return engine.Credentials{}, fmt.Errorf("projected volume %s path %s is duplicated", tok.Volume, tok.Path)
 					}
-					if res, err := core.ServiceAccounts(ns).CreateToken(ctx, sa, tr, metav1.CreateOptions{}); err == nil {
-						creds.ServiceToken = res.Status.Token
-					}
+					seenToken[key] = struct{}{}
+					creds.Tokens = append(creds.Tokens, tok)
 				}
 			}
 		}
@@ -129,6 +131,45 @@ func (r KubeResolver) Resolve(ctx context.Context, pod *corev1.Pod) (engine.Cred
 		}
 	}
 	return creds, nil
+}
+
+// mintServiceAccountToken asks the API server for one projected token.
+// A transport error or an empty token fails the pod; we do not write a blank file.
+func mintServiceAccountToken(ctx context.Context, core typedcorev1.CoreV1Interface, ns, serviceAccount, volumeName string, proj *corev1.ServiceAccountTokenProjection) (volume.ProjectedToken, error) {
+	if proj == nil {
+		return volume.ProjectedToken{}, fmt.Errorf("nil service account projection")
+	}
+	path := proj.Path
+	if path == "" {
+		path = "token"
+	}
+	sa := serviceAccount
+	if sa == "" {
+		sa = "default"
+	}
+	tr := &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{
+		ExpirationSeconds: proj.ExpirationSeconds,
+	}}
+	if proj.Audience != "" {
+		tr.Spec.Audiences = []string{proj.Audience}
+	}
+	res, err := core.ServiceAccounts(ns).CreateToken(ctx, sa, tr, metav1.CreateOptions{})
+	if err != nil {
+		return volume.ProjectedToken{}, fmt.Errorf("serviceaccount %s token %s/%s: %w", sa, volumeName, path, err)
+	}
+	if res == nil || strings.TrimSpace(res.Status.Token) == "" {
+		return volume.ProjectedToken{}, fmt.Errorf("serviceaccount %s token %s/%s: empty token", sa, volumeName, path)
+	}
+	var exp time.Time
+	if !res.Status.ExpirationTimestamp.IsZero() {
+		exp = res.Status.ExpirationTimestamp.Time
+	}
+	return volume.ProjectedToken{
+		Volume:    volumeName,
+		Path:      path,
+		Token:     res.Status.Token,
+		ExpiresAt: exp,
+	}, nil
 }
 
 func deleteGrace(pod *corev1.Pod) int64 {

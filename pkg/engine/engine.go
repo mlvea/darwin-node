@@ -46,7 +46,25 @@ type Credentials struct {
 	ConfigMaps   map[string]*corev1.ConfigMap
 	Secrets      map[string]*corev1.Secret
 	ServiceToken string
+	Tokens       []volume.ProjectedToken
 	Pull         image.RegistryCreds
+}
+
+// TokenMinter issues a fresh set of projected service-account tokens.
+// A nil minter leaves tokens as they were at pod start.
+type TokenMinter func(ctx context.Context, pod *corev1.Pod) ([]volume.ProjectedToken, error)
+
+func (c Credentials) volumeReq(pod *corev1.Pod, container corev1.Container, root string, allowed []string) volume.Request {
+	return volume.Request{
+		Pod:              pod,
+		Container:        container,
+		RootDir:          root,
+		ConfigMaps:       c.ConfigMaps,
+		Secrets:          c.Secrets,
+		ServiceToken:     c.ServiceToken,
+		Tokens:           c.Tokens,
+		AllowedHostPaths: allowed,
+	}
 }
 
 // Engine owns in-memory pod state and drives the runtime.
@@ -59,6 +77,7 @@ type Engine struct {
 	hostIP    string
 	puller    image.Puller
 	hostports *hostport.Manager
+	minter    TokenMinter
 
 	warm       warmPool
 	warmCancel context.CancelFunc
@@ -97,6 +116,11 @@ type podRecord struct {
 	consoleSock     string
 	consoleHub      *consoleHub
 	startDone       sync.WaitGroup // closed when the async start goroutine returns
+	emptyDirs       []volume.EmptyDirLimit
+	volRoot         string
+	tokens          []volume.ProjectedToken
+	refreshAt       time.Time
+	tokensNeedCopy  bool
 }
 
 // New constructs an engine.
@@ -133,6 +157,13 @@ func (e *Engine) Close() {
 }
 
 func (e *Engine) Slots() *capacity.Slots { return e.slots }
+
+// SetTokenMinter installs the projected-token refresher used by the watch loop.
+func (e *Engine) SetTokenMinter(m TokenMinter) {
+	e.mu.Lock()
+	e.minter = m
+	e.mu.Unlock()
+}
 
 // Create validates, fail-closed acquires a VM slot, and starts asynchronously.
 func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials) error {
@@ -257,19 +288,22 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 	}
 
 	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
-	shares, places, err := volume.Materialize(volume.Request{
-		Pod:              pod,
-		Container:        pod.Spec.Containers[0],
-		RootDir:          volRoot,
-		ConfigMaps:       creds.ConfigMaps,
-		Secrets:          creds.Secrets,
-		ServiceToken:     creds.ServiceToken,
-		AllowedHostPaths: e.cfg.AllowedHostPaths,
-	})
+	limits, err := volume.EmptyDirLimits(pod, volRoot)
 	if err != nil {
 		e.fail(rec, err)
 		return
 	}
+	shares, places, err := volume.Materialize(creds.volumeReq(pod, pod.Spec.Containers[0], volRoot, e.cfg.AllowedHostPaths))
+	if err != nil {
+		e.fail(rec, err)
+		return
+	}
+	rec.mu.Lock()
+	rec.emptyDirs = limits
+	rec.volRoot = volRoot
+	rec.tokens = append([]volume.ProjectedToken(nil), creds.Tokens...)
+	rec.refreshAt = nextTokenRefresh(rec.tokens, time.Now())
+	rec.mu.Unlock()
 	ctrl := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "control")
 	if err := os.MkdirAll(ctrl, 0o700); err != nil {
 		e.fail(rec, err)
@@ -587,15 +621,7 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	}
 
 	for i := 1; i < len(pod.Spec.Containers); i++ {
-		if _, _, err := volume.Materialize(volume.Request{
-			Pod:              pod,
-			Container:        pod.Spec.Containers[i],
-			RootDir:          volRoot,
-			ConfigMaps:       creds.ConfigMaps,
-			Secrets:          creds.Secrets,
-			ServiceToken:     creds.ServiceToken,
-			AllowedHostPaths: e.cfg.AllowedHostPaths,
-		}); err != nil {
+		if _, _, err := volume.Materialize(creds.volumeReq(pod, pod.Spec.Containers[i], volRoot, e.cfg.AllowedHostPaths)); err != nil {
 			e.fail(rec, err)
 			return
 		}
@@ -632,13 +658,20 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 }
 
 func (e *Engine) fail(rec *podRecord, err error) {
+	e.failWith(rec, "Failed", err)
+}
+
+func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	rec.mu.Lock()
 	if rec.phase == corev1.PodFailed {
 		rec.mu.Unlock()
 		return
 	}
+	if reason == "" {
+		reason = "Failed"
+	}
 	rec.phase = corev1.PodFailed
-	rec.reason = "Failed"
+	rec.reason = reason
 	rec.message = err.Error()
 	rec.failedErr = err
 	rec.ready = false
@@ -1254,15 +1287,7 @@ func (e *Engine) runInitContainers(ctx context.Context, rec *podRecord, pod *cor
 		if LooksLikeVMImage(ic.Image) {
 			return fmt.Errorf("init container %q: macOS VM images cannot run as init containers", ic.Name)
 		}
-		if _, _, err := volume.Materialize(volume.Request{
-			Pod:              pod,
-			Container:        ic,
-			RootDir:          volRoot,
-			ConfigMaps:       creds.ConfigMaps,
-			Secrets:          creds.Secrets,
-			ServiceToken:     creds.ServiceToken,
-			AllowedHostPaths: e.cfg.AllowedHostPaths,
-		}); err != nil {
+		if _, _, err := volume.Materialize(creds.volumeReq(pod, ic, volRoot, e.cfg.AllowedHostPaths)); err != nil {
 			return err
 		}
 		e.events.Normal(ctx, event.ReasonInitStarted, "init container "+ic.Name)
