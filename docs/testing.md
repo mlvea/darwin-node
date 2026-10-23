@@ -110,7 +110,8 @@ gitignored local convenience for `file://` browsing. The page uses plain
 
 `.github/workflows/ci.yml` at this repository root:
 
-- `go test ./... -short` on `macos-latest` and `ubuntu-latest` (compile + unit)
+- `go test ./... -short` on `macos-latest` (compile + unit)
+- `go test ./... -short -race` on `ubuntu-latest` (same suite under the race detector)
 - `go vet` on both
 - `make test-kubelet-auth` on `ubuntu-latest`
 - No VM boot on GitHub-hosted runners (Virtualization.framework is not a
