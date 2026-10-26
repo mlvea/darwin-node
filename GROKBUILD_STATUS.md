@@ -9,6 +9,28 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-23 — weekday reflection (Asia/Singapore)
+- **HEAD:** `main` is `d0ed5e5f` (PR #3 soak harness and PR #4 emptyDir limits / projected tokens / `docs/HARDWARE_VALIDATION.md`, both merged 22 Oct 2026). This branch fixes the warm-pool race that PR #4's verification noted.
+- **What changed:**
+  1. **Race, test-only.** `go test -race ./pkg/engine/` reported a data race in `TestWarmOverlayReapedOnAdoptAndEvict`: the test wrote `e.cfg.WarmSlots` while `fillWarm` read it. `TestHostPortConflictDoesNotLeakAdoptedVM` did the same write. Production copies `WarmSlots` into the engine at `New` (flag / `DARWIN_NODE_WARM_SLOTS`) and never writes it again, so there is no runtime budget to synchronize. Both tests now leave `WarmSlots` at 0, which does not start the replenisher, and call `bootWarm` directly. Adopt still keeps the overlay while the VM runs and delete still removes it; a non-adoptable pod still evicts the warm VM and that overlay is still removed; a hostPort clash still must not leave a running VM without a slot. The 2-VM cap is unchanged.
+  2. **CI.** The Linux `test` job runs `go test ./... -short -count=1 -race`. The short suite was race-clean on this box (`go test -race -count=1 -short ./...`, exit 0). Darwin CI stays without `-race`.
+- **Compile / tests (Linux box):**
+  - `go test -race -count=1 -short -timeout 600s ./...` PASS (no other races)
+  - `go test -race -count=1 -timeout 180s ./pkg/engine/ -run 'TestWarmOverlayReapedOnAdoptAndEvict|TestHostPortConflictDoesNotLeakAdoptedVM'` PASS
+  - `go test ./... -short -count=1 -timeout 180s` PASS
+  - `go vet ./...` PASS
+  - `make soak` PASS: 4 cycles, 161ms, `runtime=fake`, `slots=0/2`, `fds=6/6`, `cap_rejects=4`
+
+### Open risks
+- Hardware gate `make test-hardware IMAGE=...` and the 24h `make soak IMAGE=...` are still unrun because no Mac worker is connected
+- `e2e (self-hosted)` is always skipped, so nothing in CI touches Virtualization.framework
+- Digest fast-path is a fingerprint plus a process-local MAC
+- `emptyDir` `sizeLimit` is a polling directory walk, not an APFS quota
+- `make licenses` still cannot regenerate `THIRD_PARTY_NOTICES` off Darwin
+
+### Next priority
+1. Connect the Mac Mini as a worker and run `docs/HARDWARE_VALIDATION.md`
+
 ### 2026-10-22 — volume contract on the fake runtime
 - **HEAD:** `main` is the squash of PR #3 (24h soak harness). Hardware gate and the 24h `make soak IMAGE=...` run are still blocked on a Mac.
 - **What landed:** host-side `emptyDir.sizeLimit` (directory walk on the watch interval; symlink escape fails the pod and frees the slot) and projected ServiceAccount tokens (one TokenRequest per projection, empty and failed mints refused, refresh at half the remaining lifetime). `docs/HARDWARE_VALIDATION.md` is the one-shot Mac checklist. Linux CI runs `go test ./... -short`.

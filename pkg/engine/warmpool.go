@@ -161,6 +161,8 @@ func (e *Engine) fillWarm(ctx context.Context) {
 		return
 	}
 	for ctx.Err() == nil {
+		// WarmSlots is fixed at New. Production never writes it again;
+		// the replenisher reads the field with no lock.
 		budget := min(e.cfg.WarmSlots-e.warm.len(), e.slots.Free())
 		if budget <= 0 {
 			return

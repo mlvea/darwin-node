@@ -202,10 +202,25 @@ func TestCloseStopsWarmVMsAndFreesSlots(t *testing.T) {
 	}
 }
 
+// mustBootWarm places one idle VM without a replenisher goroutine.
+// WarmSlots is process-start configuration. Writing it after New races
+// fillWarm, and nothing in production does that write.
+func mustBootWarm(t *testing.T, e *Engine) {
+	t.Helper()
+	if err := e.bootWarm(context.Background(), warmImg); err != nil {
+		t.Fatal(err)
+	}
+	if e.warm.len() != 1 {
+		t.Fatalf("warm len=%d, want 1", e.warm.len())
+	}
+}
+
 func TestWarmOverlayReapedOnAdoptAndEvict(t *testing.T) {
-	e, _, _ := warmEngine(t, 1, 1, warmImg)
-	waitFor(t, "warm VM", func() bool { return e.warm.len() == 1 })
-	e.cfg.WarmSlots = 0
+	// Slot cap is 1 and the filler is not running (WarmSlots 0). The test
+	// boots each warm VM itself, then checks the overlay across adopt and
+	// evict — the same cleanup the replenisher's bootWarm path uses.
+	e, _, _ := warmEngine(t, 1, 0, warmImg)
+	mustBootWarm(t, e)
 	snap := e.warm.snapshot()
 	if len(snap) != 1 || snap[0].diskDir == "" {
 		t.Fatalf("disk dir missing: %+v", snap)
@@ -234,11 +249,12 @@ func TestWarmOverlayReapedOnAdoptAndEvict(t *testing.T) {
 		t.Fatalf("adopted overlay leaked after delete: %v", err)
 	}
 
-	// Pool refills only when WarmSlots > 0. Re-enable one slot, plant again, evict.
-	e.cfg.WarmSlots = 1
-	waitFor(t, "warm VM after delete", func() bool { return e.warm.len() == 1 })
-	e.cfg.WarmSlots = 0
+	// Boot a second warm VM and evict it with a pod that cannot adopt.
+	mustBootWarm(t, e)
 	snap = e.warm.snapshot()
+	if len(snap) != 1 || snap[0].diskDir == "" {
+		t.Fatalf("disk dir missing: %+v", snap)
+	}
 	disk = snap[0].diskDir
 	if err := os.MkdirAll(disk, 0o700); err != nil {
 		t.Fatal(err)
@@ -257,9 +273,10 @@ func TestWarmOverlayReapedOnAdoptAndEvict(t *testing.T) {
 }
 
 func TestHostPortConflictDoesNotLeakAdoptedVM(t *testing.T) {
-	e, rt, _ := warmEngine(t, 2, 1, warmImg)
-	waitFor(t, "warm VM", func() bool { return e.warm.len() == 1 })
-	e.cfg.WarmSlots = 0
+	// WarmSlots stays 0 so the failed adopt cannot be refilled by the
+	// ticker. A leaked VM would then show up as running > slots held.
+	e, rt, _ := warmEngine(t, 2, 0, warmImg)
+	mustBootWarm(t, e)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
