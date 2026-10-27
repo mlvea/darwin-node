@@ -9,6 +9,14 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-10-27 ~09:03 SGT — macOS `test` flake on main after PR #5
+- **HEAD:** `main` was `92a3c52` (merge of PR #5). CI run [40334540713](https://github.com/mlvea/darwin-node/actions/runs/40334540713): macOS `test` job `121612472861` failed (`go test ./... -short`, exit 1). `test (linux)` and `kubelet auth envtest` passed. `e2e (self-hosted)` skipped. The merge tree `1665fc76` is the PR tip `515517e4`, whose macOS `test` job passed twice on 23 Oct.
+- **Root cause:** `TestRuntimeCreateFailureFailsClosed` in `pkg/engine` (`inject_test.go:145`: `failed pod left state behind: <nil>`). `failWith` publishes `PodFailed` and `teardown` releases the slot before `os.RemoveAll` of `cache/pods/<uid>`. The helper treated that phase as proof the directory was already gone. On the loaded `macos-latest` runner `os.Stat` still succeeded, so removal had not finished. Same window fails `TestVMStartFailureFailsClosed` and `TestAgentDialFailureFailsClosed` (they share `assertFailedAndClean`). Not a WarmSlots regression and not a darwin-only product bug: Linux was green on this tree, and a 50ms sleep before `RemoveAll` reproduces the identical `Stat` error on Linux. The 2-VM cap and fail-closed path are unchanged; `PodFailed` stays visible while a large overlay is deleted.
+- **Fix:** after the pod is `Failed`, `assertFailedAndClean` waits on `startDone`. That goroutine returns only after `RemoveAll`. The checks are the same: failure message set, slots in use is 0, the pod directory is gone, and the next pod reaches `Running`.
+- **Verification (Linux):** with the 50ms sleep still in `failWith`, the three tests failed before the wait and passed after it. Sleep removed. `go test ./pkg/engine/ -count=20 -short -timeout 600s` PASS (238s). `go test ./pkg/engine/ -race -count=1 -short -timeout 180s` PASS.
+- **Remaining risks:** hardware gate `make test-hardware IMAGE=...` and the 24h `make soak IMAGE=...` are still unrun. No Mac worker is connected, so nothing here touched Virtualization.framework. `e2e (self-hosted)` stays skipped.
+- **Next priority:** connect the Mac Mini as a worker and run `docs/HARDWARE_VALIDATION.md`.
+
 ### 2026-10-23 — weekday reflection (Asia/Singapore)
 - **HEAD:** `main` is `d0ed5e5f` (PR #3 soak harness and PR #4 emptyDir limits / projected tokens / `docs/HARDWARE_VALIDATION.md`, both merged 22 Oct 2026). This branch fixes the warm-pool race that PR #4's verification noted.
 - **What changed:**

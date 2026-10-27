@@ -121,6 +121,20 @@ func assertFailedAndClean(t *testing.T, e *Engine, ns, name, uid string) {
 	if p.Status.Message == "" {
 		t.Fatal("failed pod must carry a message")
 	}
+	// failWith publishes PodFailed, then teardown releases the slot, then
+	// RemoveAll deletes the pod directory. Those last two steps run on the
+	// start goroutine and finish before startDone is released. Sampling the
+	// directory at the phase transition races that goroutine: on a loaded
+	// runner Stat still succeeds and the test reports a leftover directory
+	// that RemoveAll is about to delete. Wait for the goroutine, then apply
+	// the same checks.
+	e.mu.RLock()
+	rec := e.pods[Key(ns, name)]
+	e.mu.RUnlock()
+	if rec == nil {
+		t.Fatal("pod record missing after failure")
+	}
+	rec.startDone.Wait()
 	if got := e.slots.Used(); got != 0 {
 		t.Fatalf("slot leak after failure: used=%d", got)
 	}
