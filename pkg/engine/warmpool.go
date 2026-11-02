@@ -40,6 +40,12 @@ type warmEntry struct {
 	cpu     uint
 	mem     uint64
 	machine runtime.Machine
+	// probe is the readiness dial. The guest agent serves that one
+	// connection until it is closed, then dials again. It stays open while
+	// the VM is idle so the guest is not left waiting on a handshake nobody
+	// will accept, and it is closed when a pod is about to dial or the VM
+	// is stopped.
+	probe *guest.Client
 }
 
 // warmTickInterval balances adoption latency against per-tick work.
@@ -211,10 +217,10 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 	}
 	root := filepath.Join(e.cfg.CacheDir, "warm", fmt.Sprint(seq))
 	diskDir := podMACDir(e.cfg.CacheDir, slotID)
-	token, mac, cpu, mem, machine, err := e.bootWarmMachine(ctx, slotID, ref, root)
+	token, mac, cpu, mem, machine, probe, err := e.bootWarmMachine(ctx, slotID, ref, root)
 	entry := &warmEntry{
 		seq: seq, slotID: slotID, imgRef: ref, root: root, diskDir: diskDir,
-		token: token, mac: mac, cpu: cpu, mem: mem, machine: machine,
+		token: token, mac: mac, cpu: cpu, mem: mem, machine: machine, probe: probe,
 	}
 	if err != nil {
 		entry.machine = nil // bootWarmMachine already stopped a half-started VM
@@ -230,12 +236,22 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 	return nil
 }
 
+// releaseWarmProbe closes the readiness dial. Safe to call twice.
+func releaseWarmProbe(entry *warmEntry) {
+	if entry == nil || entry.probe == nil {
+		return
+	}
+	_ = entry.probe.Close()
+	entry.probe = nil
+}
+
 // stopWarmEntry stops the VM, releases its slot, and deletes both the warm
 // control dir and the CoW overlay. Release is idempotent.
 func (e *Engine) stopWarmEntry(entry *warmEntry) {
 	if entry == nil {
 		return
 	}
+	releaseWarmProbe(entry)
 	if entry.machine != nil {
 		_ = entry.machine.Stop(context.Background(), 5*time.Second)
 		entry.machine = nil
@@ -257,23 +273,23 @@ func (e *Engine) stopWarmEntry(entry *warmEntry) {
 
 // bootWarmMachine resolves the image, creates and starts the machine, and
 // waits for agent readiness so adoption later is genuinely instant.
-func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) (token, mac string, cpu uint, mem uint64, m runtime.Machine, err error) {
+func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) (token, mac string, cpu uint, mem uint64, m runtime.Machine, probe *guest.Client, err error) {
 	token, err = randomToken()
 	if err != nil {
-		return "", "", 0, 0, nil, err
+		return "", "", 0, 0, nil, nil, err
 	}
 	hw, err := netutil.RandomMAC()
 	if err != nil {
-		return "", "", 0, 0, nil, err
+		return "", "", 0, 0, nil, nil, err
 	}
 	mac = hw.String()
 
 	ctrl := filepath.Join(root, "control")
 	if err := os.MkdirAll(ctrl, 0o700); err != nil {
-		return "", "", 0, 0, nil, err
+		return "", "", 0, 0, nil, nil, err
 	}
 	if err := os.WriteFile(filepath.Join(ctrl, types.GuestAgentTokenFile), []byte(token), 0o600); err != nil {
-		return "", "", 0, 0, nil, err
+		return "", "", 0, 0, nil, nil, err
 	}
 	shares := []types.Share{{Name: types.ControlShareName, HostPath: ctrl, ReadOnly: true}}
 
@@ -293,7 +309,7 @@ func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) 
 	if e.rt.Name() == types.RuntimeVZ {
 		disk, aux, hwm, rerr := e.resolveImage(ctx, ref, slotID, corev1.PullIfNotPresent, Credentials{})
 		if rerr != nil {
-			return "", "", 0, 0, nil, rerr
+			return "", "", 0, 0, nil, nil, rerr
 		}
 		spec.DiskPath = disk
 		spec.AuxPath = aux
@@ -301,10 +317,10 @@ func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) 
 	}
 	mach, err := e.rt.Create(ctx, spec)
 	if err != nil {
-		return "", "", 0, 0, nil, err
+		return "", "", 0, 0, nil, nil, err
 	}
 	if err := mach.Start(ctx); err != nil {
-		return "", "", 0, 0, nil, err
+		return "", "", 0, 0, nil, nil, err
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, e.cfg.AgentReadyTimeout)
 	defer cancel()
@@ -318,9 +334,11 @@ func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) 
 	}
 	if err != nil {
 		_ = mach.Stop(context.Background(), 5*time.Second)
-		return "", "", 0, 0, nil, fmt.Errorf("warm boot %s: %w", slotID, err)
+		// Caller closes cli. Returning it here covers the Ready failure
+		// path; a dial error leaves cli nil.
+		return "", "", 0, 0, nil, cli, fmt.Errorf("warm boot %s: %w", slotID, err)
 	}
-	return token, mac, cpu, mem, mach, nil
+	return token, mac, cpu, mem, mach, cli, nil
 }
 
 // takeWarm adopts a pre-booted VM for pod's image, or returns nil. The warm

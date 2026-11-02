@@ -43,3 +43,40 @@ func TestFakeLifecycle(t *testing.T) {
 		t.Fatalf("state %s", m.Status().State)
 	}
 }
+
+// The guest agent dials the host, serves one connection, and dials again
+// only after that connection closes. Closing the first client must leave
+// a later DialAgent able to reach the guest.
+func TestDialAgentAfterCloseReachesGuest(t *testing.T) {
+	r := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m, err := r.Create(ctx, types.VMSpec{
+		ID:         types.MachineID{Name: "p", Namespace: "n", UID: "u"},
+		AgentToken: "tok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Stop(context.Background(), 0) })
+
+	first, err := m.DialAgent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.DialAgent(ctx)
+	if err != nil {
+		t.Fatalf("dial after close: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	info, err := second.NetInfo(ctx)
+	if err != nil || info.PrimaryIP == "" {
+		t.Fatalf("guest unreachable after the first session closed: %+v %v", info, err)
+	}
+}
