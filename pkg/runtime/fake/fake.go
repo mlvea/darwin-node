@@ -99,6 +99,8 @@ type machine struct {
 	agentOK   bool
 	counted   bool
 	srvCancel context.CancelFunc
+	sctx      context.Context
+	handler   guest.Handler
 	client    *guest.Client
 	peer      net.Conn
 }
@@ -183,6 +185,8 @@ func (m *machine) Start(ctx context.Context) error {
 			return pf(ctx, req)
 		}
 	}
+	m.sctx = sctx
+	m.handler = h
 	go func() { _ = guest.Serve(sctx, a, h) }()
 	cli, err := guest.Dial(ctx, b, m.token, "fake-host")
 	if err != nil {
@@ -247,11 +251,19 @@ func (m *machine) Status() types.VMStatus {
 
 func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.client == nil {
+	if m.state != types.VMRunning || m.sctx == nil {
+		m.mu.Unlock()
 		return nil, context.Canceled
 	}
-	return m.client, nil
+	h := m.handler
+	sctx := m.sctx
+	token := m.token
+	m.mu.Unlock()
+	// A new pipe per dial. The guest agent serves one connection and then
+	// dials again; closing the previous client must not retire the VM.
+	a, b := net.Pipe()
+	go func() { _ = guest.Serve(sctx, a, h) }()
+	return guest.Dial(ctx, b, token, "fake-host")
 }
 
 func (m *machine) Logs() io.ReadCloser {

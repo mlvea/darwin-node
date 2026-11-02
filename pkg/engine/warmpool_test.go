@@ -14,8 +14,11 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/capacity"
 	"github.com/darwin-node/darwin-node/pkg/config"
 	"github.com/darwin-node/darwin-node/pkg/event"
+	"github.com/darwin-node/darwin-node/pkg/guest"
+	"github.com/darwin-node/darwin-node/pkg/runtime"
 	"github.com/darwin-node/darwin-node/pkg/runtime/fake"
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
+	"github.com/darwin-node/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -129,6 +132,142 @@ func TestWarmPoolBootsInFreeSlotOnly(t *testing.T) {
 	}
 	for _, n := range []string{"cold", "third"} {
 		_ = e.Delete(context.Background(), "default", n, 0)
+	}
+}
+
+// oneSessionRuntime models the guest agent: one vsock session at a time.
+// DialAgent fails while a previous client is still open, which is what
+// darwin-guest-agent does (dial, Serve, dial again only after Serve returns).
+type oneSessionRuntime struct {
+	inner *fake.Runtime
+}
+
+func (r *oneSessionRuntime) Name() types.RuntimeName { return r.inner.Name() }
+
+func (r *oneSessionRuntime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machine, error) {
+	m, err := r.inner.Create(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	sctx, cancel := context.WithCancel(context.Background())
+	return &oneSessionMachine{
+		Machine: m,
+		token:   spec.AgentToken,
+		sctx:    sctx,
+		cancel:  cancel,
+		h: guest.Handler{
+			Token:        spec.AgentToken,
+			AgentVersion: "oneshot",
+			NetInfoFn: func() (guest.NetInfoRes, error) {
+				return guest.NetInfoRes{PrimaryIP: "192.168.64.9", IPs: []string{"192.168.64.9"}}, nil
+			},
+		},
+	}, nil
+}
+
+type oneSessionMachine struct {
+	runtime.Machine
+	token  string
+	h      guest.Handler
+	sctx   context.Context
+	cancel context.CancelFunc
+
+	mu   sync.Mutex
+	open int
+}
+
+func (m *oneSessionMachine) Stop(ctx context.Context, grace time.Duration) error {
+	m.cancel()
+	return m.Machine.Stop(ctx, grace)
+}
+
+// Status hides the fake runtime's IP. TCP fallback is off in the guest
+// agent by default, so a held vsock session must fail the dial immediately
+// instead of waiting out a connect to a guest that is not listening.
+func (m *oneSessionMachine) Status() types.VMStatus {
+	st := m.Machine.Status()
+	st.IP = ""
+	st.IPs = nil
+	st.MAC = ""
+	return st
+}
+
+func (m *oneSessionMachine) DialAgent(ctx context.Context) (*guest.Client, error) {
+	m.mu.Lock()
+	if m.open > 0 {
+		m.mu.Unlock()
+		return nil, errSessionHeld
+	}
+	m.open++
+	m.mu.Unlock()
+
+	a, b := net.Pipe()
+	go func() { _ = guest.Serve(m.sctx, a, m.h) }()
+	conn := &closeOnceConn{Conn: b, fn: func() {
+		m.mu.Lock()
+		m.open--
+		m.mu.Unlock()
+	}}
+	cli, err := guest.Dial(ctx, conn, m.token, "test")
+	if err != nil {
+		return nil, err
+	}
+	return cli, nil
+}
+
+type closeOnceConn struct {
+	net.Conn
+	once sync.Once
+	fn   func()
+}
+
+func (c *closeOnceConn) Close() error {
+	c.once.Do(func() {
+		if c.fn != nil {
+			c.fn()
+		}
+	})
+	return c.Conn.Close()
+}
+
+var errSessionHeld = errorsSession("previous vsock session still open")
+
+type errorsSession string
+
+func (e errorsSession) Error() string { return string(e) }
+
+func TestWarmAdoptDialsAfterProbeSessionReleased(t *testing.T) {
+	leakcheck.Check(t)
+	slots, err := capacity.New(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Runtime = "fake"
+	cfg.CacheDir = t.TempDir()
+	cfg.AgentReadyTimeout = 5 * time.Second
+	cfg.AllowNATWorkloads = true
+	inner := fake.New()
+	e := New(cfg, slots, &oneSessionRuntime{inner: inner}, sidecar.None{}, event.Nop{}, "10.0.0.1")
+	t.Cleanup(e.Close)
+
+	if err := e.bootWarm(context.Background(), warmImg); err != nil {
+		t.Fatal(err)
+	}
+	pod := samplePod("hot", "uid-hot")
+	pod.Spec.Containers[0].Image = warmImg
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	p := waitPhase(t, e, "default", "hot", corev1.PodRunning)
+	if p.Status.PodIP == "" {
+		t.Fatal("adopted pod missing IP")
+	}
+	if inner.Starts() != 1 {
+		t.Fatalf("adoption must not cold-boot, starts=%d", inner.Starts())
+	}
+	if err := e.Delete(context.Background(), "default", "hot", 0); err != nil {
+		t.Fatal(err)
 	}
 }
 

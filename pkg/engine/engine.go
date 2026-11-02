@@ -388,10 +388,17 @@ func (e *Engine) startAdopted(ctx context.Context, rec *podRecord, pod *corev1.P
 	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
 	if len(pod.Spec.InitContainers) > 0 {
 		if err := e.runInitContainers(ctx, rec, pod, creds, volRoot); err != nil {
+			releaseWarmProbe(entry)
 			e.fail(rec, err)
 			return
 		}
 	}
+	// The guest agent is still inside Serve on the readiness dial. Close
+	// that session now, immediately before the pod dials, so the agent
+	// loops and connects again. Closing earlier (while the VM sits idle,
+	// or during init) makes the guest time out a handshake nobody is
+	// accepting yet.
+	releaseWarmProbe(entry)
 	e.serveConsole(rec)
 	e.runConnected(ctx, rec, pod, creds, entry.machine, entry.token, nil)
 }
