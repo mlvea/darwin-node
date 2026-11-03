@@ -53,6 +53,11 @@ func ParseCacheAnnotations(pod *corev1.Pod) ([]CacheVol, error) {
 		if name == "" || !validCacheName(name) {
 			return nil, fmt.Errorf("cache annotation %q: name must match [A-Za-z0-9._-]+", k)
 		}
+		// .tmp and .old are the snapshot staging directories beside the
+		// store. A cache with that suffix would alias a crash leftover.
+		if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".old") {
+			return nil, fmt.Errorf("cache annotation %q: name must not end in .tmp or .old", k)
+		}
 		guest, err := cleanGuestPath(pod.Annotations[k])
 		if err != nil {
 			return nil, fmt.Errorf("cache annotation %q: %w", k, err)
@@ -139,6 +144,9 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 	for _, c := range caches {
 		hostDir := e.cachePodDir(uid, c.Name)
 		store := e.cacheStorePath(ns, c.Name)
+		if err := recoverCacheStore(store); err != nil {
+			return nil, nil, fmt.Errorf("cache %q recover: %w", c.Name, err)
+		}
 		if err := os.RemoveAll(hostDir); err != nil {
 			return nil, nil, fmt.Errorf("cache %q: %w", c.Name, err)
 		}
@@ -183,29 +191,50 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 			continue
 		}
 		store := e.cacheStorePath(pod.Namespace, c.Name)
+		// Heal a previous crash before mutating. Otherwise RemoveAll of
+		// .old can delete the only committed tree.
+		if err := recoverCacheStore(store); err != nil {
+			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q recover: %v", c.Name, err))
+			continue
+		}
 		tmp := store + ".tmp"
+		old := store + ".old"
 		if err := os.RemoveAll(tmp); err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
 		if err := cloneCacheDir(src, tmp); err != nil {
+			_ = os.RemoveAll(tmp)
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q clone: %v", c.Name, err))
 			continue
 		}
-		// Swap with a recovery step: a crash between the two renames leaves
-		// the previous store intact under .old rather than destroyed.
-		_ = os.RemoveAll(store + ".old")
-		if err := os.Rename(store, store+".old"); err != nil && !os.IsNotExist(err) {
+		// Commit by renaming the live store aside, then the new tree into
+		// place. .old is removed only after that rename succeeds, and only
+		// a store that was present is moved aside — a missing store means
+		// .old may be the last committed copy.
+		live, err := pathExists(store)
+		if err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
+		if live {
+			if err := os.RemoveAll(old); err != nil {
+				e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
+				continue
+			}
+			if err := os.Rename(store, old); err != nil && !os.IsNotExist(err) {
+				e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
+				continue
+			}
+		}
 		if err := os.Rename(tmp, store); err != nil {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q swap: %v", c.Name, err))
-			// Best-effort rollback so the old snapshot stays live.
-			_ = os.Rename(store+".old", store)
+			if live {
+				_ = os.Rename(old, store)
+			}
 			continue
 		}
-		_ = os.RemoveAll(store + ".old")
+		_ = os.RemoveAll(old)
 		e.events.Normal(context.Background(), event.ReasonCacheSaved, c.GuestPath+" -> "+store)
 	}
 }

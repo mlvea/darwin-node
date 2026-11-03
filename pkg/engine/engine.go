@@ -408,6 +408,14 @@ func (e *Engine) startAdopted(ctx context.Context, rec *podRecord, pod *corev1.P
 // socket exists only when --serial-console is enabled and the runtime
 // supports it; everything here is best-effort.
 func (e *Engine) serveConsole(rec *podRecord) {
+	e.serveConsoleAt(rec, func(path string) (net.Listener, error) {
+		return net.Listen("unix", path)
+	}, os.Chmod)
+}
+
+// serveConsoleAt is serveConsole with the socket calls injected so tests can
+// force Listen and Chmod failures. Those paths must close the serial pipe.
+func (e *Engine) serveConsoleAt(rec *podRecord, listen func(string) (net.Listener, error), chmod func(string, os.FileMode) error) {
 	if !e.cfg.SerialConsole {
 		return
 	}
@@ -427,19 +435,29 @@ func (e *Engine) serveConsole(rec *podRecord) {
 		e.events.Warn(context.Background(), event.ReasonFailed, "console: "+err.Error())
 		return
 	}
+	// The serial pipe is a process fd (os.Pipe on the vz runtime). Close it
+	// on every return until the hub owns it. Listen and Chmod both fail
+	// after Console() has already taken the pipe.
+	owned := true
+	defer func() {
+		if owned {
+			_ = consoleConn.Close()
+		}
+	}()
 	sockPath := ConsoleSocketPath(pod.Namespace, pod.Name)
 	_ = os.Remove(sockPath)
-	ln, err := net.Listen("unix", sockPath)
+	ln, err := listen(sockPath)
 	if err != nil {
 		e.events.Warn(context.Background(), event.ReasonFailed, "console socket: "+err.Error())
 		return
 	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
+	if err := chmod(sockPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
 		e.events.Warn(context.Background(), event.ReasonFailed, "console socket mode: "+err.Error())
 		return
 	}
+	owned = false
 	hub := newConsoleHub(consoleConn)
 	rec.mu.Lock()
 	rec.consoleLn = ln
