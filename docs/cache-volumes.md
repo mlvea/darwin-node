@@ -18,7 +18,9 @@ metadata:
 
 Rules enforced at admission:
 
-- The annotation name after the prefix must match `[A-Za-z0-9._-]+`.
+- The annotation name after the prefix must match `[A-Za-z0-9._-]+`
+  and must not end in `.tmp` or `.old`. Those suffixes are the crash
+  staging directories next to the store.
 - The value must be an absolute guest path below `/`; any `..` element
   is rejected, so a cache can never escape its mount point.
 - Two caches may not declare the same guest path.
@@ -33,8 +35,14 @@ Rules enforced at admission:
    the agent links it at the annotated guest path. Guest writes are
    host writes; there is no sync step and no copy-out protocol.
 3. **Snapshot (graceful delete only).** Before the pod directory is
-   removed, each cache is cloned to `<store>.tmp`, then atomically
-   renamed over the previous store entry. A pod whose start failed is
+   removed, each cache is cloned to `<store>.tmp`. The live store is
+   renamed to `<store>.old`, then `<store>.tmp` is renamed onto the
+   store. `<store>.old` is deleted only after that rename. A crash at
+   any point in the sequence leaves the last committed tree at the
+   store path or at `<store>.old`. The next start's `Recover`, and the
+   next restore, republish that tree and delete uncommitted `.tmp`
+   clones (a half-written clone is not distinguishable from a finished
+   one, so `.tmp` is never published). A pod whose start failed is
    never snapshotted, so corrupt build state cannot poison the store.
 
 The store key includes the namespace; cross-namespace sharing is a

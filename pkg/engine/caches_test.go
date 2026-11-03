@@ -43,6 +43,8 @@ func TestParseCacheAnnotations(t *testing.T) {
 	for name, tc := range map[string]map[string]string{
 		"bad name":       {"cache.darwin.node/a b": "/x"},
 		"empty name":     {"cache.darwin.node/": "/x"},
+		"tmp suffix":     {"cache.darwin.node/xc.tmp": "/x"},
+		"old suffix":     {"cache.darwin.node/xc.old": "/x"},
 		"relative path":  {"cache.darwin.node/x": "relative/path"},
 		"escaping path":  {"cache.darwin.node/x": "/a/../.."},
 		"duplicate path": {"cache.darwin.node/x": "/same", "cache.darwin.node/y": "/same"},
@@ -54,6 +56,31 @@ func TestParseCacheAnnotations(t *testing.T) {
 
 	if caches, err := ParseCacheAnnotations(cachePod("p", "u", nil)); err != nil || caches != nil {
 		t.Fatalf("no annotations: %+v %v", caches, err)
+	}
+	// ".old" is a suffix, not a substring. Names that merely contain those
+	// letters are still caches.
+	if _, err := ParseCacheAnnotations(cachePod("p", "u", map[string]string{
+		"cache.darwin.node/xc.oldest": "/x",
+		"cache.darwin.node/xc.tmpdir": "/y",
+	})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateRejectsCacheStagingSuffix(t *testing.T) {
+	e := testEngine(t)
+	pod := cachePod("bad", "uid-bad-suffix", map[string]string{
+		"cache.darwin.node/xc.tmp": "/Users/mac/DD",
+	})
+	err := e.Create(context.Background(), pod, Credentials{})
+	if err == nil {
+		t.Fatal("expected Create to reject a cache name ending in .tmp")
+	}
+	if e.slots.Used() != 0 {
+		t.Fatalf("rejected pod held a slot: %d", e.slots.Used())
+	}
+	if _, statErr := os.Stat(filepath.Join(e.cfg.CacheDir, "pods", "uid-bad-suffix")); !os.IsNotExist(statErr) {
+		t.Fatalf("rejected pod left a directory: %v", statErr)
 	}
 }
 
