@@ -154,10 +154,17 @@ func TestProjectedTokenRefreshRewritesAndRematerializes(t *testing.T) {
 	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
 		Name: "proj", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
 	}}
+	// Refresh runs at half the remaining lifetime, and start() schedules it
+	// before the pod is Running. A 120ms expiry (60ms half-life) was already
+	// due by the time this test read the file on macos-latest, so the minter
+	// had replaced "first". The lifetime has to outlast waitPhase (5s).
 	creds := Credentials{Tokens: []volume.ProjectedToken{{
 		Volume: "proj", Path: "token", Token: "first",
-		ExpiresAt: time.Now().Add(120 * time.Millisecond),
+		ExpiresAt: time.Now().Add(20 * time.Second),
 	}}}
+	t.Cleanup(func() {
+		_ = e.Delete(context.Background(), "default", "ref", 0)
+	})
 	if err := e.Create(context.Background(), pod, creds); err != nil {
 		t.Fatal(err)
 	}
@@ -168,16 +175,33 @@ func TestProjectedTokenRefreshRewritesAndRematerializes(t *testing.T) {
 		t.Fatalf("initial token %q %v", b, err)
 	}
 	before := rt.MaterializeCalls()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		b, err = os.ReadFile(tokenPath)
 		if err == nil && string(b) == "second" && rt.MaterializeCalls() > before {
-			_ = e.Delete(context.Background(), "default", "ref", 0)
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("token %q materialize %d -> %d err %v", b, before, rt.MaterializeCalls(), err)
+}
+
+func TestNextTokenRefreshAtHalfRemainingLifetime(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	got := nextTokenRefresh([]volume.ProjectedToken{{
+		ExpiresAt: now.Add(120 * time.Millisecond),
+	}}, now)
+	want := now.Add(60 * time.Millisecond)
+	if got != want {
+		t.Fatalf("refresh at %s, want %s", got, want)
+	}
+	if !nextTokenRefresh(nil, now).IsZero() {
+		t.Fatal("no expiry must not schedule a refresh")
+	}
+	expired := nextTokenRefresh([]volume.ProjectedToken{{ExpiresAt: now.Add(-time.Second)}}, now)
+	if !expired.Equal(now) {
+		t.Fatalf("already expired refreshes at %s, want %s", expired, now)
+	}
 }
 
 func TestProjectedTokenRefreshFailureAfterExpiryFailsPod(t *testing.T) {
