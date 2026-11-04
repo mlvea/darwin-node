@@ -612,6 +612,9 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	defer cancel()
 	ready, err := cli.Ready(readyCtx)
 	if err != nil || !ready.Ready {
+		// rec.agent is still nil, so teardown will not close this session.
+		// The vsock (or the pipe, in tests) stays open until the process exits.
+		_ = cli.Close()
 		e.fail(rec, fmt.Errorf("guest agent not ready: %v %w", ready, err))
 		return
 	}
@@ -688,7 +691,9 @@ func (e *Engine) fail(rec *podRecord, err error) {
 
 func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	rec.mu.Lock()
-	if rec.phase == corev1.PodFailed {
+	// Succeeded means Delete already owns the pod. A watch tick that observed
+	// Stopped must not flip that into Failed and tear the record down twice.
+	if rec.phase == corev1.PodFailed || rec.phase == corev1.PodSucceeded {
 		rec.mu.Unlock()
 		return
 	}
@@ -707,8 +712,8 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	rec.mu.Unlock()
 	e.teardown(context.Background(), rec, 0, false)
 	// A failed pod's overlay can be multiple gigabytes; nothing will ever
-	// restart it, so reclaim the directory now instead of waiting for the
-	// 24h recovery sweep.
+	// restart it, so reclaim the directory now instead of leaving it for
+	// the next process's startup sweep.
 	if uid != "" && !e.slots.Holds(uid) {
 		_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 	}

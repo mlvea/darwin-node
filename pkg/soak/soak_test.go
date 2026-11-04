@@ -88,9 +88,47 @@ func TestSoakRespectsLoweredCap(t *testing.T) {
 	}
 }
 
-func TestSoakDetectsLeftoverPodDir(t *testing.T) {
+func TestSoakReclaimsStartupOrphans(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "pods", "orphan"), 0o755); err != nil {
+	orphan := filepath.Join(dir, "pods", "orphan", "volumes", "token")
+	warm := filepath.Join(dir, "warm", "1", "control", "agent-token")
+	store := filepath.Join(dir, "cache-store", "ns", "keep", "state.bin")
+	for _, p := range []string{orphan, warm, store} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep, err := Run(context.Background(), Config{
+		CacheDir: dir,
+		Cycles:   1,
+		MaxVMs:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Cycles != 1 {
+		t.Fatalf("cycles %d", rep.Cycles)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("startup left the orphan pod dir: %v", err)
+	}
+	if _, err := os.Stat(warm); !os.IsNotExist(err) {
+		t.Fatalf("startup left the warm token: %v", err)
+	}
+	got, err := os.ReadFile(store)
+	if err != nil || string(got) != "keep" {
+		t.Fatalf("committed store = %q, %v", got, err)
+	}
+}
+
+// A name the startup sweep does not own must still fail the run. Pod and
+// warm directories are reclaimed in Engine.New; this file is neither.
+func TestSoakDetectsLeftoverOutsideRecovery(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "leak.tmp"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Run(context.Background(), Config{
