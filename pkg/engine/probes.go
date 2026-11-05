@@ -9,6 +9,7 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/guest"
 	"github.com/darwin-node/darwin-node/pkg/hostport"
+	"github.com/darwin-node/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -101,7 +102,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	}
 	startupOK := false
 	var startupFails, liveFails int32
-	if !e.enforceVolumeContract(ctx, rec) {
+	if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
 		return
 	}
 	e.refreshSidecarStatus(ctx, rec)
@@ -115,7 +116,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if !e.enforceVolumeContract(ctx, rec) {
+			if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
 				return
 			}
 			e.refreshSidecarStatus(ctx, rec)
@@ -126,7 +127,35 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	}
 }
 
+// noteVMDeath fails a Running pod whose machine has stopped or entered the
+// runtime's error state. The watch goroutine is the only caller, including
+// around restartVM, so a liveness restart's brief Stopped state is not
+// observed. Delete sets Succeeded before it stops the machine; failWith
+// leaves that phase alone.
+func (e *Engine) noteVMDeath(rec *podRecord) bool {
+	rec.mu.Lock()
+	phase := rec.phase
+	var st types.VMState
+	if rec.machine != nil {
+		st = rec.machine.Status().State
+	}
+	rec.mu.Unlock()
+	if phase != corev1.PodRunning {
+		return true
+	}
+	switch st {
+	case types.VMStopped, types.VMFailed:
+		e.failWith(rec, "VM"+string(st), fmt.Errorf("macOS VM %s unexpectedly", st))
+		return false
+	default:
+		return true
+	}
+}
+
 func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod time.Duration, startupOK *bool, startupFails, liveFails *int32) bool {
+	if !e.noteVMDeath(rec) {
+		return false
+	}
 	rec.mu.Lock()
 	pod := rec.pod.DeepCopy()
 	cli := rec.agent

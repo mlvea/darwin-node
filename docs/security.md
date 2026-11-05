@@ -103,10 +103,15 @@ in `cmd/darwin-node/kubelet_auth_test.go`.
   is not the long-term home of secret bytes.
 - Deleted recursively on pod teardown *after* `machine.Stop` returns, so
   the guest cannot write through virtio-fs while backing files are removed.
-- Crash recovery (`Engine.Recover` / `RecoverCache`, run from `engine.New`)
-  sweeps `cache/pods/<uid>` directories older than 24h that are not in the
-  slot table. APFS snapshots taken while secret files still exist on disk
-  may retain those bytes until the snapshot is dropped.
+- Crash recovery (`Engine.Recover`, run from `engine.New`) deletes
+  `cache/pods/<uid>` directories that are not in the slot table, including
+  ones only a minute old. A crash kills the VMs, so those directories are
+  secrets and overlays, not live machines, and they are not rebuilt into
+  the slot table. `cache/warm` leftovers from the previous process are
+  removed at the same time. A directory whose uid already holds a slot is
+  left alone. The committed cache store is not rewritten from the orphan.
+  APFS snapshots taken while secret files still exist on disk may retain
+  those bytes until the snapshot is dropped.
 
 ## Images
 

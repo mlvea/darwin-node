@@ -11,16 +11,18 @@ import (
 
 const defaultPodCacheMaxAge = 24 * time.Hour
 
-// RecoverCache deletes cache/pods/<uid> directories older than maxAge that are
-// not held in slots. A zero or negative maxAge defaults to 24h.
-//
-// Remaining younger directories are not Rebuild'd into the slot table: a crash
-// kills the VMs, so occupying slots for on-disk orphans would pin capacity.
+// RecoverCache deletes cache/pods/<uid> directories that are not held in
+// slots. A negative maxAge removes every unheld directory, whatever its
+// mtime. Zero defaults to 24h, which is only for callers that still want a
+// grace period. Startup does not: a crash kills the VMs, so a young
+// directory is secrets and an overlay, not a live machine. Unheld
+// directories are never Rebuild'd into the slot table.
 func RecoverCache(cacheDir string, slots *capacity.Slots, maxAge time.Duration) error {
 	if cacheDir == "" {
 		return nil
 	}
-	if maxAge <= 0 {
+	immediate := maxAge < 0
+	if !immediate && maxAge <= 0 {
 		maxAge = defaultPodCacheMaxAge
 	}
 	podsDir := filepath.Join(cacheDir, "pods")
@@ -40,12 +42,14 @@ func RecoverCache(cacheDir string, slots *capacity.Slots, maxAge time.Duration) 
 		if slots != nil && slots.Holds(uid) {
 			continue
 		}
-		info, err := ent.Info()
-		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) <= maxAge {
-			continue
+		if !immediate {
+			info, err := ent.Info()
+			if err != nil {
+				continue
+			}
+			if now.Sub(info.ModTime()) <= maxAge {
+				continue
+			}
 		}
 		if err := os.RemoveAll(filepath.Join(podsDir, uid)); err != nil {
 			return err
@@ -54,19 +58,40 @@ func RecoverCache(cacheDir string, slots *capacity.Slots, maxAge time.Duration) 
 	return nil
 }
 
-// Recover republishes committed cache stores, then runs the 24h pod-cache
-// sweep. Called from New so production gets crash recovery without a
-// cmd/darwin-node change. A store-recovery error does not skip the sweep.
+// Recover republishes committed cache stores, then deletes unheld pod
+// directories and warm-pool leftovers from the previous process. Called
+// from New so production gets crash recovery without a cmd/darwin-node
+// change. A store-recovery error does not skip the sweeps. Cache stores
+// are not snapshotted from the orphan dirs: a crash loses the in-progress
+// run, which is the cache-volume rule.
 func (e *Engine) Recover() error {
 	if e == nil {
 		return nil
 	}
 	errStores := recoverCacheStores(e.cfg.CacheDir)
-	errPods := RecoverCache(e.cfg.CacheDir, e.slots, defaultPodCacheMaxAge)
+	// Negative maxAge: no grace period. The process that owned these
+	// directories is gone, and so are its VMs.
+	errPods := RecoverCache(e.cfg.CacheDir, e.slots, -1)
+	errWarm := e.sweepWarmOrphans()
 	if errStores != nil {
 		return errStores
 	}
-	return errPods
+	if errPods != nil {
+		return errPods
+	}
+	return errWarm
+}
+
+// sweepWarmOrphans removes cache/warm from a previous process. The pool
+// has not started yet (New calls Recover first); once it has, it owns
+// those directories and stopWarmEntry deletes them. Agent tokens live
+// here, next to the multi-GB overlay under cache/pods/<warm-slot>, which
+// the pod sweep removes because that slot is not held.
+func (e *Engine) sweepWarmOrphans() error {
+	if e.cfg.CacheDir == "" || e.warmCancel != nil {
+		return nil
+	}
+	return os.RemoveAll(filepath.Join(e.cfg.CacheDir, "warm"))
 }
 
 // recoverCacheStores heals every cache-store entry under cacheDir.

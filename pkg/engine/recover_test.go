@@ -126,9 +126,82 @@ func TestEngineNewSweepsStalePodDirs(t *testing.T) {
 	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
 		t.Fatalf("New did not sweep stale uid dir: %v", err)
 	}
-	if _, err := os.Stat(youngDir); err != nil {
-		t.Fatalf("young uid dir swept: %v", err)
+	if _, err := os.Stat(youngDir); !os.IsNotExist(err) {
+		t.Fatalf("young uid dir still present: %v", err)
 	}
+	if used := slots.Used(); used != 0 {
+		t.Fatalf("orphan dirs pinned slots: used=%d", used)
+	}
+}
+
+// A process restart sees every previous pod directory as unheld and young:
+// the VMs died with the process, Drain may have given up, and nothing
+// snapshotted the working tree. Secrets and overlays must go now. The
+// committed cache store stays, and the slot table stays empty so the next
+// create can use the 2-VM cap.
+func TestNewDropsYoungOrphansWithoutPinningSlots(t *testing.T) {
+	cache := t.TempDir()
+	young := filepath.Join(cache, "pods", "young-uid")
+	held := filepath.Join(cache, "pods", "held-uid")
+	secret := filepath.Join(young, "volumes", "sec", "token")
+	overlay := filepath.Join(young, "overlay", "disk.img")
+	warmTok := filepath.Join(cache, "warm", "4", "control", types.GuestAgentTokenFile)
+	store := filepath.Join(cache, cacheStoreDirName, "default", "derived", "state.bin")
+	heldSecret := filepath.Join(held, "volumes", "sec", "token")
+	for _, p := range []string{secret, overlay, warmTok, store, heldSecret} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("secret-bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent := time.Now().Add(-time.Minute)
+	for _, d := range []string{young, held, filepath.Join(cache, "warm", "4")} {
+		if err := os.Chtimes(d, recent, recent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	slots, err := capacity.New(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slots.TryAcquire("held-uid"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Runtime = "fake"
+	cfg.CacheDir = cache
+	cfg.AgentReadyTimeout = 5 * time.Second
+	cfg.AllowNATWorkloads = true
+	e := New(cfg, slots, fake.New(), sidecar.None{}, event.Nop{}, "10.0.0.1")
+	t.Cleanup(e.Close)
+
+	if _, err := os.Stat(secret); !os.IsNotExist(err) {
+		t.Fatalf("young secret still on disk: %v", err)
+	}
+	if _, err := os.Stat(overlay); !os.IsNotExist(err) {
+		t.Fatalf("young overlay still on disk: %v", err)
+	}
+	if _, err := os.Stat(warmTok); !os.IsNotExist(err) {
+		t.Fatalf("previous process warm token still on disk: %v", err)
+	}
+	got, err := os.ReadFile(store)
+	if err != nil || string(got) != "secret-bytes" {
+		t.Fatalf("committed cache store = %q, %v", got, err)
+	}
+	if _, err := os.Stat(heldSecret); err != nil {
+		t.Fatalf("held pod dir swept: %v", err)
+	}
+	if used := e.slots.Used(); used != 1 {
+		t.Fatalf("slots used=%d, want 1 held and no pinned orphans", used)
+	}
+	if err := e.Create(context.Background(), samplePod("next", "uid-next"), Credentials{}); err != nil {
+		t.Fatalf("orphan sweep pinned capacity: %v", err)
+	}
+	waitPhase(t, e, "default", "next", corev1.PodRunning)
+	_ = e.Delete(context.Background(), "default", "next", 0)
 }
 
 func TestCreateRejectsHostPathRoot(t *testing.T) {

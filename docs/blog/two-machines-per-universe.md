@@ -305,7 +305,7 @@ by copying tens of gigabytes.
 
 It also gives us crash semantics for free. The golden image is opened by
 nobody; pods only ever touch their own clones; a killed VM leaves an orphaned
-overlay that a 24-hour sweep collects at boot. The invariant is simple to
+overlay that startup recovery deletes. The invariant is simple to
 state: **goldens are immutable, overlays are owned by one UID, and nothing
 else exists.**
 
@@ -604,7 +604,7 @@ whole model. Arrows mean "data or commands cross here":
  │  • HTTP server refuses to start without certs (cluster mode)   │     │
  │  • CacheDir 0700 — bootable OS images are code                 │     │
  │  • hostPath: deny-by-default allowlist; "/" never permitted    │     │
- │  • secrets at rest: 0700 dirs, 0600 files, swept after 24h     │     │
+ │  • secrets at rest: 0700 dirs, 0600 files, swept at startup    │     │
  │                                                                │     │
  │  ┌── vsock (device bus — no IP, no neighbors) ─────────────┐   │     │
  └──┼──────────────────────────────────────────────────────────┼───┼─────┘
