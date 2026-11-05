@@ -53,7 +53,8 @@ host and are started normally after adoption.
 
 ## Shutdown
 
-`Engine.Close()` cancels the replenisher, waits for any in-flight warm
-boot to land, stops every pooled guest, releases its slot, and removes
-its overlay directory. The node process therefore never leaks a VM that
-outlives it beyond what Virtualization.framework itself cleans up.
+`Engine.Close()` marks the engine draining, cancels the replenisher,
+waits for any in-flight warm boot to land, stops every pooled guest, and
+then force-stops any pod machine still registered. Slots and overlay
+directories are released, and a pod's cache volumes are snapshotted.
+A second signal or a crash skips that stop.
