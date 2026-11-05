@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,10 +100,22 @@ func TestDrainRejectsNewCreates(t *testing.T) {
 	}
 }
 
-type slowRemoveSidecar struct{ sidecar.None }
+// budgetSidecar blocks the in-flight delete until the drain context is
+// canceled. Close and a later delete pass a live context; unblock lets
+// those return without a timer.
+type budgetSidecar struct {
+	sidecar.None
+	once    sync.Once
+	entered chan struct{}
+	unblock chan struct{}
+}
 
-func (s slowRemoveSidecar) RemovePod(_ context.Context, _, _ string, _ int64) error {
-	time.Sleep(30 * time.Millisecond)
+func (s *budgetSidecar) RemovePod(ctx context.Context, _, _ string, _ int64) error {
+	s.once.Do(func() { close(s.entered) })
+	select {
+	case <-ctx.Done():
+	case <-s.unblock:
+	}
 	return nil
 }
 
@@ -110,8 +123,13 @@ func TestDrainHonorsContextBudget(t *testing.T) {
 	cfg := drainCfg(t)
 	slots, _ := capacity.New(2)
 	rt := fake.New()
-	e := New(cfg, slots, rt, slowRemoveSidecar{}, event.Nop{}, "10.0.0.1")
+	unblock := make(chan struct{})
+	sc := &budgetSidecar{entered: make(chan struct{}), unblock: unblock}
+	e := New(cfg, slots, rt, sc, event.Nop{}, "10.0.0.1")
+	// Close force-stops whatever the budget left behind, and that path calls
+	// RemovePod with a context that is not the drain context.
 	t.Cleanup(e.Close)
+	t.Cleanup(func() { close(unblock) })
 
 	pods := []struct{ name, uid string }{{"pa", "uid-a"}, {"pb", "uid-b"}}
 	for _, p := range pods {
@@ -122,24 +140,22 @@ func TestDrainHonorsContextBudget(t *testing.T) {
 	waitPhase(t, e, "default", "pa", corev1.PodRunning)
 	waitPhase(t, e, "default", "pb", corev1.PodRunning)
 
-	start := time.Now()
-	dctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	dctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go func() {
+		<-sc.entered
+		cancel()
+	}()
 	if err := e.Drain(dctx); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-		t.Fatalf("drain ignored its budget: %v", elapsed)
+	// pa sorts first. Its delete is already inside RemovePod when the
+	// context ends, so it finishes. pb must not be started.
+	if _, err := e.Get("default", "pa"); err == nil {
+		t.Fatal("in-flight delete of pa did not finish")
 	}
-	// Budget too small for both sequential deletes: at least one pod remains.
-	remaining := 0
-	for _, name := range []string{"pa", "pb"} {
-		if _, err := e.Get("default", name); err == nil {
-			remaining++
-		}
-	}
-	if remaining == 0 {
-		t.Fatal("budget was smaller than two deletes; expected pods to remain")
+	if _, err := e.Get("default", "pb"); err != nil {
+		t.Fatal("drain started pb after its context ended")
 	}
 }
 

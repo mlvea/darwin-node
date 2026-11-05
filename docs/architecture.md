@@ -117,8 +117,10 @@ SIGTERM/SIGINT start a drain bounded by `--shutdown-grace-period`
 (default 60s): new creates are rejected, every pod is deleted through
 the normal path (preStop, guest shutdown RPC, cache snapshots), each
 with its `terminationGracePeriodSeconds`. The warm replenisher is paused
-for the duration; freed slots serve departing pods. A second signal
-exits immediately.
+for the duration; freed slots serve departing pods. Pods still running
+when the budget expires are force-stopped by `Engine.Close`, which
+releases their slots and snapshots caches. A second signal exits
+immediately and skips that stop.
 
 ## Package map
 

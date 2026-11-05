@@ -26,6 +26,25 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
   3. WebhookAuth CA reload. `NewDynamicCAContentFromFile` loads the bundle once, and `loadCABundle` refuses an empty or invalid file without replacing a good bundle. Nothing in this process calls `DynamicFileCAContent.Run`, so a CA file replaced while the node is up is not picked up until restart. Truncation after startup does not unload the CA already in memory. Not a fail-open.
   4. Hardware gate remains the production gate and is still blocked on a Mac.
 
+### 2026-11-05 (Asia/Singapore) — shutdown stops pod VMs; delete keeps the slot through create
+
+This entry sits under the 2026-11-03 section so it does not collide with PR #9, which inserts its 2026-11-04 entry above that section. Move this block to the top of the log when #9 merges.
+
+- **HEAD:** `main` was `e5ab058` (merge of PR #8). PR #9 (`cursor/startup-orphans-vm-death-c968`) was still open. Linux CI on `e5ab058` was green. Hardware gate and the 24h vz soak are still unrun.
+- **Slot during create (confirmed):** `Delete` ran `teardown` before `startDone.Wait`. `teardown` released the slot from the `rec.machine` pointer it had copied, and that pointer was still nil while `start` was inside `Runtime.Create`. The slot was free, and `start` still booted the VM. Two further pods were admitted against a cap of 2. `startDone` was also incremented only after the pod was published, so a delete in that gap returned from `Wait` immediately.
+- **Close (confirmed):** `Engine.Close` stopped the warm pool only. A drain that ran out of budget, or `--shutdown-grace-period=0`, left pod VMs running and their slots held. Those pods' cache volumes were not snapshotted.
+- **Fix:** `Delete` cancels the pod, waits until `start` returns, then stops the machine and releases the slot. The wait is counted before the pod is visible, and the hostPort rejection path marks it done. `Close` rejects new creates, stops the warm pool, and force-stops every remaining pod through `Delete` (grace 0), which snapshots caches and releases slots. A second `Close` is safe. The 2-VM cap and the public signatures are unchanged.
+- **Drain test:** `TestDrainHonorsContextBudget` no longer pairs a 25ms budget with a 30ms sleep and a 200ms ceiling. The sidecar blocks in `RemovePod` until the drain context is canceled. The in-flight delete finishes; the next pod is not started. With the context check in `Drain` removed, the test fails with `drain started pb after its context ended`.
+- **Verification (Linux):** the new tests failed first. `TestDeleteDuringInFlightCreateDoesNotAdmitAThirdVM` admitted two pods while `Runtime.Create` was blocked (`slots at Delete wait: 0`). `TestCloseStopsRunningPodVMs` left 2 VMs running. `TestCloseSnapshotsCacheOfPodStillRunning` found no cache snapshot. After the fix: `go vet ./...` PASS, `go test ./... -short -race -count=1 -timeout 600s` PASS, `make soak` PASS (4 cycles, 69ms, `runtime=fake`, `slots=0/2`, `fds=6/6`, `cap_rejects=4`, `store_files=4`).
+- **Left alone:** Hardware gate and the 24h vz soak. WebhookAuth still loads the client CA once. Nothing calls `DynamicFileCAContent.Run`, and `TLSConfig` also pins `ClientCAs` for the handshake, so starting `Run` by itself does not accept a rotated CA. Not a fail-open. A dead VM is still noticed on the probe interval (default 10s); that watch is in `probes.go`, which PR #9 is already editing. A second SIGINT/SIGTERM still calls `os.Exit(130)` and skips `Close`.
+- **Open risks:**
+  - Hardware gate `make test-hardware IMAGE=...` and the 24h `make soak IMAGE=...` are still unrun. No Mac worker is connected, so nothing here touched Virtualization.framework.
+  - `e2e (self-hosted)` stays skipped.
+  - PR #9 is unmerged. This branch is based on `e5ab058`. It does not edit `probes.go`, `recover.go`, `recover_test.go`, `pkg/soak/soak_test.go`, `docs/security.md`, or `docs/blog/two-machines-per-universe.md`. The `engine.go` edits are `Close`, `Create`'s `startDone` accounting, and `Delete`'s wait-before-release.
+- **Next priority:**
+  1. WebhookAuth CA reload, both layers. Start `DynamicFileCAContent.Run`, and refresh the TLS `ClientCAs` pool from that same bundle (a `GetConfigForClient` hook). `loadCABundle` already keeps the previous bundle when the file is empty or invalid. Linux-provable. Not a fail-open.
+  2. Hardware gate remains the production gate and is still blocked on a Mac.
+
 ### 2026-11-02 — warm-pool readiness dial held the only guest session
 - **HEAD:** `main` was `199a29e7` (merge of PR #6). Linux CI on that commit was green. Hardware gate and the 24h vz soak are still unrun.
 - **Gap:** `bootWarmMachine` dialed the guest agent, checked Ready, and dropped the client without `Close`. `darwin-guest-agent` dials the host, `Serve`s that one connection, and dials again only after `Serve` returns. TCP fallback is off unless `--agent-tcp-fallback` is set. A warm VM therefore sat in the probe session for its whole idle life, and adoption's `DialAgent` could not get a connection. The fake runtime hid it: `DialAgent` handed back the same client `Start` had opened.

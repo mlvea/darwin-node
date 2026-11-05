@@ -85,13 +85,15 @@ SIGTERM and SIGINT trigger a graceful drain before the process exits:
 2. Every running pod is deleted through the normal path: preStop hooks,
    the guest shutdown RPC, and cache-volume snapshots all run.
 3. Each pod gets its `terminationGracePeriodSeconds`; the total budget is
-   `--shutdown-grace-period` (default 60s). Pods that do not finish within
-   the budget are left for the next start's crash recovery.
-4. The warm pool is paused during drain; freed slots go to departing pods,
-   not new warm boots.
+   `--shutdown-grace-period` (default 60s).
+4. When that budget ends, or when draining is disabled
+   (`--shutdown-grace-period=0`), `Engine.Close` force-stops every pod VM
+   still running, snapshots its cache volumes, and releases its slot. The
+   warm pool is paused during the drain and stopped as part of that close.
 
-A second signal skips the drain and exits immediately (exit code 130).
-Setting `--shutdown-grace-period=0` disables draining entirely.
+A second signal skips the drain and exits immediately (exit code 130),
+without the force-stop. A crash does the same. The next process reclaims
+leftover pod directories at startup.
 
 ## Configuration
 

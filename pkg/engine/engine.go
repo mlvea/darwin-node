@@ -151,9 +151,40 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 	return e
 }
 
-// Close stops the warm pool and every VM it holds. Pod machines keep running.
+// Close rejects new creates, stops the warm pool, and force-stops every pod
+// machine still registered. Slots are released and cache volumes are
+// snapshotted through the normal delete path. A second call is a no-op.
+// Graceful shutdown still goes through Drain first; Close is what runs
+// when the drain budget is exhausted or draining was skipped.
 func (e *Engine) Close() {
+	e.draining.Store(true)
 	e.shutdownWarmPool()
+	e.stopPodMachines()
+}
+
+// stopPodMachines force-stops whatever is still registered. Grace is zero.
+// When Drain ran, preStop and the guest shutdown RPC already had their turn.
+func (e *Engine) stopPodMachines() {
+	e.mu.RLock()
+	victims := make([]drainVictim, 0, len(e.pods))
+	for _, rec := range e.pods {
+		rec.mu.Lock()
+		victims = append(victims, drainVictim{
+			ns:   rec.pod.Namespace,
+			name: rec.pod.Name,
+		})
+		rec.mu.Unlock()
+	}
+	e.mu.RUnlock()
+	sort.Slice(victims, func(i, j int) bool {
+		if victims[i].ns != victims[j].ns {
+			return victims[i].ns < victims[j].ns
+		}
+		return victims[i].name < victims[j].name
+	})
+	for _, v := range victims {
+		_ = e.Delete(context.Background(), v.ns, v.name, 0)
+	}
 }
 
 func (e *Engine) Slots() *capacity.Slots { return e.slots }
@@ -218,6 +249,10 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		cancel: cancel,
 		adopt:  adopt,
 	}
+	// Count the goroutine before the pod is visible. Delete waits on
+	// startDone before it drops the slot; a Wait that returns because the
+	// counter was still zero lets start call Runtime.Create with no slot.
+	rec.startDone.Add(1)
 	e.pods[key] = rec
 	e.mu.Unlock()
 
@@ -235,12 +270,12 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 			if adopted != nil {
 				e.stopWarmEntry(adopted)
 			}
+			rec.startDone.Done()
 			return err
 		}
 	}
 
 	e.events.Normal(ctx, event.ReasonCreated, "accepted macOS pod; booting VM")
-	rec.startDone.Add(1)
 	go func() {
 		defer rec.startDone.Done()
 		e.start(pctx, rec, creds)
@@ -866,14 +901,21 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 	rec.reason = "Killing"
 	rec.ready = false
 	uid := string(rec.pod.UID)
+	// Cancel before waiting so a start blocked in Create, Start, or Dial
+	// can return. The slot stays held across that wait: teardown used to
+	// release it while start was still inside Runtime.Create, and the next
+	// two pods then booted a third VM.
+	if rec.cancel != nil {
+		rec.cancel()
+		rec.cancel = nil
+	}
 	rec.mu.Unlock()
+
+	rec.startDone.Wait()
 
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
-	// start() may still be writing the overlay after cancel; wait so RemoveAll
-	// cannot race a late mkdir/write and leave TempDir/cache debris.
-	rec.startDone.Wait()
-	e.snapshotPodCaches(rec) // CoW the final cache state into the store
+	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
 	e.mu.Lock()
