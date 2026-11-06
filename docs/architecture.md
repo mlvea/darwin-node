@@ -119,8 +119,9 @@ the normal path (preStop, guest shutdown RPC, cache snapshots), each
 with its `terminationGracePeriodSeconds`. The warm replenisher is paused
 for the duration; freed slots serve departing pods. Pods still running
 when the budget expires are force-stopped by `Engine.Close`, which
-releases their slots and snapshots caches. A second signal exits
-immediately and skips that stop.
+releases their slots and snapshots caches. A second signal cancels the
+rest of that drain and still runs `Close` before exiting 130. A crash
+still skips the stop; the next process reclaims leftover pod directories.
 
 ## Package map
 
