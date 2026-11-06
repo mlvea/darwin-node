@@ -41,6 +41,7 @@ import (
 func main() {
 	cfg := dnconfig.Default()
 	var standalone bool
+	gate := newShutdownGate()
 
 	cmd := &cobra.Command{
 		Use:   "darwin-node",
@@ -54,7 +55,7 @@ func main() {
 				return err
 			}
 			observability.SetupSlog(cfg.LogLevel)
-			return run(cmd.Context(), cfg, standalone)
+			return run(cmd.Context(), cfg, standalone, gate)
 		},
 	}
 	f := cmd.Flags()
@@ -85,21 +86,27 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	// Second signal means "leave now": skip the drain, exit immediately.
-	go func() {
-		<-ctx.Done()
+	// A second signal skips the rest of the drain. Close still runs
+	// before exit 130; Graceful blocks in that case so main cannot
+	// return 0 first. os.Exit does not return, so Release is unused here.
+	go watchSecondSignal(ctx, func() <-chan os.Signal {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		<-sig
-		os.Exit(130)
-	}()
+		return sig
+	}, os.Exit, gate.Force)
 	if err := cmd.ExecuteContext(ctx); err != nil {
+		if gate.Forced() {
+			os.Exit(130)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if gate.Forced() {
+		os.Exit(130)
+	}
 }
 
-func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
+func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdownGate) error {
 	if err := dnconfig.RequireKubeletTLS(standalone, cfg); err != nil {
 		return err
 	}
@@ -136,6 +143,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 		}
 	}
 	eng := engine.New(cfg, slots, rt, sc, event.Slog{}, host.InternalIP)
+	gate.bind(eng)
 	defer eng.Close()
 	inv := node.Inventory{Host: host, Cfg: cfg, Slots: slots}
 	p := provider.New(cfg, eng, inv, event.Slog{})
@@ -158,7 +166,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 		debugDir := filepath.Join(cfg.CacheDir, "debug")
 		_ = debug.Capture(cfg, inv, eng).Write(filepath.Join(debugDir, "debug-snapshot.json"))
 		<-ctx.Done()
-		shutdownDrain(cfg, eng)
+		gate.Graceful(cfg.ShutdownGrace)
 		return nil
 	}
 
@@ -167,26 +175,11 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool) error {
 		return fmt.Errorf("kube client: %w (set KUBECONFIG or pass --standalone)", err)
 	}
 	if err := runVK(ctx, cfg, k8s, p); err != nil {
-		shutdownDrain(cfg, eng)
+		gate.Graceful(cfg.ShutdownGrace)
 		return err
 	}
-	shutdownDrain(cfg, eng)
+	gate.Graceful(cfg.ShutdownGrace)
 	return nil
-}
-
-// shutdownDrain gives running pods their termination grace periods before
-// the process exits: preStop hooks, guest shutdown RPCs, and cache
-// snapshots all run through the normal delete path. The engine is always
-// closed afterwards, whatever the budget.
-func shutdownDrain(cfg dnconfig.Config, eng *engine.Engine) {
-	if cfg.ShutdownGrace > 0 {
-		dctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
-		defer cancel()
-		if err := eng.Drain(dctx); err != nil {
-			slog.Warn("drain incomplete", "error", err)
-		}
-	}
-	eng.Close()
 }
 
 func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
@@ -206,7 +199,16 @@ func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
 }
 
 func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p *provider.Provider) error {
-	tlsCfg, err := dnconfig.TLSConfig(cfg.CertPath, cfg.KeyPath, cfg.ClientCA)
+	bundle, err := loadClientCA(cfg.ClientCA)
+	if err != nil {
+		return fmt.Errorf("kubelet client CA: %w", err)
+	}
+	if bundle != nil {
+		go bundle.Run(ctx)
+	}
+	// Server certificate only. The client CA, when set, is the live bundle
+	// above so a rotated file is picked up without pinning ClientCAs here.
+	tlsCfg, err := dnconfig.TLSConfig(cfg.CertPath, cfg.KeyPath, "")
 	if err != nil {
 		return fmt.Errorf("kubelet tls: %w", err)
 	}
@@ -235,11 +237,10 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 		},
 		// WebhookAuth only when ClientCA is set. Without a CA it would 401
 		// the API server's mTLS kubelet client; empty CA is NoAuth instead.
-		kubeletAuth(cfg.NodeName, cfg.ClientCA),
+		// The bundle is the same one InstallTLS reads at handshake time.
+		kubeletAuth(cfg.NodeName, bundle),
 		nodeutil.WithTLSConfig(func(c *tls.Config) error {
-			c.Certificates = tlsCfg.Certificates
-			c.ClientCAs = tlsCfg.ClientCAs
-			c.ClientAuth = tlsCfg.ClientAuth
+			applyKubeletTLS(c, tlsCfg, bundle)
 			return nil
 		}),
 		nodeutil.AttachProviderRoutes(mux),

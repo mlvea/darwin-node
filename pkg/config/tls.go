@@ -26,6 +26,10 @@ func RequireKubeletTLS(standalone bool, cfg Config) error {
 // still completes the handshake so the handler can run bearer TokenReview.
 // RequireAndVerifyClientCert would reject those callers during the handshake,
 // and WebhookAuth's x509 authenticator would then never see a token.
+//
+// The pool is a snapshot of the file at call time. A CA that must rotate
+// without a restart is a ClientCABundle: Run watches the file, and
+// InstallTLS refreshes ClientCAs from that bundle on each handshake.
 func TLSConfig(cert, key, clientCA string) (*tls.Config, error) {
 	if strings.TrimSpace(cert) == "" || strings.TrimSpace(key) == "" {
 		return nil, fmt.Errorf("tls cert and key paths are required")

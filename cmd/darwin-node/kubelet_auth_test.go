@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	dnconfig "github.com/darwin-node/darwin-node/pkg/config"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -36,7 +38,7 @@ func TestSelectKubeletAuth(t *testing.T) {
 
 func TestKubeletAuthNoAuthAllowsAnonymous(t *testing.T) {
 	// No client and no CA file: empty ClientCA must not open a CA path.
-	h := applyKubeletAuth(t, "node-a", "", nil)
+	h := applyKubeletAuth(t, "node-a", nil, nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/stats/summary", nil))
 	if rr.Code != http.StatusNoContent {
@@ -45,7 +47,14 @@ func TestKubeletAuthNoAuthAllowsAnonymous(t *testing.T) {
 }
 
 func TestKubeletAuthWhitespaceCAIsNoAuth(t *testing.T) {
-	h := applyKubeletAuth(t, "node-a", "  ", nil)
+	bundle, err := loadClientCA("  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle != nil {
+		t.Fatal("whitespace CA loaded a bundle")
+	}
+	h := applyKubeletAuth(t, "node-a", nil, nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/logs", nil))
 	if rr.Code != http.StatusNoContent {
@@ -55,14 +64,13 @@ func TestKubeletAuthWhitespaceCAIsNoAuth(t *testing.T) {
 
 func TestKubeletAuthRequiresHandler(t *testing.T) {
 	nc := &nodeutil.NodeConfig{}
-	if err := kubeletAuth("node-a", "")(nc); err == nil || !strings.Contains(err.Error(), "handler") {
+	if err := kubeletAuth("node-a", nil)(nc); err == nil || !strings.Contains(err.Error(), "handler") {
 		t.Fatalf("nil handler: %v", err)
 	}
 }
 
 func TestKubeletAuthWebhookBuildsAndRejectsAnonymous(t *testing.T) {
-	ca := writeTempCA(t)
-	h := applyKubeletAuth(t, "node-a", ca, fake.NewSimpleClientset())
+	h := applyKubeletAuth(t, "node-a", mustClientCA(t, writeTempCA(t)), fake.NewSimpleClientset())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/stats/summary", nil))
 	if rr.Code != http.StatusUnauthorized {
@@ -71,21 +79,16 @@ func TestKubeletAuthWebhookBuildsAndRejectsAnonymous(t *testing.T) {
 }
 
 func TestKubeletAuthWebhookRequiresClient(t *testing.T) {
-	ca := writeTempCA(t)
 	nc := &nodeutil.NodeConfig{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})}
-	err := kubeletAuth("node-a", ca)(nc)
+	err := kubeletAuth("node-a", mustClientCA(t, writeTempCA(t)))(nc)
 	if err == nil || !strings.Contains(err.Error(), "kubernetes client") {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestKubeletAuthWebhookRejectsMissingCA(t *testing.T) {
-	nc := &nodeutil.NodeConfig{
-		Client:  fake.NewSimpleClientset(),
-		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-	}
-	err := kubeletAuth("node-a", filepath.Join(t.TempDir(), "missing.pem"))(nc)
-	if err == nil {
+	bundle, err := loadClientCA(filepath.Join(t.TempDir(), "missing.pem"))
+	if err == nil || bundle != nil {
 		t.Fatal("missing CA must fail closed")
 	}
 }
@@ -116,16 +119,44 @@ func TestKubeletAuthWebhookRejectsBadCA(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("not a certificate\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	nc := &nodeutil.NodeConfig{
-		Client:  fake.NewSimpleClientset(),
-		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-	}
-	if err := kubeletAuth("node-a", bad)(nc); err == nil {
+	bundle, err := loadClientCA(bad)
+	if err == nil || bundle != nil {
 		t.Fatal("invalid CA must fail closed")
 	}
 }
 
-func applyKubeletAuth(t *testing.T, nodeName, clientCA string, client kubernetes.Interface) http.Handler {
+func TestLoadClientCAEmptyIsNoAuth(t *testing.T) {
+	bundle, err := loadClientCA("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle != nil {
+		t.Fatal("empty path returned a bundle")
+	}
+}
+
+func TestApplyKubeletTLSUsesLiveBundle(t *testing.T) {
+	bundle := mustClientCA(t, writeTempCA(t))
+	withCA := &tls.Config{}
+	applyKubeletTLS(withCA, &tls.Config{MinVersion: tls.VersionTLS12}, bundle)
+	if withCA.GetConfigForClient == nil {
+		t.Fatal("client CA pool is pinned; a rotated file will not be seen at handshake")
+	}
+	if withCA.ClientAuth != tls.VerifyClientCertIfGiven {
+		t.Fatalf("ClientAuth %v", withCA.ClientAuth)
+	}
+	if withCA.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("min version %d", withCA.MinVersion)
+	}
+
+	noCA := &tls.Config{ClientAuth: tls.RequestClientCert, ClientCAs: x509.NewCertPool()}
+	applyKubeletTLS(noCA, &tls.Config{}, nil)
+	if noCA.ClientAuth != tls.NoClientCert || noCA.ClientCAs != nil || noCA.GetConfigForClient != nil {
+		t.Fatalf("no-CA auth=%v cas=%v hook=%v", noCA.ClientAuth, noCA.ClientCAs != nil, noCA.GetConfigForClient != nil)
+	}
+}
+
+func applyKubeletAuth(t *testing.T, nodeName string, bundle *dnconfig.ClientCABundle, client kubernetes.Interface) http.Handler {
 	t.Helper()
 	nc := &nodeutil.NodeConfig{
 		Client: client,
@@ -133,10 +164,19 @@ func applyKubeletAuth(t *testing.T, nodeName, clientCA string, client kubernetes
 			w.WriteHeader(http.StatusNoContent)
 		}),
 	}
-	if err := kubeletAuth(nodeName, clientCA)(nc); err != nil {
+	if err := kubeletAuth(nodeName, bundle)(nc); err != nil {
 		t.Fatal(err)
 	}
 	return nc.Handler
+}
+
+func mustClientCA(t *testing.T, path string) *dnconfig.ClientCABundle {
+	t.Helper()
+	bundle, err := loadClientCA(path)
+	if err != nil || bundle == nil {
+		t.Fatalf("load client CA: %v", err)
+	}
+	return bundle
 }
 
 func writeTempCA(t *testing.T) string {
