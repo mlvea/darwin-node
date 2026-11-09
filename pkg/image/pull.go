@@ -49,10 +49,11 @@ func NewManager(cacheDir string) *Manager {
 
 func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ignoreCache bool) (LocalImage, error) {
 	if !ignoreCache {
-		if img, err := LoadDir(CacheDir(m.CacheDir, ref)); err == nil {
-			if err := img.VerifyOptional(); err == nil {
-				return img, nil
-			}
+		// A directory of blobs without provenance.json is not a cache hit.
+		// VerifyOptional allows that shape for a local bake; a pull cache
+		// is only the tree we rename into place after the lockfile is written.
+		if img, err := LoadCommitted(CacheDir(m.CacheDir, ref)); err == nil {
+			return img, nil
 		}
 	}
 	m.mu.Lock()
@@ -80,9 +81,69 @@ func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ign
 }
 
 func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds) (LocalImage, error) {
+	final := CacheDir(m.CacheDir, ref)
+	if err := os.MkdirAll(filepath.Dir(final), cacheDirPerm); err != nil {
+		return LocalImage{}, err
+	}
+	// Stage outside images/. A suffix on the cache path is itself a legal
+	// cache key (tag "v1.partial"), and RemoveAll of that path deletes the
+	// other image. Same filesystem as the cache, so the commit rename works.
+	stage := filepath.Join(m.CacheDir, "image-partial", CacheKey(ref))
+	backup := filepath.Join(m.CacheDir, "image-replacing", CacheKey(ref))
+	if err := os.MkdirAll(filepath.Dir(stage), cacheDirPerm); err != nil {
+		return LocalImage{}, err
+	}
+	if err := os.RemoveAll(stage); err != nil {
+		return LocalImage{}, err
+	}
+	if err := os.MkdirAll(stage, cacheDirPerm); err != nil {
+		return LocalImage{}, err
+	}
+	if err := m.pullInto(ctx, ref, creds, stage); err != nil {
+		_ = os.RemoveAll(stage)
+		return LocalImage{}, err
+	}
+	if err := commitCacheDir(stage, final, backup); err != nil {
+		_ = os.RemoveAll(stage)
+		return LocalImage{}, err
+	}
+	return LoadCommitted(final)
+}
+
+// commitCacheDir publishes stage as final. The previous tree is removed
+// only after the new tree is renamed into place. backup must not be a
+// cache key; it is only the previous tree during the rename.
+func commitCacheDir(stage, final, backup string) error {
+	if err := os.MkdirAll(filepath.Dir(backup), cacheDirPerm); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return err
+	}
+	_, err := os.Stat(final)
+	had := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if had {
+		if err := os.Rename(final, backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(stage, final); err != nil {
+		if had {
+			_ = os.Rename(backup, final)
+		}
+		return err
+	}
+	_ = os.RemoveAll(backup)
+	return nil
+}
+
+func (m *Manager) pullInto(ctx context.Context, ref string, creds RegistryCreds, destDir string) error {
 	repo, err := remote.NewRepository(ref)
 	if err != nil {
-		return LocalImage{}, fmt.Errorf("parse image ref %q: %w", ref, err)
+		return fmt.Errorf("parse image ref %q: %w", ref, err)
 	}
 	repo.Client = &auth.Client{
 		Client: retry.DefaultClient,
@@ -95,13 +156,12 @@ func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds)
 	if isPlainHTTP(repo.Reference.Registry, m.InsecureRegistries) {
 		repo.PlainHTTP = true
 	}
-	destDir := CacheDir(m.CacheDir, ref)
 	if err := os.MkdirAll(destDir, cacheDirPerm); err != nil {
-		return LocalImage{}, err
+		return err
 	}
 	fs, err := file.New(destDir)
 	if err != nil {
-		return LocalImage{}, err
+		return err
 	}
 	defer fs.Close()
 
@@ -121,7 +181,7 @@ func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds)
 
 	desc, err := oras.Copy(ctx, repo, repo.Reference.Reference, fs, "", opts)
 	if err != nil {
-		return LocalImage{}, fmt.Errorf("pull %s: %w", ref, err)
+		return fmt.Errorf("pull %s: %w", ref, err)
 	}
 	copiedMu.Lock()
 	copied = append(copied, desc)
@@ -131,26 +191,32 @@ func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds)
 	deltaInfo, found, derr := findDeltaLayer(nodes)
 	if derr != nil {
 		_ = os.RemoveAll(destDir)
-		return LocalImage{}, fmt.Errorf("pull %s: %w", ref, derr)
+		return fmt.Errorf("pull %s: %w", ref, derr)
 	}
 	if deltaInfo != nil && found {
-		return m.pullDeltaArtifact(ctx, destDir, deltaInfo, creds)
+		if _, err := m.pullDeltaArtifact(ctx, destDir, deltaInfo, creds); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	prov := provenanceFromDescriptors(nodes)
 	if err := materializePulled(destDir); err != nil {
-		return LocalImage{}, err
+		return err
 	}
 	if err := requireMaterializedDisk(destDir); err != nil {
-		return LocalImage{}, fmt.Errorf("pull %s: %w", ref, err)
+		return fmt.Errorf("pull %s: %w", ref, err)
 	}
 	if err := completeProvenance(destDir, &prov); err != nil {
-		return LocalImage{}, err
+		return err
 	}
 	if err := WriteProvenance(destDir, prov); err != nil {
-		return LocalImage{}, err
+		return err
 	}
-	return LoadDir(destDir)
+	if _, err := LoadDir(destDir); err != nil {
+		return err
+	}
+	return nil
 }
 
 const cacheDirPerm os.FileMode = 0o700

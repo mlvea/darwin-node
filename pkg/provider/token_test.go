@@ -151,7 +151,12 @@ func TestProviderRefreshesProjectedToken(t *testing.T) {
 	client := tokenReactor(func(req *authenticationv1.TokenRequest) error {
 		n := calls.Add(1)
 		req.Status.Token = "first"
-		req.Status.ExpirationTimestamp = metav1.NewTime(time.Now().Add(120 * time.Millisecond))
+		// Half of 120ms was often already past before the pod reached
+		// Running on a loaded macos-latest runner, and the 3s poll then
+		// observed "first" after the refresh mint had started
+		// (run 42002323637). The lifetime has to outlast startup; the
+		// engine test uses the same 20s.
+		req.Status.ExpirationTimestamp = metav1.NewTime(time.Now().Add(20 * time.Second))
 		if n > 1 {
 			req.Status.Token = "second"
 			req.Status.ExpirationTimestamp = metav1.NewTime(time.Now().Add(time.Hour))
@@ -173,8 +178,20 @@ func TestProviderRefreshesProjectedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.DeletePod(context.Background(), pod) })
+	runDeadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := p.GetPod(context.Background(), "default", "macos")
+		if err == nil && got.Status.Phase == corev1.PodRunning {
+			break
+		}
+		if time.Now().After(runDeadline) {
+			t.Fatalf("pod not running: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	tokenPath := filepath.Join(cfg.CacheDir, "pods", "uid-refresh", "volumes", "proj", "token")
-	deadline := time.Now().Add(3 * time.Second)
+	// Refresh is scheduled at half the remaining lifetime (~10s) during start.
+	deadline := time.Now().Add(15 * time.Second)
 	var last []byte
 	for time.Now().Before(deadline) {
 		b, err := os.ReadFile(tokenPath)

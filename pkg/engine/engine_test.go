@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -335,6 +336,7 @@ type pollSidecar struct {
 	created time.Time
 	delay   time.Duration
 	failN   int
+	errAt   []time.Time
 }
 
 func (p *pollSidecar) Create(_ context.Context, _ *corev1.Pod, _ corev1.Container, _ string) error {
@@ -351,6 +353,9 @@ func (p *pollSidecar) Get(_ context.Context, _, _, container string) (sidecar.St
 	created := p.created
 	p.mu.Unlock()
 	if p.failN > 0 {
+		p.mu.Lock()
+		p.errAt = append(p.errAt, time.Now())
+		p.mu.Unlock()
 		return sidecar.Status{}, errors.New("docker down")
 	}
 	if p.delay > 0 && time.Since(created) < p.delay {
@@ -398,20 +403,27 @@ func TestWaitSidecarExitDockerDown(t *testing.T) {
 	e := New(cfg, slots, fake.New(), sc, event.Nop{}, "10.0.0.1")
 	pod := samplePod("ind", "uid-ind")
 	pod.Spec.InitContainers = []corev1.Container{{Name: "setup", Image: "busybox"}}
-	start := time.Now()
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
 	p := waitPhase(t, e, "default", "ind", corev1.PodFailed)
 	_ = e.Delete(context.Background(), "default", "ind", 0)
-	if time.Since(start) > 2*time.Second {
-		t.Fatalf("error did not surface quickly: %s msg=%s", time.Since(start), p.Status.Message)
+	if !strings.Contains(p.Status.Message, "docker down") {
+		t.Fatalf("message %q", p.Status.Message)
 	}
 	sc.mu.Lock()
 	gets := sc.gets
+	errAt := append([]time.Time(nil), sc.errAt...)
 	sc.mu.Unlock()
-	if gets > 5 {
-		t.Fatalf("Get flood %d", gets)
+	// Two consecutive Get errors fail the init. The gap is the 50ms backoff,
+	// not AgentReadyTimeout and not the time Create spent waiting to be
+	// scheduled. Wall time from Create flaked at 11.91s on a loaded
+	// macos-latest runner (run 42002323637) while the pod had already failed.
+	if gets > 5 || len(errAt) < 2 {
+		t.Fatalf("gets %d errors %d", gets, len(errAt))
+	}
+	if gap := errAt[1].Sub(errAt[0]); gap > time.Second {
+		t.Fatalf("consecutive docker errors were %s apart", gap)
 	}
 }
 
