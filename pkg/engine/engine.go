@@ -902,8 +902,15 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 		return nil
 	}
 	rec.mu.Lock()
-	rec.phase = corev1.PodSucceeded
-	rec.reason = "Killing"
+	// Succeeded tells the death watch that this delete owns the pod, so
+	// stopping the VM cannot flip a graceful delete into Failed. A pod
+	// that is already Failed keeps that phase: rewriting it reported
+	// exit 0 to the API server for the whole teardown, including the
+	// cache snapshot.
+	if rec.phase != corev1.PodFailed {
+		rec.phase = corev1.PodSucceeded
+		rec.reason = "Killing"
+	}
 	rec.ready = false
 	uid := string(rec.pod.UID)
 	// Cancel before waiting so a start blocked in Create, Start, or Dial
@@ -1284,7 +1291,7 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// resolveImage loads a local baked directory or a previously pulled cache
+// resolveImage loads a local baked directory or a committed pull-cache
 // entry, then clonefile's disk+aux into the pod overlay dir.
 func (e *Engine) resolveImage(ctx context.Context, ref, uid string, pullPolicy corev1.PullPolicy, creds Credentials) (disk, aux, hardware string, err error) {
 	try := func(dir string) (image.LocalImage, error) {
@@ -1301,7 +1308,10 @@ func (e *Engine) resolveImage(ctx context.Context, ref, uid string, pullPolicy c
 	if st, statErr := os.Stat(ref); statErr == nil && st.IsDir() {
 		img, err = try(ref)
 	} else {
-		img, err = try(image.CacheDir(e.cfg.CacheDir, ref))
+		// Pull cache only. A local bake is the directory branch above and
+		// may omit provenance. An unfinished pull has the same files
+		// without the lockfile; LoadDir plus VerifyOptional would boot it.
+		img, err = image.LoadCommitted(image.CacheDir(e.cfg.CacheDir, ref))
 		if err != nil && e.puller != nil && pullPolicy != corev1.PullNever {
 			img, err = e.puller.Pull(ctx, ref, creds.Pull, pullPolicy == corev1.PullAlways)
 		}

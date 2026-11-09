@@ -3,9 +3,13 @@ package image
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/darwin-node/darwin-node/internal/digest"
 
@@ -282,5 +286,192 @@ func TestProvenanceFromDescriptorsSkipsCompressedDiskBlob(t *testing.T) {
 	}})
 	if p.Files["disk.img"] != "" {
 		t.Fatalf("compressed blob digest must not be the dest expected digest, got %q", p.Files["disk.img"])
+	}
+}
+
+func TestPullServesCommittedCache(t *testing.T) {
+	root := t.TempDir()
+	ref := "127.0.0.1:1/darwin/macos:good"
+	dir := CacheDir(root, ref)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestImage(t, dir, "GOOD-DISK", "GOOD-AUX")
+	diskSum, err := digest.FileSHA256(filepath.Join(dir, "disk.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auxSum, err := digest.FileSHA256(filepath.Join(dir, "aux.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProvenance(dir, Provenance{
+		Files: map[string]string{"disk.img": diskSum.String(), "aux.img": auxSum.String()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	img, err := m.Pull(ctx, ref, RegistryCreds{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(img.DiskPath)
+	if err != nil || string(got) != "GOOD-DISK" {
+		t.Fatalf("disk %q err=%v", got, err)
+	}
+}
+
+// closedRegistryRef is a loopback registry address with nothing listening.
+func closedRegistryRef(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr + "/darwin/macos:v1"
+}
+
+// TestPullDoesNotServeUncommittedCache: a pull that dies after writing
+// config.json + disk.img + aux.img and before provenance.json must not be
+// reused. That shape also matches a short copy. Local baked directories are
+// a different path and are not this cache.
+func TestPullDoesNotServeUncommittedCache(t *testing.T) {
+	root := t.TempDir()
+	ref := closedRegistryRef(t)
+	dir := CacheDir(root, ref)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestImage(t, dir, "SHORT", "AUX")
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	img, err := m.Pull(ctx, ref, RegistryCreds{}, false)
+	if err == nil {
+		t.Fatalf("uncommitted cache served as a hit, disk %s", img.DiskPath)
+	}
+}
+
+// TestFailedPullDoesNotClobberSiblingTag: the stage directory must not be
+// the cache key of another ref. A tag of "v1.partial" is a legal cache key,
+// and it is also what a ".partial" suffix on the "v1" cache path names.
+func TestFailedPullDoesNotClobberSiblingTag(t *testing.T) {
+	root := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sibling := addr + "/darwin/macos:v1.partial"
+	dir := CacheDir(root, sibling)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestImage(t, dir, "SIBLING", "AUX")
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	_, _ = m.Pull(ctx, addr+"/darwin/macos:v1", RegistryCreds{}, true)
+	got, err := os.ReadFile(filepath.Join(dir, "disk.img"))
+	if err != nil || string(got) != "SIBLING" {
+		t.Fatalf("sibling tag cache = %q err=%v", got, err)
+	}
+}
+
+// TestFailedPullDoesNotPublishCache: a pull that never finishes must not
+// leave the cache directory in place. The next lookup would otherwise treat
+// whatever was written as the image.
+func TestFailedPullDoesNotPublishCache(t *testing.T) {
+	root := t.TempDir()
+	ref := closedRegistryRef(t)
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := m.Pull(ctx, ref, RegistryCreds{}, false); err == nil {
+		t.Fatal("pull of a closed registry port succeeded")
+	}
+	final := CacheDir(root, ref)
+	if _, err := os.Stat(final); !os.IsNotExist(err) {
+		t.Fatalf("failed pull published cache %s: %v", final, err)
+	}
+	partial := filepath.Join(root, "image-partial", CacheKey(ref))
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Fatalf("failed pull left staging dir %s: %v", partial, err)
+	}
+}
+
+func TestCommitCacheDirDoesNotReplaceSiblingKey(t *testing.T) {
+	root := t.TempDir()
+	ref := "example.com/macos:v1"
+	final := CacheDir(root, ref)
+	sibling := CacheDir(root, ref+".replacing")
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "disk.img"), []byte("KEEP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(root, "image-partial", CacheKey(ref))
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "disk.img"), []byte("NEW"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(root, "image-replacing", CacheKey(ref))
+	if err := commitCacheDir(stage, final, backup); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(sibling, "disk.img"))
+	if err != nil || string(got) != "KEEP" {
+		t.Fatalf("sibling key = %q err=%v", got, err)
+	}
+	neu, err := os.ReadFile(filepath.Join(final, "disk.img"))
+	if err != nil || string(neu) != "NEW" {
+		t.Fatalf("committed disk = %q err=%v", neu, err)
+	}
+}
+
+// TestFailedRefreshKeepsCommittedCache: PullAlways (ignoreCache) must not
+// replace a committed cache when the registry is unreachable.
+func TestFailedRefreshKeepsCommittedCache(t *testing.T) {
+	root := t.TempDir()
+	ref := closedRegistryRef(t)
+	dir := CacheDir(root, ref)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestImage(t, dir, "GOOD-DISK", "GOOD-AUX")
+	diskSum, err := digest.FileSHA256(filepath.Join(dir, "disk.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auxSum, err := digest.FileSHA256(filepath.Join(dir, "aux.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProvenance(dir, Provenance{
+		Files: map[string]string{"disk.img": diskSum.String(), "aux.img": auxSum.String()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if _, err := m.Pull(ctx, ref, RegistryCreds{}, true); err == nil {
+		t.Fatal(fmt.Sprintf("refresh of %s succeeded", ref))
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "disk.img"))
+	if err != nil || string(got) != "GOOD-DISK" {
+		t.Fatalf("committed disk = %q err=%v", got, err)
 	}
 }

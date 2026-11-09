@@ -223,7 +223,8 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 		token: token, mac: mac, cpu: cpu, mem: mem, machine: machine, probe: probe,
 	}
 	if err != nil {
-		entry.machine = nil // bootWarmMachine already stopped a half-started VM
+		// bootWarmMachine stops a VM that Create/Start left running.
+		entry.machine = nil
 		e.stopWarmEntry(entry)
 		return err
 	}
@@ -320,6 +321,10 @@ func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) 
 		return "", "", 0, 0, nil, nil, err
 	}
 	if err := mach.Start(ctx); err != nil {
+		// The vz runtime listens on vsock before vm.Start, and Start can
+		// fail after the machine is already running. Returning a nil
+		// machine released the slot and left that VM outside the cap.
+		_ = mach.Stop(context.Background(), 0)
 		return "", "", 0, 0, nil, nil, err
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, e.cfg.AgentReadyTimeout)
