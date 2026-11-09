@@ -75,6 +75,25 @@ func CacheDir(cacheRoot, ref string) string {
 	return filepath.Join(cacheRoot, "images", CacheKey(ref))
 }
 
+// LoadCommitted loads a finished pull. provenance.json is written only after
+// disk.img and aux.img are in place, so a directory without it is an
+// unfinished pull (a crash or a short write) and must not be booted.
+// Local baked directories use LoadDir; they are not required to carry this
+// file.
+func LoadCommitted(dir string) (LocalImage, error) {
+	if _, err := os.Stat(filepath.Join(dir, ProvenanceFile)); err != nil {
+		return LocalImage{}, fmt.Errorf("pull cache %s: %w", ProvenanceFile, err)
+	}
+	img, err := LoadDir(dir)
+	if err != nil {
+		return LocalImage{}, err
+	}
+	if err := img.VerifyOptional(); err != nil {
+		return LocalImage{}, err
+	}
+	return img, nil
+}
+
 // VerifyOptional checks disk/aux against pull-time provenance when present.
 // Locally baked images without provenance or sidecars skip verification.
 func (i LocalImage) VerifyOptional() error {
