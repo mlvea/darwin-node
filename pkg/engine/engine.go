@@ -658,8 +658,12 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		for _, p := range places {
 			vp = append(vp, guest.VolumePlace{Name: p.Name, GuestPath: p.GuestPath, ReadOnly: p.ReadOnly, Mode: p.Mode})
 		}
-		if _, err := cli.Materialize(ctx, guest.MaterializeReq{Volumes: vp}); err != nil {
-			e.events.Warn(ctx, event.ReasonGuestAgent, "materialize: "+err.Error())
+		res, err := cli.Materialize(ctx, guest.MaterializeReq{Volumes: vp})
+		if merr := materializeFailure(res, err); merr != nil {
+			// rec.agent is still nil, so teardown will not close this session.
+			_ = cli.Close()
+			e.fail(rec, merr)
+			return
 		}
 	}
 
@@ -694,6 +698,9 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		}
 	}
 	e.refreshSidecarStatus(ctx, rec)
+	if !e.noteSidecarExit(rec) {
+		return
+	}
 
 	now := metav1.Now()
 	rec.mu.Lock()
@@ -978,12 +985,13 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 		}
 	}
 	started := rec.ready && rec.agentOK
-	ready := rec.phase == corev1.PodRunning && rec.ready && rec.agentOK
+	vmReady := rec.phase == corev1.PodRunning && rec.ready && rec.agentOK
+	ready := vmReady && sidecarsRunningLocked(rec)
 
 	cs := corev1.ContainerStatus{
 		Name:         rec.pod.Spec.Containers[0].Name,
 		Image:        rec.pod.Spec.Containers[0].Image,
-		Ready:        ready,
+		Ready:        vmReady,
 		Started:      &started,
 		ContainerID:  "vz://" + rec.pod.Spec.Containers[0].Name,
 		RestartCount: rec.restartCount,
@@ -1010,6 +1018,15 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	if rec.pod != nil && len(rec.pod.Spec.Containers) > 1 {
 		statuses = append(statuses, sidecarContainerStatuses(rec.pod.Spec.Containers[1:], rec.sidecarStatuses)...)
 	}
+	containersReady := boolCond(corev1.ContainersReady, ready, now, rec)
+	podReady := boolCond(corev1.PodReady, ready, now, rec)
+	if vmReady && !ready {
+		msg := sidecarDownMessageLocked(rec)
+		containersReady.Reason = "SidecarNotRunning"
+		containersReady.Message = msg
+		podReady.Reason = "SidecarNotRunning"
+		podReady.Message = msg
+	}
 	return corev1.PodStatus{
 		Phase:             rec.phase,
 		Reason:            rec.reason,
@@ -1021,10 +1038,24 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 		Conditions: []corev1.PodCondition{
 			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
 			boolCond(corev1.PodInitialized, rec.initialized || len(rec.pod.Spec.InitContainers) == 0, now, rec),
-			boolCond(corev1.ContainersReady, ready, now, rec),
-			boolCond(corev1.PodReady, ready, now, rec),
+			containersReady,
+			podReady,
 		},
 	}
+}
+
+func materializeFailure(res guest.MaterializeRes, err error) error {
+	if err != nil {
+		return fmt.Errorf("materialize: %w", err)
+	}
+	if res.OK {
+		return nil
+	}
+	msg := strings.TrimSpace(res.Message)
+	if msg == "" {
+		msg = "guest refused volume placement"
+	}
+	return fmt.Errorf("materialize: %s", msg)
 }
 
 func boolCond(t corev1.PodConditionType, ok bool, now metav1.Time, rec *podRecord) corev1.PodCondition {

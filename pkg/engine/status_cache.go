@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
@@ -53,4 +54,84 @@ func (e *Engine) refreshSidecarStatus(ctx context.Context, rec *podRecord) {
 	rec.mu.Lock()
 	rec.sidecarStatuses = list
 	rec.mu.Unlock()
+}
+
+// sidecarsRunningLocked reports whether every hybrid sidecar is running.
+// The caller holds rec.mu. A pod with no sidecars is running.
+func sidecarsRunningLocked(rec *podRecord) bool {
+	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
+		return true
+	}
+	byName := make(map[string]sidecar.Status, len(rec.sidecarStatuses))
+	for _, st := range rec.sidecarStatuses {
+		byName[st.Name] = st
+	}
+	for _, c := range rec.pod.Spec.Containers[1:] {
+		st, ok := byName[c.Name]
+		if !ok || st.State != "running" {
+			return false
+		}
+	}
+	return true
+}
+
+func sidecarDownMessageLocked(rec *podRecord) string {
+	byName := make(map[string]sidecar.Status, len(rec.sidecarStatuses))
+	for _, st := range rec.sidecarStatuses {
+		byName[st.Name] = st
+	}
+	for _, c := range rec.pod.Spec.Containers[1:] {
+		st, ok := byName[c.Name]
+		if ok && st.State == "running" {
+			continue
+		}
+		if ok && st.State == "terminated" {
+			return fmt.Sprintf("sidecar %s exited %d", c.Name, st.ExitCode)
+		}
+		if !ok {
+			return fmt.Sprintf("sidecar %s has no status", c.Name)
+		}
+		return fmt.Sprintf("sidecar %s is %s", c.Name, st.State)
+	}
+	return "sidecar not running"
+}
+
+// sidecarExitFailsPod reports whether this exit is terminal. Always and
+// OnFailure ask for a restart. Never does not, and a non-zero exit is a
+// failure. A zero exit completed successfully.
+func sidecarExitFailsPod(policy corev1.RestartPolicy, exitCode int) bool {
+	return exitCode != 0 && policy == corev1.RestartPolicyNever
+}
+
+// noteSidecarExit fails the pod when a hybrid sidecar has exited and the
+// restart policy will not bring it back. False means the caller must stop.
+func (e *Engine) noteSidecarExit(rec *podRecord) bool {
+	rec.mu.Lock()
+	pod := rec.pod
+	phase := rec.phase
+	statuses := append([]sidecar.Status(nil), rec.sidecarStatuses...)
+	rec.mu.Unlock()
+	if pod == nil || len(pod.Spec.Containers) < 2 {
+		return true
+	}
+	if phase != corev1.PodPending && phase != corev1.PodRunning {
+		return true
+	}
+	byName := make(map[string]sidecar.Status, len(statuses))
+	for _, st := range statuses {
+		byName[st.Name] = st
+	}
+	for _, c := range pod.Spec.Containers[1:] {
+		st, ok := byName[c.Name]
+		if !ok || st.State != "terminated" || !sidecarExitFailsPod(pod.Spec.RestartPolicy, st.ExitCode) {
+			continue
+		}
+		err := fmt.Errorf("sidecar %s exited %d", c.Name, st.ExitCode)
+		if st.Error != "" {
+			err = fmt.Errorf("sidecar %s exited %d: %s", c.Name, st.ExitCode, st.Error)
+		}
+		e.fail(rec, err)
+		return false
+	}
+	return true
 }
