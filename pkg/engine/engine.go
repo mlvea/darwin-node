@@ -104,6 +104,7 @@ type podRecord struct {
 	startedAt       *metav1.Time
 	agentOK         bool
 	ready           bool
+	startupDone     bool // startup probe passed, or there is no startup probe
 	failedErr       error
 	cancel          context.CancelFunc
 	restartCount    int32
@@ -714,6 +715,7 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	rec.startedAt = &now
 	rec.agentOK = true
 	rec.ready = true
+	rec.startupDone = !hasStartupProbe(pod.Spec.Containers[0])
 	ip := rec.pod.Status.PodIP
 	rec.mu.Unlock()
 	if maps := hostPortMaps(pod, ip); len(maps) > 0 {
@@ -984,7 +986,7 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 			ip = vs.IP
 		}
 	}
-	started := rec.ready && rec.agentOK
+	started := rec.startupDone && rec.agentOK && rec.phase == corev1.PodRunning
 	vmReady := rec.phase == corev1.PodRunning && rec.ready && rec.agentOK
 	ready := vmReady && sidecarsRunningLocked(rec)
 
@@ -1512,8 +1514,11 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 			vp = append(vp, guest.VolumePlace{Name: p.Name, GuestPath: p.GuestPath, ReadOnly: p.ReadOnly, Mode: p.Mode})
 		}
 		if len(vp) > 0 {
-			if _, err := cli.Materialize(ctx, guest.MaterializeReq{Volumes: vp}); err != nil {
-				e.events.Warn(ctx, event.ReasonGuestAgent, "rematerialize: "+err.Error())
+			res, err := cli.Materialize(ctx, guest.MaterializeReq{Volumes: vp})
+			if merr := materializeFailure(res, err); merr != nil {
+				// rec.agent is already the new dial. The caller fails the
+				// pod, and teardown closes it.
+				return merr
 			}
 		}
 	}

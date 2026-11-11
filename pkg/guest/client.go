@@ -149,6 +149,7 @@ func (c *Client) ExecInteractive(ctx context.Context, req ExecReq, stdin io.Read
 	if resize != nil {
 		go c.pumpResize(ctx, id, resize)
 	}
+	sawExit := false
 	for env := range ch {
 		if env.Kind == KindError && env.Error != nil {
 			return exit, env.Error
@@ -169,7 +170,14 @@ func (c *Client) ExecInteractive(ctx context.Context, req ExecReq, stdin io.Read
 		}
 		if ev.Exited {
 			exit = ev.ExitCode
+			sawExit = true
 		}
+	}
+	if !sawExit {
+		if err := ctx.Err(); err != nil {
+			return -1, err
+		}
+		return -1, fmt.Errorf("exec ended without an exit status")
 	}
 	return exit, nil
 }

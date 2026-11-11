@@ -22,7 +22,7 @@ func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.St
 	for _, c := range containers {
 		s := byName[c.Name]
 		run := s.State == "running"
-		started := run
+		started := sidecarStarted(s)
 		st := corev1.ContainerStatus{Name: c.Name, Image: c.Image, Ready: run, Started: &started, ContainerID: s.ID}
 		switch {
 		case run:
@@ -54,6 +54,16 @@ func (e *Engine) refreshSidecarStatus(ctx context.Context, rec *podRecord) {
 	rec.mu.Lock()
 	rec.sidecarStatuses = list
 	rec.mu.Unlock()
+}
+
+// sidecarStarted reports whether this sidecar has entered running.
+// Ready stays "running now". A later exit does not clear Started.
+// Sidecar startup probes are not executed.
+func sidecarStarted(s sidecar.Status) bool {
+	if s.State == "running" {
+		return true
+	}
+	return s.State == "terminated" && !s.StartedAt.IsZero()
 }
 
 // sidecarsRunningLocked reports whether every hybrid sidecar is running.
