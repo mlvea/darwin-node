@@ -110,6 +110,8 @@ type podRecord struct {
 	restartCount    int32
 	initialized     bool
 	sidecarStatuses []sidecar.Status
+	sidecarRestarts map[string]int32
+	sidecarLastExit map[string]*corev1.ContainerStateTerminated
 	warmDir         string       // set when the VM was adopted from the warm pool
 	warmDisk        string       // cache/pods/<warm-slot> overlay; not the pod uid dir
 	adopt           *warmEntry   // claimed under capacity pressure, adopted in start()
@@ -1018,7 +1020,7 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	startTime := rec.startedAt
 	statuses := []corev1.ContainerStatus{cs}
 	if rec.pod != nil && len(rec.pod.Spec.Containers) > 1 {
-		statuses = append(statuses, sidecarContainerStatuses(rec.pod.Spec.Containers[1:], rec.sidecarStatuses)...)
+		statuses = append(statuses, sidecarContainerStatuses(rec.pod.Spec.Containers[1:], rec.sidecarStatuses, rec.sidecarRestarts, rec.sidecarLastExit)...)
 	}
 	containersReady := boolCond(corev1.ContainersReady, ready, now, rec)
 	podReady := boolCond(corev1.PodReady, ready, now, rec)

@@ -13,16 +13,34 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	dockercl "github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 )
+
+// dockerAPI is the daemon surface Docker uses. *dockercl.Client implements it.
+// Tests substitute a script so a restart can be proved without a daemon.
+type dockerAPI interface {
+	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
+	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
+	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
+	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
+	ContainerList(ctx context.Context, options container.ListOptions) ([]types.Container, error)
+	ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error)
+	ContainerExecCreate(ctx context.Context, container string, config types.ExecConfig) (types.IDResponse, error)
+	ContainerExecAttach(ctx context.Context, execID string, config types.ExecStartCheck) (types.HijackedResponse, error)
+}
+
+var _ dockerAPI = (*dockercl.Client)(nil)
 
 const namePrefix = "darwin-node"
 
 // Docker runs hybrid sidecars on a local Docker daemon (Colima, Desktop, ...).
 type Docker struct {
-	cli *dockercl.Client
+	cli dockerAPI
 	mu  sync.Mutex
 	ids map[string]map[string]string // podKey -> containerName -> docker ID
 }
@@ -113,6 +131,17 @@ func dockerHostConfig(pod *corev1.Pod, c corev1.Container, volRoot string) *cont
 }
 
 func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container, volRoot string) error {
+	// A second Create is a restart. Start the stopped container in place so
+	// the daemon does not reject the name. A start that fails, or a container
+	// the daemon no longer has, is removed and created again.
+	if id, ok := d.trackedID(pod.Namespace, pod.Name, c.Name); ok {
+		if err := d.restartTracked(ctx, id); err == nil {
+			return nil
+		}
+		// Keep the tracked id until the replacement is stored. A failed
+		// recreate still has a container RemovePod can delete.
+		_ = d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: true})
+	}
 	if c.ImagePullPolicy != corev1.PullNever {
 		rc, err := d.cli.ImagePull(ctx, c.Image, image.PullOptions{})
 		if err := drainImagePull(rc, err); err != nil {
@@ -138,6 +167,7 @@ func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container
 		return fmt.Errorf("docker create %s: %w", c.Name, err)
 	}
 	if err := d.cli.ContainerStart(ctx, res.ID, container.StartOptions{}); err != nil {
+		_ = d.cli.ContainerRemove(ctx, res.ID, container.RemoveOptions{Force: true, RemoveVolumes: true})
 		return fmt.Errorf("docker start %s: %w", c.Name, err)
 	}
 	d.mu.Lock()
@@ -147,6 +177,24 @@ func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container
 	d.ids[podKey(pod.Namespace, pod.Name)][c.Name] = res.ID
 	d.mu.Unlock()
 	return nil
+}
+
+func (d *Docker) trackedID(ns, name, containerName string) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	id := d.ids[podKey(ns, name)][containerName]
+	return id, id != ""
+}
+
+func (d *Docker) restartTracked(ctx context.Context, id string) error {
+	ins, err := d.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return err
+	}
+	if ins.State != nil && ins.State.Running {
+		return nil
+	}
+	return d.cli.ContainerStart(ctx, id, container.StartOptions{})
 }
 
 func (d *Docker) RemovePod(ctx context.Context, ns, name string, _ int64) error {

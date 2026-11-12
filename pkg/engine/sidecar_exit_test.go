@@ -22,10 +22,9 @@ import (
 )
 
 // A hybrid sidecar that is not running clears PodReady. RestartPolicy Never
-// plus a non-zero exit fails the pod: that container will not be restarted,
-// and the VM would otherwise keep one of the two slots. Always and OnFailure
-// mean restart, which this node does not do; those pods stay Running and not
-// Ready. A zero exit is success and does not fail the pod.
+// plus a non-zero exit fails the pod. A zero exit under Never or OnFailure
+// stays terminated. These tests keep the sidecar terminated, so Always and
+// OnFailure stay not Ready here. The restart is sidecar_restart_test.go.
 
 func sidecarEngine(t *testing.T, rt runtime.Runtime, sc sidecar.Runtime) *Engine {
 	t.Helper()

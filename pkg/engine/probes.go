@@ -106,7 +106,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		return
 	}
 	e.refreshSidecarStatus(ctx, rec)
-	if !e.noteSidecarExit(rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
+	if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
 		return
 	}
 	t := time.NewTicker(interval)
@@ -120,7 +120,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 				return
 			}
 			e.refreshSidecarStatus(ctx, rec)
-			if !e.noteSidecarExit(rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
+			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
 				return
 			}
 		}

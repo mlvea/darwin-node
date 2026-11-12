@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,7 +14,7 @@ import (
 
 const sidecarListTimeout = 2 * time.Second
 
-func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.Status) []corev1.ContainerStatus {
+func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.Status, restarts map[string]int32, last map[string]*corev1.ContainerStateTerminated) []corev1.ContainerStatus {
 	byName := make(map[string]sidecar.Status, len(cached))
 	for _, s := range cached {
 		byName[s.Name] = s
@@ -23,7 +24,11 @@ func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.St
 		s := byName[c.Name]
 		run := s.State == "running"
 		started := sidecarStarted(s)
-		st := corev1.ContainerStatus{Name: c.Name, Image: c.Image, Ready: run, Started: &started, ContainerID: s.ID}
+		st := corev1.ContainerStatus{Name: c.Name, Image: c.Image, Ready: run, Started: &started, ContainerID: s.ID, RestartCount: restarts[c.Name]}
+		if prev := last[c.Name]; prev != nil {
+			cp := *prev
+			st.LastTerminationState.Terminated = &cp
+		}
 		switch {
 		case run:
 			st.State.Running = &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(s.StartedAt)}
@@ -106,11 +111,24 @@ func sidecarDownMessageLocked(rec *podRecord) string {
 	return "sidecar not running"
 }
 
-// sidecarExitFailsPod reports whether this exit is terminal. Always and
-// OnFailure ask for a restart. Never does not, and a non-zero exit is a
-// failure. A zero exit completed successfully.
+// sidecarExitFailsPod reports whether this exit is terminal. Always restarts
+// on any exit. OnFailure restarts a non-zero exit. Never does not, and a
+// non-zero exit fails the pod. A zero exit completed successfully.
 func sidecarExitFailsPod(policy corev1.RestartPolicy, exitCode int) bool {
 	return exitCode != 0 && policy == corev1.RestartPolicyNever
+}
+
+// sidecarShouldRestart reports whether a terminated sidecar is started again.
+// An empty policy is Always, which is the Kubernetes default.
+func sidecarShouldRestart(policy corev1.RestartPolicy, exitCode int) bool {
+	switch policy {
+	case "", corev1.RestartPolicyAlways:
+		return true
+	case corev1.RestartPolicyOnFailure:
+		return exitCode != 0
+	default:
+		return false
+	}
 }
 
 // noteSidecarExit fails the pod when a hybrid sidecar has exited and the
@@ -142,6 +160,73 @@ func (e *Engine) noteSidecarExit(rec *podRecord) bool {
 		}
 		e.fail(rec, err)
 		return false
+	}
+	return true
+}
+
+// restartExitedSidecars starts sidecars whose policy says to try again.
+// Create is the runtime's restart: Docker starts the existing container, and
+// the fake runtime replaces that container's status. A Create error fails
+// the pod and releases the VM slot. The caller must stop when this is false.
+// Restarts run on the probe interval. There is no CrashLoopBackOff.
+func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool {
+	rec.mu.Lock()
+	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
+		rec.mu.Unlock()
+		return true
+	}
+	if rec.phase != corev1.PodPending && rec.phase != corev1.PodRunning {
+		rec.mu.Unlock()
+		return true
+	}
+	pod := rec.pod.DeepCopy()
+	volRoot := rec.volRoot
+	statuses := append([]sidecar.Status(nil), rec.sidecarStatuses...)
+	rec.mu.Unlock()
+
+	byName := make(map[string]sidecar.Status, len(statuses))
+	for _, st := range statuses {
+		byName[st.Name] = st
+	}
+	restarted := false
+	for _, c := range pod.Spec.Containers[1:] {
+		st, ok := byName[c.Name]
+		if !ok || st.State != "terminated" || !sidecarShouldRestart(pod.Spec.RestartPolicy, st.ExitCode) {
+			continue
+		}
+		if err := e.sidecar.Create(ctx, pod, c, volRoot); err != nil {
+			rec.mu.Lock()
+			phase := rec.phase
+			rec.mu.Unlock()
+			if (phase != corev1.PodRunning && phase != corev1.PodPending) || ctx.Err() != nil {
+				return false
+			}
+			e.fail(rec, fmt.Errorf("sidecar %s restart: %w", c.Name, err))
+			return false
+		}
+		reason := "Error"
+		if st.ExitCode == 0 {
+			reason = "Completed"
+		}
+		term := &corev1.ContainerStateTerminated{ExitCode: int32(st.ExitCode), Reason: reason, Message: st.Error}
+		if !st.FinishedAt.IsZero() {
+			term.FinishedAt = metav1.NewTime(st.FinishedAt)
+		}
+		rec.mu.Lock()
+		if rec.sidecarRestarts == nil {
+			rec.sidecarRestarts = map[string]int32{}
+		}
+		if rec.sidecarLastExit == nil {
+			rec.sidecarLastExit = map[string]*corev1.ContainerStateTerminated{}
+		}
+		rec.sidecarRestarts[c.Name]++
+		rec.sidecarLastExit[c.Name] = term
+		rec.mu.Unlock()
+		e.events.Normal(ctx, event.ReasonStarted, fmt.Sprintf("sidecar %s restarted", c.Name))
+		restarted = true
+	}
+	if restarted {
+		e.refreshSidecarStatus(ctx, rec)
 	}
 	return true
 }
