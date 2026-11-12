@@ -136,8 +136,8 @@ func (e *Engine) rematerializeTokenVolumes(ctx context.Context, rec *podRecord, 
 	if len(vp) == 0 {
 		return nil
 	}
-	_, err := cli.Materialize(ctx, guest.MaterializeReq{Volumes: vp})
-	return err
+	res, err := cli.Materialize(ctx, guest.MaterializeReq{Volumes: vp})
+	return materializeFailure(res, err)
 }
 
 func placeHoldsToken(root string, p volume.Placement, tokens []volume.ProjectedToken) bool {

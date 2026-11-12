@@ -106,7 +106,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		return
 	}
 	e.refreshSidecarStatus(ctx, rec)
-	if !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
+	if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
 		return
 	}
 	t := time.NewTicker(interval)
@@ -120,7 +120,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 				return
 			}
 			e.refreshSidecarStatus(ctx, rec)
-			if !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
+			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
 				return
 			}
 		}
@@ -198,6 +198,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 			}
 		}
 		*startupOK = true
+		rec.mu.Lock()
+		rec.startupDone = true
+		rec.mu.Unlock()
 	}
 
 	var wg sync.WaitGroup
@@ -282,6 +285,11 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 	}
 	*liveFails = 0
 	return true
+}
+
+func hasStartupProbe(c corev1.Container) bool {
+	_, ok := k8sProbe(c.StartupProbe)
+	return ok
 }
 
 func probeContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {

@@ -37,7 +37,14 @@ func (m *Memory) Create(_ context.Context, pod *corev1.Pod, c corev1.Container, 
 			break
 		}
 	}
-	m.pods[k] = append(m.pods[k], st)
+	list := m.pods[k]
+	for i := range list {
+		if list[i].Name == c.Name {
+			list[i] = st
+			return nil
+		}
+	}
+	m.pods[k] = append(list, st)
 	return nil
 }
 
