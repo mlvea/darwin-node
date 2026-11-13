@@ -51,6 +51,7 @@ const (
 	ReasonVMCapacityExhausted = "VMCapacityExhausted"
 	ReasonGuestAgent          = "GuestAgent"
 	ReasonProbeFailed         = "ProbeFailed"
+	ReasonBackOff             = "BackOff"
 	ReasonPreStopFailed       = "FailedPreStopHook"
 	ReasonPostStartFailed     = "FailedPostStartHook"
 	ReasonVMRestarted         = "VMRestarted"

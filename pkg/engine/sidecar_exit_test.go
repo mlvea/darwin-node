@@ -167,9 +167,26 @@ func assertSidecarNotReady(t *testing.T, p *corev1.Pod, code int32) {
 		t.Fatalf("VM container readiness = %+v, want Ready", main)
 	}
 	side := containerStatus(p, "log")
-	if side == nil || side.Ready || side.State.Terminated == nil || side.State.Terminated.ExitCode != code {
+	if !sidecarShowsExit(side, code) {
 		t.Fatalf("sidecar status %+v", side)
 	}
+}
+
+// sidecarShowsExit accepts the terminated state and the CrashLoopBackOff
+// waiting state. A policy that restarts records the exit as the last
+// termination while the next start is delayed.
+func sidecarShowsExit(side *corev1.ContainerStatus, code int32) bool {
+	if side == nil || side.Ready {
+		return false
+	}
+	if side.State.Terminated != nil && side.State.Terminated.ExitCode == code {
+		return true
+	}
+	if side.State.Waiting != nil && side.State.Waiting.Reason == crashLoopBackOffReason {
+		last := side.LastTerminationState.Terminated
+		return last != nil && last.ExitCode == code
+	}
+	return false
 }
 
 func TestHybridSidecarExitClearsPodReady(t *testing.T) {

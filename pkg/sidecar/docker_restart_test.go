@@ -78,6 +78,9 @@ func (f *scriptedDocker) ContainerExecCreate(context.Context, string, types.Exec
 func (f *scriptedDocker) ContainerExecAttach(context.Context, string, types.ExecStartCheck) (types.HijackedResponse, error) {
 	return types.HijackedResponse{}, errors.New("unused")
 }
+func (f *scriptedDocker) ContainerExecInspect(context.Context, string) (types.ContainerExecInspect, error) {
+	return types.ContainerExecInspect{}, errors.New("unused")
+}
 
 func restartPod() (*corev1.Pod, corev1.Container) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "p"}}

@@ -14,7 +14,31 @@ import (
 
 const sidecarListTimeout = 2 * time.Second
 
-func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.Status, restarts map[string]int32, last map[string]*corev1.ContainerStateTerminated) []corev1.ContainerStatus {
+// Kubelet restarts a container immediately the first time it exits, then
+// waits 10s, 20s, 40s, and so on, capped at 5 minutes. client-go resets the
+// factor after the container has been stable for twice that cap.
+const (
+	sidecarRestartBackoff    = 10 * time.Second
+	sidecarRestartBackoffMax = 300 * time.Second
+	crashLoopBackOffReason   = "CrashLoopBackOff"
+)
+
+// sidecarWait is the container's current Waiting state, when a restart is
+// delayed. An empty reason means there is no delay.
+type sidecarWait struct {
+	reason  string
+	message string
+}
+
+// sidecarExitMark latches the time we first saw a termination that did not
+// carry its own finish time, so the backoff window can elapse.
+type sidecarExitMark struct {
+	id   string
+	code int
+	at   time.Time
+}
+
+func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.Status, restarts map[string]int32, last map[string]*corev1.ContainerStateTerminated, start map[string]*sidecarStartState, waits map[string]sidecarWait) []corev1.ContainerStatus {
 	byName := make(map[string]sidecar.Status, len(cached))
 	for _, s := range cached {
 		byName[s.Name] = s
@@ -24,7 +48,12 @@ func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.St
 		s := byName[c.Name]
 		run := s.State == "running"
 		started := sidecarStarted(s)
-		st := corev1.ContainerStatus{Name: c.Name, Image: c.Image, Ready: run, Started: &started, ContainerID: s.ID, RestartCount: restarts[c.Name]}
+		ready := run
+		if hasStartupProbe(c) {
+			started = sidecarStartupPassed(start[c.Name], s)
+			ready = run && started
+		}
+		st := corev1.ContainerStatus{Name: c.Name, Image: c.Image, Ready: ready, Started: &started, ContainerID: s.ID, RestartCount: restarts[c.Name]}
 		if prev := last[c.Name]; prev != nil {
 			cp := *prev
 			st.LastTerminationState.Terminated = &cp
@@ -32,6 +61,9 @@ func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.St
 		switch {
 		case run:
 			st.State.Running = &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(s.StartedAt)}
+		case waits[c.Name].reason != "":
+			w := waits[c.Name]
+			st.State.Waiting = &corev1.ContainerStateWaiting{Reason: w.reason, Message: w.message}
 		case s.State == "terminated":
 			st.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: int32(s.ExitCode), Message: s.Error}
 		default:
@@ -63,7 +95,7 @@ func (e *Engine) refreshSidecarStatus(ctx context.Context, rec *podRecord) {
 
 // sidecarStarted reports whether this sidecar has entered running.
 // Ready stays "running now". A later exit does not clear Started.
-// Sidecar startup probes are not executed.
+// A startup probe replaces this bit until that probe has passed.
 func sidecarStarted(s sidecar.Status) bool {
 	if s.State == "running" {
 		return true
@@ -168,7 +200,8 @@ func (e *Engine) noteSidecarExit(rec *podRecord) bool {
 // Create is the runtime's restart: Docker starts the existing container, and
 // the fake runtime replaces that container's status. A Create error fails
 // the pod and releases the VM slot. The caller must stop when this is false.
-// Restarts run on the probe interval. There is no CrashLoopBackOff.
+// Repeated exits use the kubelet CrashLoopBackOff delays (10s, 20s, up to
+// 5m). The VM is not restarted and the slot stays held.
 func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool {
 	rec.mu.Lock()
 	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
@@ -191,7 +224,24 @@ func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool
 	restarted := false
 	for _, c := range pod.Spec.Containers[1:] {
 		st, ok := byName[c.Name]
+		if ok && st.State == "running" {
+			e.clearSidecarHold(rec, c.Name)
+		}
 		if !ok || st.State != "terminated" || !sidecarShouldRestart(pod.Spec.RestartPolicy, st.ExitCode) {
+			if ok && st.State == "terminated" {
+				e.clearSidecarHold(rec, c.Name)
+			}
+			continue
+		}
+		finished := e.sidecarFinishedAt(rec, c.Name, st)
+		key := string(pod.UID) + "/" + c.Name
+		if e.sidecarBackOff != nil && e.sidecarBackOff.IsInBackOffSince(key, finished) {
+			delay := e.sidecarBackOff.Get(key)
+			if delay <= 0 {
+				delay = sidecarRestartBackoff
+			}
+			msg := fmt.Sprintf("back-off %s restarting failed container=%s pod=%s/%s", delay, c.Name, pod.Namespace, pod.Name)
+			e.holdSidecar(ctx, rec, c.Name, st, msg)
 			continue
 		}
 		if err := e.sidecar.Create(ctx, pod, c, volRoot); err != nil {
@@ -204,14 +254,11 @@ func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool
 			e.fail(rec, fmt.Errorf("sidecar %s restart: %w", c.Name, err))
 			return false
 		}
-		reason := "Error"
-		if st.ExitCode == 0 {
-			reason = "Completed"
+		if e.sidecarBackOff != nil {
+			e.sidecarBackOff.Next(key, finished)
 		}
-		term := &corev1.ContainerStateTerminated{ExitCode: int32(st.ExitCode), Reason: reason, Message: st.Error}
-		if !st.FinishedAt.IsZero() {
-			term.FinishedAt = metav1.NewTime(st.FinishedAt)
-		}
+		e.clearSidecarHold(rec, c.Name)
+		e.noteSidecarRestarted(rec, c.Name, st)
 		rec.mu.Lock()
 		if rec.sidecarRestarts == nil {
 			rec.sidecarRestarts = map[string]int32{}
@@ -220,7 +267,7 @@ func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool
 			rec.sidecarLastExit = map[string]*corev1.ContainerStateTerminated{}
 		}
 		rec.sidecarRestarts[c.Name]++
-		rec.sidecarLastExit[c.Name] = term
+		rec.sidecarLastExit[c.Name] = sidecarLastTerm(st)
 		rec.mu.Unlock()
 		e.events.Normal(ctx, event.ReasonStarted, fmt.Sprintf("sidecar %s restarted", c.Name))
 		restarted = true
@@ -229,4 +276,72 @@ func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool
 		e.refreshSidecarStatus(ctx, rec)
 	}
 	return true
+}
+
+func sidecarLastTerm(st sidecar.Status) *corev1.ContainerStateTerminated {
+	reason := "Error"
+	if st.ExitCode == 0 {
+		reason = "Completed"
+	}
+	term := &corev1.ContainerStateTerminated{ExitCode: int32(st.ExitCode), Reason: reason, Message: st.Error}
+	if !st.FinishedAt.IsZero() {
+		term.FinishedAt = metav1.NewTime(st.FinishedAt)
+	}
+	return term
+}
+
+func (e *Engine) sidecarFinishedAt(rec *podRecord, name string, st sidecar.Status) time.Time {
+	if !st.FinishedAt.IsZero() {
+		return st.FinishedAt
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.sidecarExitAt == nil {
+		rec.sidecarExitAt = map[string]sidecarExitMark{}
+	}
+	mark, ok := rec.sidecarExitAt[name]
+	if ok && mark.id == st.ID && mark.code == st.ExitCode && !mark.at.IsZero() {
+		return mark.at
+	}
+	mark = sidecarExitMark{id: st.ID, code: st.ExitCode, at: time.Now()}
+	rec.sidecarExitAt[name] = mark
+	return mark.at
+}
+
+// noteSidecarRestarted starts a new backoff window when the runtime did not
+// report a finish time. The same container id would otherwise stay measured
+// from the original exit.
+func (e *Engine) noteSidecarRestarted(rec *podRecord, name string, st sidecar.Status) {
+	if !st.FinishedAt.IsZero() {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.sidecarExitAt == nil {
+		rec.sidecarExitAt = map[string]sidecarExitMark{}
+	}
+	rec.sidecarExitAt[name] = sidecarExitMark{id: st.ID, code: st.ExitCode, at: time.Now()}
+}
+
+func (e *Engine) holdSidecar(ctx context.Context, rec *podRecord, name string, st sidecar.Status, msg string) {
+	rec.mu.Lock()
+	if rec.sidecarWait == nil {
+		rec.sidecarWait = map[string]sidecarWait{}
+	}
+	if rec.sidecarLastExit == nil {
+		rec.sidecarLastExit = map[string]*corev1.ContainerStateTerminated{}
+	}
+	prev := rec.sidecarWait[name]
+	rec.sidecarWait[name] = sidecarWait{reason: crashLoopBackOffReason, message: msg}
+	rec.sidecarLastExit[name] = sidecarLastTerm(st)
+	rec.mu.Unlock()
+	if prev.message != msg {
+		e.events.Warn(ctx, event.ReasonBackOff, msg)
+	}
+}
+
+func (e *Engine) clearSidecarHold(rec *podRecord, name string) {
+	rec.mu.Lock()
+	delete(rec.sidecarWait, name)
+	rec.mu.Unlock()
 }

@@ -152,11 +152,176 @@ func TestStartupProbeGatesStarted(t *testing.T) {
 	t.Fatalf("startup passed but Started stayed false while not ready: %+v", main)
 }
 
+// A liveness restart kills the container. Started has to go back to false
+// and the startup probe has to run again. Until that probe passes, the
+// container is not started, even though it was started before the restart.
+func TestLivenessRestartResetsStartedUntilStartupPasses(t *testing.T) {
+	rt := fake.New()
+	var passBoot atomic.Bool
+	var kill atomic.Bool
+	var boots atomic.Int32
+	var lives atomic.Int32
+	rt.ExecFn = func(ctx context.Context, req guest.ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+		if len(req.Argv) == 0 {
+			return 0, nil
+		}
+		switch req.Argv[0] {
+		case "boot":
+			boots.Add(1)
+			if passBoot.Load() {
+				return 0, nil
+			}
+			return 1, nil
+		case "live":
+			lives.Add(1)
+			if kill.Load() {
+				return 1, nil
+			}
+			return 0, nil
+		default:
+			return 0, nil
+		}
+	}
+	e := sidecarEngine(t, rt, sidecar.None{})
+	pod := samplePod("boot", "uid-boot-restart")
+	pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
+	pod.Spec.Containers[0].StartupProbe = &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"boot"}}},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		FailureThreshold: 1000,
+	}
+	pod.Spec.Containers[0].LivenessProbe = &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"live"}}},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		FailureThreshold: 1,
+	}
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, e, "default", "boot", corev1.PodRunning)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := e.Get("default", "boot")
+		if err != nil {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("startup probe failed the pod: %s", p.Status.Message)
+		}
+		main := containerStatus(p, "macos")
+		if main != nil && boots.Load() > 0 && main.State.Running != nil && !statusStarted(main) {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	passBoot.Store(true)
+	var livesWhenStarted int32
+	deadline = time.Now().Add(5 * time.Second)
+	sawStarted := false
+	for time.Now().Before(deadline) {
+		p, err := e.Get("default", "boot")
+		if err != nil {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("pod failed before the liveness restart: %s", p.Status.Message)
+		}
+		main := containerStatus(p, "macos")
+		if main != nil && statusStarted(main) && main.State.Running != nil {
+			if !sawStarted {
+				livesWhenStarted = lives.Load()
+				sawStarted = true
+			}
+			if lives.Load() > livesWhenStarted {
+				break
+			}
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !sawStarted {
+		p, _ := e.Get("default", "boot")
+		t.Fatalf("startup did not pass: %+v boots=%d", containerStatus(p, "macos"), boots.Load())
+	}
+
+	bootsAtRestart := boots.Load()
+	passBoot.Store(false)
+	kill.Store(true)
+
+	deadline = time.Now().Add(5 * time.Second)
+	sawReset := false
+	for time.Now().Before(deadline) {
+		p, err := e.Get("default", "boot")
+		if err != nil {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("liveness restart failed the pod before startup could be observed: %s starts=%d", p.Status.Message, rt.Starts())
+		}
+		main := containerStatus(p, "macos")
+		if main == nil || main.RestartCount < 1 || main.State.Running == nil {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if statusStarted(main) {
+			t.Fatalf("liveness restart left Started true before the startup probe passed again: %+v boots=%d", main, boots.Load())
+		}
+		if boots.Load() <= bootsAtRestart {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		sawReset = true
+		break
+	}
+	if !sawReset {
+		p, _ := e.Get("default", "boot")
+		main := containerStatus(p, "macos")
+		t.Fatalf("startup probe did not run again after the liveness restart: %+v boots=%d atRestart=%d starts=%d", main, boots.Load(), bootsAtRestart, rt.Starts())
+	}
+	if e.slots.Used() != 1 || rt.Running() != 1 || rt.Starts() < 2 {
+		t.Fatalf("slots=%d running=%d starts=%d, liveness restart changed the slot", e.slots.Used(), rt.Running(), rt.Starts())
+	}
+
+	passBoot.Store(true)
+	kill.Store(false)
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := e.Get("default", "boot")
+		if err != nil {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("pod failed after startup passed again: %s", p.Status.Message)
+		}
+		main := containerStatus(p, "macos")
+		if main == nil || !statusStarted(main) || main.State.Running == nil || main.RestartCount < 1 {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if !main.Ready || !podReady(p) {
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
+		if e.slots.Used() != 1 || rt.Running() != 1 {
+			t.Fatalf("slots=%d running=%d", e.slots.Used(), rt.Running())
+		}
+		return
+	}
+	p, _ := e.Get("default", "boot")
+	t.Fatalf("startup passed again but the container did not become started and ready: %+v ready=%v", containerStatus(p, "macos"), podReady(p))
+}
+
 func TestTerminatedSidecarStaysStarted(t *testing.T) {
 	rt := fake.New()
 	sc := &exitSidecar{}
 	e := sidecarEngine(t, rt, sc)
-	if err := e.Create(context.Background(), hybridPod("hy", "uid-hy", corev1.RestartPolicyAlways), Credentials{}); err != nil {
+	if err := e.Create(context.Background(), hybridPod("hy", "uid-hy", corev1.RestartPolicyOnFailure), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
 	waitRunningReady(t, e, "hy", nil)
