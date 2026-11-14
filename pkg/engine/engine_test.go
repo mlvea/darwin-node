@@ -327,6 +327,13 @@ func TestInitContainersRun(t *testing.T) {
 	if err != nil || st.State != "terminated" {
 		t.Fatalf("init sidecar %+v %v", st, err)
 	}
+	if len(p.Status.InitContainerStatuses) != 1 {
+		t.Fatalf("InitContainerStatuses %+v", p.Status.InitContainerStatuses)
+	}
+	ic := p.Status.InitContainerStatuses[0]
+	if ic.Name != "setup" || ic.Image != "busybox" || ic.State.Terminated == nil || ic.State.Terminated.ExitCode != 0 || ic.State.Terminated.Reason != "Completed" {
+		t.Fatalf("init status %+v", ic)
+	}
 }
 
 type pollSidecar struct {
@@ -363,6 +370,43 @@ func (p *pollSidecar) Get(_ context.Context, _, _, container string) (sidecar.St
 	}
 	_ = n
 	return sidecar.Status{Name: container, State: "terminated", ExitCode: 0}, nil
+}
+
+type exitInitSidecar struct{ sidecar.None }
+
+func (exitInitSidecar) Create(context.Context, *corev1.Pod, corev1.Container, string) error {
+	return nil
+}
+
+func (exitInitSidecar) Get(_ context.Context, _, _, container string) (sidecar.Status, error) {
+	return sidecar.Status{Name: container, ID: "mem://" + container, State: "terminated", ExitCode: 9, Error: "nope"}, nil
+}
+
+func TestInitContainerFailureKeepsExitCode(t *testing.T) {
+	slots, _ := capacity.New(2)
+	cfg := config.Default()
+	cfg.Runtime = "fake"
+	cfg.CacheDir = t.TempDir()
+	cfg.AgentReadyTimeout = 5 * time.Second
+	cfg.AllowNATWorkloads = true
+	e := New(cfg, slots, fake.New(), exitInitSidecar{}, event.Nop{}, "10.0.0.1")
+	t.Cleanup(e.Close)
+	pod := samplePod("infail", "uid-infail")
+	pod.Spec.InitContainers = []corev1.Container{{Name: "setup", Image: "busybox"}}
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	p := waitPhase(t, e, "default", "infail", corev1.PodFailed)
+	if !strings.Contains(p.Status.Message, "exited 9") {
+		t.Fatalf("message %q", p.Status.Message)
+	}
+	if len(p.Status.InitContainerStatuses) != 1 {
+		t.Fatalf("InitContainerStatuses %+v", p.Status.InitContainerStatuses)
+	}
+	ic := p.Status.InitContainerStatuses[0]
+	if ic.Name != "setup" || ic.State.Terminated == nil || ic.State.Terminated.ExitCode != 9 || ic.State.Terminated.Reason != "Error" || !strings.Contains(ic.State.Terminated.Message, "nope") {
+		t.Fatalf("init status %+v", ic)
+	}
 }
 
 func TestWaitSidecarExitBackoff(t *testing.T) {

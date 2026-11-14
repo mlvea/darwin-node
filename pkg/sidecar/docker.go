@@ -32,6 +32,7 @@ type dockerAPI interface {
 	ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error)
 	ContainerExecCreate(ctx context.Context, container string, config types.ExecConfig) (types.IDResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config types.ExecStartCheck) (types.HijackedResponse, error)
+	ContainerExecInspect(ctx context.Context, execID string) (types.ContainerExecInspect, error)
 }
 
 var _ dockerAPI = (*dockercl.Client)(nil)
@@ -273,10 +274,25 @@ func (d *Docker) Exec(ctx context.Context, ns, name, containerName string, cmd [
 		return err
 	}
 	defer hr.Close()
-	if attach != nil && attach.Stdout() != nil {
-		_, _ = io.Copy(attach.Stdout(), hr.Reader)
+	var copyErr error
+	if hr.Reader != nil {
+		dst := io.Writer(io.Discard)
+		if attach != nil && attach.Stdout() != nil {
+			dst = attach.Stdout()
+		}
+		_, copyErr = io.Copy(dst, hr.Reader)
 	}
-	return nil
+	ins, err := d.cli.ContainerExecInspect(ctx, execID.ID)
+	if err != nil {
+		return fmt.Errorf("exec inspect: %w", err)
+	}
+	if ins.Running {
+		return fmt.Errorf("exec still running")
+	}
+	if ins.ExitCode != 0 {
+		return fmt.Errorf("exit code %d", ins.ExitCode)
+	}
+	return copyErr
 }
 
 func (d *Docker) lookup(ns, name, containerName string) (string, error) {

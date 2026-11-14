@@ -100,13 +100,12 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	startupOK := false
-	var startupFails, liveFails int32
+	var liveFails int32
 	if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
 		return
 	}
 	e.refreshSidecarStatus(ctx, rec)
-	if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
+	if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickSidecarStartup(ctx, rec) || !e.tickProbes(ctx, rec, interval, &liveFails) {
 		return
 	}
 	t := time.NewTicker(interval)
@@ -120,7 +119,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 				return
 			}
 			e.refreshSidecarStatus(ctx, rec)
-			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickProbes(ctx, rec, interval, &startupOK, &startupFails, &liveFails) {
+			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickSidecarStartup(ctx, rec) || !e.tickProbes(ctx, rec, interval, &liveFails) {
 				return
 			}
 		}
@@ -152,7 +151,7 @@ func (e *Engine) noteVMDeath(rec *podRecord) bool {
 	}
 }
 
-func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod time.Duration, startupOK *bool, startupFails, liveFails *int32) bool {
+func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod time.Duration, liveFails *int32) bool {
 	if !e.noteVMDeath(rec) {
 		return false
 	}
@@ -161,9 +160,12 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 	cli := rec.agent
 	phase := rec.phase
 	var started time.Time
-	if rec.startedAt != nil {
+	if !rec.startupSince.IsZero() {
+		started = rec.startupSince
+	} else if rec.startedAt != nil {
 		started = rec.startedAt.Time
 	}
+	startupDone := rec.startupDone
 	rec.mu.Unlock()
 	if cli == nil || phase != corev1.PodRunning {
 		return true
@@ -171,7 +173,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 	c0 := pod.Spec.Containers[0]
 	now := time.Now()
 
-	if !*startupOK {
+	// startupDone lives on the record so a liveness restart can clear it.
+	// A local flag would stay true and leave Started set across that restart.
+	if !startupDone {
 		if req, ok := k8sProbe(c0.StartupProbe); ok {
 			initial, _, failTh := probeTiming(c0.StartupProbe, defaultPeriod)
 			if !started.IsZero() && now.Before(started.Add(initial)) {
@@ -184,22 +188,30 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 			}
 			res, err := cli.Probe(ctx, req)
 			if err != nil || !res.OK {
-				*startupFails++
 				rec.mu.Lock()
+				rec.startupFails++
+				fails := rec.startupFails
 				rec.ready = false
 				rec.reason = "StartupProbe"
 				rec.message = probeMsg(res, err)
 				rec.mu.Unlock()
-				if *startupFails >= failTh {
+				if fails >= failTh {
 					e.fail(rec, fmt.Errorf("startup probe failed: %s", probeMsg(res, err)))
 					return false
 				}
 				return true
 			}
 		}
-		*startupOK = true
 		rec.mu.Lock()
 		rec.startupDone = true
+		rec.startupFails = 0
+		if _, hasReady := k8sProbe(c0.ReadinessProbe); !hasReady {
+			rec.ready = true
+			if rec.reason == "StartupProbe" {
+				rec.reason = ""
+				rec.message = ""
+			}
+		}
 		rec.mu.Unlock()
 	}
 

@@ -28,6 +28,7 @@ type restartingSidecar struct {
 	mu          sync.Mutex
 	boxes       map[string]*restartBox
 	exitOnFirst map[string]int
+	exitAlways  map[string]int
 	failOn      map[string]int
 }
 
@@ -43,6 +44,7 @@ func newRestartingSidecar() *restartingSidecar {
 	return &restartingSidecar{
 		boxes:       map[string]*restartBox{},
 		exitOnFirst: map[string]int{},
+		exitAlways:  map[string]int{},
 		failOn:      map[string]int{},
 	}
 }
@@ -67,6 +69,11 @@ func (s *restartingSidecar) Create(_ context.Context, _ *corev1.Pod, c corev1.Co
 	b.id = fmt.Sprintf("mem://%s-%d", c.Name, b.creates)
 	b.started = time.Now()
 	if code, ok := s.exitOnFirst[c.Name]; ok && b.creates == 1 {
+		b.state = "terminated"
+		b.code = code
+		return nil
+	}
+	if code, ok := s.exitAlways[c.Name]; ok {
 		b.state = "terminated"
 		b.code = code
 		return nil
@@ -337,5 +344,170 @@ func TestHybridSidecarRestartFailureReleasesSlot(t *testing.T) {
 			_ = e.Delete(context.Background(), "default", "hy-over", 0)
 		}
 		t.Fatalf("cap after sidecar restart failure: %v", err)
+	}
+}
+
+// A sidecar that exits on every start must not be started again on each
+// probe tick. Kubelet waits CrashLoopBackOff: the first restart is immediate,
+// then 10s, 20s, doubling to 5m. The VM stays up and keeps its slot.
+func TestHybridSidecarCrashLoopBacksOff(t *testing.T) {
+	rt := fake.New()
+	sc := newRestartingSidecar()
+	sc.exitAlways["log"] = 1
+	e := sidecarEngine(t, rt, sc)
+	pod := hybridPod("hy", "uid-hy", corev1.RestartPolicyAlways)
+	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "metrics", Image: "busybox"})
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	armed := false
+	for time.Now().Before(deadline) {
+		p, err := e.Get("default", "hy")
+		if err == nil && p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("crash loop failed the pod: %s", p.Status.Message)
+		}
+		n := sc.createsOf("log")
+		if err == nil && p.Status.Phase == corev1.PodRunning && n >= 2 {
+			if n != 2 {
+				t.Fatalf("sidecar was started %d times before backoff could apply", n)
+			}
+			armed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !armed {
+		t.Fatalf("sidecar was not restarted once: creates=%d", sc.createsOf("log"))
+	}
+
+	hold := time.Now().Add(400 * time.Millisecond)
+	saw := false
+	for time.Now().Before(hold) {
+		if n := sc.createsOf("log"); n != 2 {
+			t.Fatalf("sidecar restarted %d times with no backoff", n)
+		}
+		if sc.createsOf("metrics") != 1 {
+			t.Fatalf("metrics creates=%d, the running sidecar was restarted too", sc.createsOf("metrics"))
+		}
+		p, err := e.Get("default", "hy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Status.Phase != corev1.PodRunning || podReady(p) {
+			t.Fatalf("phase %s ready %v, crash loop must keep the pod Running and not Ready", p.Status.Phase, podReady(p))
+		}
+		side := containerStatus(p, "log")
+		if side != nil && side.State.Waiting != nil && side.State.Waiting.Reason == "CrashLoopBackOff" {
+			if !strings.Contains(side.State.Waiting.Message, "back-off") || !strings.Contains(side.State.Waiting.Message, "log") {
+				t.Fatalf("waiting message %q", side.State.Waiting.Message)
+			}
+			if side.Ready || side.RestartCount != 1 || side.State.Terminated != nil {
+				t.Fatalf("status during backoff %+v", side)
+			}
+			last := side.LastTerminationState.Terminated
+			if last == nil || last.ExitCode != 1 {
+				t.Fatalf("last exit %+v", last)
+			}
+			metrics := containerStatus(p, "metrics")
+			main := containerStatus(p, "macos")
+			if metrics == nil || !metrics.Ready || metrics.RestartCount != 0 || metrics.State.Running == nil {
+				t.Fatalf("metrics %+v", metrics)
+			}
+			if main == nil || main.RestartCount != 0 || main.State.Running == nil {
+				t.Fatalf("VM container %+v", main)
+			}
+			if e.slots.Used() != 1 || rt.Running() != 1 {
+				t.Fatalf("slots=%d running=%d, backoff must keep the VM slot", e.slots.Used(), rt.Running())
+			}
+			saw = true
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !saw {
+		p, _ := e.Get("default", "hy")
+		t.Fatalf("exited sidecar was not CrashLoopBackOff: %+v creates=%d", containerStatus(p, "log"), sc.createsOf("log"))
+	}
+
+	// The kubelet base delay is 10s. The 400ms hold above already elapsed, so
+	// the next start is still several seconds away and must not be immediate.
+	waited := time.Now()
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if n := sc.createsOf("log"); n >= 3 {
+			if n != 3 {
+				t.Fatalf("creates=%d, more than one start ran when the backoff elapsed", n)
+			}
+			if time.Since(waited) < 5*time.Second {
+				t.Fatalf("third start after %s, backoff was shorter than the kubelet base", time.Since(waited))
+			}
+			goto doubled
+		}
+		if p, err := e.Get("default", "hy"); err == nil && p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("crash loop failed the pod while backing off: %s", p.Status.Message)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("sidecar was not started after the backoff: creates=%d", sc.createsOf("log"))
+
+doubled:
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if n := sc.createsOf("log"); n != 3 {
+			t.Fatalf("creates=%d, the delay did not grow after the second restart", n)
+		}
+		p, err := e.Get("default", "hy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Status.Phase != corev1.PodRunning || podReady(p) || e.slots.Used() != 1 || rt.Running() != 1 {
+			t.Fatalf("phase %s ready %v slots=%d running=%d", p.Status.Phase, podReady(p), e.slots.Used(), rt.Running())
+		}
+		side := containerStatus(p, "log")
+		if side != nil && side.RestartCount == 2 && side.State.Waiting != nil && side.State.Waiting.Reason == "CrashLoopBackOff" {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	p, _ := e.Get("default", "hy")
+	t.Fatalf("expected the longer backoff after the delayed restart: %+v", containerStatus(p, "log"))
+}
+
+func TestSidecarRestartBackoffMatchesKubelet(t *testing.T) {
+	e := sidecarEngine(t, fake.New(), sidecar.None{})
+	key := "pod/log"
+	now := time.Now()
+	if e.sidecarBackOff.IsInBackOffSince(key, now) {
+		t.Fatal("the first exit is already backing off")
+	}
+	e.sidecarBackOff.Next(key, now)
+	if d := e.sidecarBackOff.Get(key); d != 10*time.Second {
+		t.Fatalf("base delay %s, kubelet starts at 10s", d)
+	}
+	if !e.sidecarBackOff.IsInBackOffSince(key, now) {
+		t.Fatal("10s backoff did not arm")
+	}
+	if e.sidecarBackOff.IsInBackOffSince(key, now.Add(-10*time.Second)) {
+		t.Fatal("10s backoff was still in force 10s after the exit")
+	}
+	e.sidecarBackOff.Next(key, now)
+	if d := e.sidecarBackOff.Get(key); d != 20*time.Second {
+		t.Fatalf("second delay %s, want 20s", d)
+	}
+	for i := 0; i < 8; i++ {
+		e.sidecarBackOff.Next(key, now)
+	}
+	if d := e.sidecarBackOff.Get(key); d != 300*time.Second {
+		t.Fatalf("cap %s, kubelet caps at 5m", d)
+	}
+	// client-go resets once the exit is more than twice the cap after the last update.
+	stable := now.Add(2*300*time.Second + time.Second)
+	if e.sidecarBackOff.IsInBackOffSince(key, stable) {
+		t.Fatal("backoff did not reset after the container stayed up")
+	}
+	e.sidecarBackOff.Next(key, stable)
+	if d := e.sidecarBackOff.Get(key); d != 10*time.Second {
+		t.Fatalf("delay after a stable stretch %s, want 10s", d)
 	}
 }

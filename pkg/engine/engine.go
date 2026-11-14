@@ -36,6 +36,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 // Key is namespace/name.
@@ -69,15 +70,16 @@ func (c Credentials) volumeReq(pod *corev1.Pod, container corev1.Container, root
 
 // Engine owns in-memory pod state and drives the runtime.
 type Engine struct {
-	cfg       config.Config
-	slots     *capacity.Slots
-	rt        runtime.Runtime
-	sidecar   sidecar.Runtime
-	events    event.Recorder
-	hostIP    string
-	puller    image.Puller
-	hostports *hostport.Manager
-	minter    TokenMinter
+	cfg            config.Config
+	slots          *capacity.Slots
+	rt             runtime.Runtime
+	sidecar        sidecar.Runtime
+	events         event.Recorder
+	hostIP         string
+	puller         image.Puller
+	hostports      *hostport.Manager
+	minter         TokenMinter
+	sidecarBackOff *flowcontrol.Backoff
 
 	warm       warmPool
 	warmCancel context.CancelFunc
@@ -104,7 +106,9 @@ type podRecord struct {
 	startedAt       *metav1.Time
 	agentOK         bool
 	ready           bool
-	startupDone     bool // startup probe passed, or there is no startup probe
+	startupDone     bool      // startup probe passed, or there is no startup probe
+	startupFails    int32     // consecutive startup failures since the last start
+	startupSince    time.Time // anchor for the startup initial delay; zero uses startedAt
 	failedErr       error
 	cancel          context.CancelFunc
 	restartCount    int32
@@ -112,6 +116,10 @@ type podRecord struct {
 	sidecarStatuses []sidecar.Status
 	sidecarRestarts map[string]int32
 	sidecarLastExit map[string]*corev1.ContainerStateTerminated
+	sidecarStart    map[string]*sidecarStartState
+	sidecarWait     map[string]sidecarWait
+	sidecarExitAt   map[string]sidecarExitMark
+	initStatuses    []corev1.ContainerStatus
 	warmDir         string       // set when the VM was adopted from the warm pool
 	warmDisk        string       // cache/pods/<warm-slot> overlay; not the pod uid dir
 	adopt           *warmEntry   // claimed under capacity pressure, adopted in start()
@@ -137,15 +145,16 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 	puller := image.NewManager(cfg.CacheDir)
 	puller.InsecureRegistries = cfg.InsecureRegistries
 	e := &Engine{
-		cfg:       cfg,
-		slots:     slots,
-		rt:        rt,
-		sidecar:   sc,
-		events:    rec,
-		hostIP:    hostIP,
-		puller:    puller,
-		hostports: hostport.New(),
-		pods:      map[string]*podRecord{},
+		cfg:            cfg,
+		slots:          slots,
+		rt:             rt,
+		sidecar:        sc,
+		events:         rec,
+		hostIP:         hostIP,
+		puller:         puller,
+		hostports:      hostport.New(),
+		sidecarBackOff: flowcontrol.NewBackOff(sidecarRestartBackoff, sidecarRestartBackoffMax),
+		pods:           map[string]*podRecord{},
 	}
 	_ = e.Recover()
 	if cfg.WarmSlots > 0 {
@@ -1020,25 +1029,38 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	startTime := rec.startedAt
 	statuses := []corev1.ContainerStatus{cs}
 	if rec.pod != nil && len(rec.pod.Spec.Containers) > 1 {
-		statuses = append(statuses, sidecarContainerStatuses(rec.pod.Spec.Containers[1:], rec.sidecarStatuses, rec.sidecarRestarts, rec.sidecarLastExit)...)
+		statuses = append(statuses, sidecarContainerStatuses(rec.pod.Spec.Containers[1:], rec.sidecarStatuses, rec.sidecarRestarts, rec.sidecarLastExit, rec.sidecarStart, rec.sidecarWait)...)
+	}
+	startupBlock := ""
+	if ready {
+		if msg, blocked := sidecarStartupBlockLocked(rec); blocked {
+			ready = false
+			startupBlock = msg
+		}
 	}
 	containersReady := boolCond(corev1.ContainersReady, ready, now, rec)
 	podReady := boolCond(corev1.PodReady, ready, now, rec)
 	if vmReady && !ready {
 		msg := sidecarDownMessageLocked(rec)
-		containersReady.Reason = "SidecarNotRunning"
+		reason := "SidecarNotRunning"
+		if startupBlock != "" {
+			reason = "StartupProbe"
+			msg = startupBlock
+		}
+		containersReady.Reason = reason
 		containersReady.Message = msg
-		podReady.Reason = "SidecarNotRunning"
+		podReady.Reason = reason
 		podReady.Message = msg
 	}
 	return corev1.PodStatus{
-		Phase:             rec.phase,
-		Reason:            rec.reason,
-		Message:           rec.message,
-		HostIP:            e.hostIP,
-		PodIP:             ip,
-		StartTime:         startTime,
-		ContainerStatuses: statuses,
+		Phase:                 rec.phase,
+		Reason:                rec.reason,
+		Message:               rec.message,
+		HostIP:                e.hostIP,
+		PodIP:                 ip,
+		StartTime:             startTime,
+		ContainerStatuses:     statuses,
+		InitContainerStatuses: copyContainerStatuses(rec.initStatuses),
 		Conditions: []corev1.PodCondition{
 			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
 			boolCond(corev1.PodInitialized, rec.initialized || len(rec.pod.Spec.InitContainers) == 0, now, rec),
@@ -1411,7 +1433,9 @@ func (e *Engine) runInitContainers(ctx context.Context, rec *podRecord, pod *cor
 		if err := e.sidecar.Create(ctx, pod, ic, volRoot); err != nil {
 			return err
 		}
-		if err := e.waitSidecarExit(ctx, pod.Namespace, pod.Name, ic.Name); err != nil {
+		st, err := e.waitSidecarExit(ctx, pod.Namespace, pod.Name, ic.Name)
+		e.noteInitStatus(rec, ic, st)
+		if err != nil {
 			return err
 		}
 		e.events.Normal(ctx, event.ReasonInitExited, "init container "+ic.Name+" completed")
@@ -1422,7 +1446,85 @@ func (e *Engine) runInitContainers(ctx context.Context, rec *podRecord, pod *cor
 	return nil
 }
 
-func (e *Engine) waitSidecarExit(ctx context.Context, ns, name, container string) error {
+func copyContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]corev1.ContainerStatus, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if in[i].Started != nil {
+			v := *in[i].Started
+			out[i].Started = &v
+		}
+		if in[i].State.Terminated != nil {
+			cp := *in[i].State.Terminated
+			out[i].State.Terminated = &cp
+		}
+		if in[i].State.Running != nil {
+			cp := *in[i].State.Running
+			out[i].State.Running = &cp
+		}
+		if in[i].State.Waiting != nil {
+			cp := *in[i].State.Waiting
+			out[i].State.Waiting = &cp
+		}
+	}
+	return out
+}
+
+func initContainerStatus(ic corev1.Container, st sidecar.Status) corev1.ContainerStatus {
+	started := st.State == "running" || st.State == "terminated"
+	cs := corev1.ContainerStatus{
+		Name:        ic.Name,
+		Image:       ic.Image,
+		Ready:       st.State == "terminated" && st.ExitCode == 0,
+		Started:     &started,
+		ContainerID: st.ID,
+	}
+	switch st.State {
+	case "terminated":
+		reason := "Completed"
+		if st.ExitCode != 0 {
+			reason = "Error"
+		}
+		term := &corev1.ContainerStateTerminated{ExitCode: int32(st.ExitCode), Reason: reason, Message: st.Error}
+		if !st.StartedAt.IsZero() {
+			term.StartedAt = metav1.NewTime(st.StartedAt)
+		}
+		if !st.FinishedAt.IsZero() {
+			term.FinishedAt = metav1.NewTime(st.FinishedAt)
+		}
+		cs.State.Terminated = term
+	case "running":
+		run := &corev1.ContainerStateRunning{}
+		if !st.StartedAt.IsZero() {
+			run.StartedAt = metav1.NewTime(st.StartedAt)
+		}
+		cs.State.Running = run
+	default:
+		cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: "PodInitializing", Message: st.Error}
+	}
+	return cs
+}
+
+func (e *Engine) noteInitStatus(rec *podRecord, ic corev1.Container, st sidecar.Status) {
+	if st.State == "" && st.Name == "" && st.ID == "" {
+		return
+	}
+	cs := initContainerStatus(ic, st)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for i := range rec.initStatuses {
+		if rec.initStatuses[i].Name == ic.Name {
+			rec.initStatuses[i] = cs
+			return
+		}
+	}
+	rec.initStatuses = append(rec.initStatuses, cs)
+}
+
+func (e *Engine) waitSidecarExit(ctx context.Context, ns, name, container string) (sidecar.Status, error) {
 	limit := e.cfg.InitTimeout
 	if limit <= 0 {
 		limit = 2 * time.Minute
@@ -1434,25 +1536,27 @@ func (e *Engine) waitSidecarExit(ctx context.Context, ns, name, container string
 	backoff := 50 * time.Millisecond
 	const maxBackoff = time.Second
 	consecutiveErr := 0
+	var last sidecar.Status
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return last, err
 		}
 		st, err := e.sidecar.Get(ctx, ns, name, container)
 		if err != nil {
 			consecutiveErr++
 			if consecutiveErr >= 2 {
-				return err
+				return last, err
 			}
 			time.Sleep(backoff)
 			continue
 		}
+		last = st
 		consecutiveErr = 0
 		if st.State == "terminated" {
 			if st.ExitCode != 0 {
-				return fmt.Errorf("init container %s exited %d: %s", container, st.ExitCode, st.Error)
+				return st, fmt.Errorf("init container %s exited %d: %s", container, st.ExitCode, st.Error)
 			}
-			return nil
+			return st, nil
 		}
 		time.Sleep(backoff)
 		backoff *= 2
@@ -1460,7 +1564,7 @@ func (e *Engine) waitSidecarExit(ctx context.Context, ns, name, container string
 			backoff = maxBackoff
 		}
 	}
-	return fmt.Errorf("init container %s did not complete", container)
+	return last, fmt.Errorf("init container %s did not complete", container)
 }
 
 func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
@@ -1470,6 +1574,16 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	places := append([]volume.Placement(nil), rec.places...)
 	oldAgent := rec.agent
 	rec.agent = nil
+	// The restarted container has not passed its startup probe. Clear it
+	// before the new agent is stored so status cannot observe Started.
+	if pod != nil && len(pod.Spec.Containers) > 0 && hasStartupProbe(pod.Spec.Containers[0]) {
+		rec.startupDone = false
+		rec.startupFails = 0
+		rec.ready = false
+		rec.reason = "StartupProbe"
+		rec.message = "container restarted"
+		rec.startupSince = time.Now()
+	}
 	rec.mu.Unlock()
 	if machine == nil {
 		return fmt.Errorf("no machine to restart")
