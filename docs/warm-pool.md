@@ -57,4 +57,5 @@ host and are started normally after adoption.
 waits for any in-flight warm boot to land, stops every pooled guest, and
 then force-stops any pod machine still registered. Slots and overlay
 directories are released, and a pod's cache volumes are snapshotted.
-A second signal or a crash skips that stop.
+A second SIGINT/SIGTERM cancels the drain and still runs that stop
+before the process exits. A crash skips it.

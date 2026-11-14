@@ -18,6 +18,12 @@
   Anonymous callers receive 401 from the handler. There is no separate
   `--authentication-token-webhook` flag; the client CA is what turns
   webhook auth on.
+- The process watches that file. Replacing it (atomic rename or
+  rewrite) updates the handshake's client CA pool and the webhook
+  authenticator's verify options without a restart. An empty or
+  unparsable replacement is ignored and the last good bundle stays
+  loaded. A missing or unparsable file at startup still refuses to
+  boot; it does not install `NoAuth`.
 - A certificate signed by that CA authenticates as its subject CommonName.
   When a verified client certificate is present, the handler uses that
   identity and does not also consult a bearer token. Bearer TokenReview
@@ -41,8 +47,8 @@
 `make test-kubelet-auth` (Linux, `//go:build integration`) downloads
 controller-runtime envtest binaries (kube-apiserver and etcd, Kubernetes
 1.35) and calls the same `kubeletAuth` handler `runVK` installs, over the
-TLS config from `pkg/config.TLSConfig`. The kubelet client in that test
-is a ServiceAccount allowed only to create TokenReview and
+same live client-CA bundle the handshake uses. The kubelet client in that
+test is a ServiceAccount allowed only to create TokenReview and
 SubjectAccessReview.
 
 Verified when `ClientCA` is set:
@@ -58,8 +64,11 @@ Verified when `ClientCA` is set:
 - Anonymous requests are rejected with 401. An invalid bearer token is
   rejected with 401. A client certificate signed by a different CA is
   rejected during the TLS handshake.
-- A missing or invalid client CA fails closed. The auth option returns
+- A missing or invalid client CA fails closed. Loading the file returns
   an error and does not install `NoAuth`.
+- Unit tests replace the CA file and accept a certificate from the new
+  bundle, and they keep the previous bundle when the replacement is
+  empty or not a certificate.
 
 `go test ./...` does not run this test. Without `KUBEBUILDER_ASSETS` or
 `DARWIN_NODE_ENVTEST_DOWNLOAD=1`, `go test -tags=integration` runs the

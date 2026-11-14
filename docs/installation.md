@@ -91,9 +91,11 @@ SIGTERM and SIGINT trigger a graceful drain before the process exits:
    still running, snapshots its cache volumes, and releases its slot. The
    warm pool is paused during the drain and stopped as part of that close.
 
-A second signal skips the drain and exits immediately (exit code 130),
-without the force-stop. A crash does the same. The next process reclaims
-leftover pod directories at startup.
+A second signal cancels the rest of the drain and still force-stops
+every remaining pod VM (`Engine.Close`: cache snapshot, slot release)
+before exiting 130. It does not wait out `--shutdown-grace-period`.
+A crash skips that stop. The next process reclaims leftover pod
+directories at startup.
 
 ## Configuration
 

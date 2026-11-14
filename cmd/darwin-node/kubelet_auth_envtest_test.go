@@ -31,7 +31,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
@@ -111,12 +110,8 @@ func checkEnvtestAssets(dir string) error {
 
 func TestKubeletAuthEnvtest(t *testing.T) {
 	t.Run("missing CA fails closed", func(t *testing.T) {
-		nc := &nodeutil.NodeConfig{
-			Client:  fake.NewSimpleClientset(),
-			Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-		}
-		err := kubeletAuth("envtest-node", filepath.Join(t.TempDir(), "missing.pem"))(nc)
-		if err == nil {
+		bundle, err := loadClientCA(filepath.Join(t.TempDir(), "missing.pem"))
+		if err == nil || bundle != nil {
 			t.Fatal("missing CA must fail closed")
 		}
 	})
@@ -125,11 +120,8 @@ func TestKubeletAuthEnvtest(t *testing.T) {
 		if err := os.WriteFile(bad, []byte("not a certificate\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		nc := &nodeutil.NodeConfig{
-			Client:  fake.NewSimpleClientset(),
-			Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-		}
-		if err := kubeletAuth("envtest-node", bad)(nc); err == nil {
+		bundle, err := loadClientCA(bad)
+		if err == nil || bundle != nil {
 			t.Fatal("invalid CA must fail closed")
 		}
 	})
@@ -219,19 +211,28 @@ func TestKubeletAuthEnvtest(t *testing.T) {
 	serverKeyPath := writeKey(t, dir, "server.key", serverKey)
 	clientCAPath := writePEM(t, dir, "client-ca.crt", "CERTIFICATE", clientCA.Raw)
 
-	tlsCfg, err := config.TLSConfig(serverCert, serverKeyPath, clientCAPath)
+	bundle, err := loadClientCA(clientCAPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	go bundle.Run(ctx)
+	tlsCfg, err := config.TLSConfig(serverCert, serverKeyPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyKubeletTLS(tlsCfg, tlsCfg, bundle)
 	if tlsCfg.ClientAuth != tls.VerifyClientCertIfGiven {
 		t.Fatalf("ClientAuth %v", tlsCfg.ClientAuth)
+	}
+	if tlsCfg.GetConfigForClient == nil {
+		t.Fatal("envtest TLS pinned ClientCAs")
 	}
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	nc := &nodeutil.NodeConfig{Client: kubeClient, Handler: inner}
-	if err := kubeletAuth(nodeName, clientCAPath)(nc); err != nil {
+	if err := kubeletAuth(nodeName, bundle)(nc); err != nil {
 		t.Fatal(err)
 	}
 
