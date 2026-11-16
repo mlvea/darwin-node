@@ -127,6 +127,7 @@ type podRecord struct {
 	consoleSock     string
 	consoleHub      *consoleHub
 	startDone       sync.WaitGroup // closed when the async start goroutine returns
+	watchDone       sync.WaitGroup // closed when the probe and restart watch returns
 	emptyDirs       []volume.EmptyDirLimit
 	volRoot         string
 	tokens          []volume.ProjectedToken
@@ -737,7 +738,14 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		}
 	}
 	e.events.Normal(ctx, event.ReasonStarted, "macOS VM running; guest agent ready")
-	go e.watch(ctx, rec)
+	// Count the watch before it runs. Delete waits for it, then stops the
+	// VM and removes sidecars. A restart already inside Start or Create
+	// would otherwise finish after the slot was released.
+	rec.watchDone.Add(1)
+	go func() {
+		defer rec.watchDone.Done()
+		e.watch(ctx, rec)
+	}()
 }
 
 func (e *Engine) fail(rec *podRecord, err error) {
@@ -944,6 +952,11 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 	rec.mu.Unlock()
 
 	rec.startDone.Wait()
+	// The watch is not part of start. It restarts sidecars and, on a
+	// liveness failure, the VM. Wait until that goroutine has left Create
+	// and Start before RemovePod and the slot release. Those calls do not
+	// observe cancellation once they are in flight (vz.Start ignores ctx).
+	rec.watchDone.Wait()
 
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
@@ -1567,7 +1580,23 @@ func (e *Engine) waitSidecarExit(ctx context.Context, ns, name, container string
 	return last, fmt.Errorf("init container %s did not complete", container)
 }
 
+// errPodStopping means Delete or fail already owns the pod. The caller must
+// not Start the VM or fail it again.
+var errPodStopping = errors.New("pod is stopping")
+
+func podActive(rec *podRecord) bool {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.phase == corev1.PodPending || rec.phase == corev1.PodRunning
+}
+
 func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !podActive(rec) {
+		return errPodStopping
+	}
 	rec.mu.Lock()
 	machine := rec.machine
 	pod := rec.pod.DeepCopy()
@@ -1592,8 +1621,22 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 		_ = oldAgent.Close() // release the pre-restart vsock/TCP connection
 	}
 	_ = machine.Stop(ctx, 5*time.Second)
+	// Delete may have cancelled while Stop ran. Starting now would boot a
+	// VM whose slot Close is about to release.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !podActive(rec) {
+		return errPodStopping
+	}
 	if err := machine.Start(ctx); err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !podActive(rec) {
+		return errPodStopping
 	}
 	cli, err := machine.DialAgent(ctx)
 	if err != nil {

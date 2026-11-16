@@ -31,6 +31,7 @@ on Apple Silicon macOS VMs; others are degraded. This file is the contract.
 | `emptyDir.sizeLimit` | The watch loop sums regular files on the host directory. Over the limit, or a symlink that leaves the volume, the pod fails and the slot is released. The guest can write past the limit between checks. An APFS quota that refuses the write is still future work. `medium: Memory` is a normal directory. |
 | ServiceAccount token rotation | Each projected token is minted on its own. A mint error or an empty token fails pod creation. The watch loop refreshes at half the remaining lifetime, rewrites the host file, and re-copies it into the guest. Refresh keeps the last good file until the recorded expiry; after expiry a failed refresh fails the pod. |
 | Init containers | Host Docker only, sequential, before the VM starts. A macOS image as an init container is rejected. |
+| Crash-looping hybrid sidecar | The container waits in `CrashLoopBackOff` (10s, then 20s, doubling, capped at 5m) with that reason and a `back-off … restarting failed container` message. Same rule as kubelet: the pod stays `Running` and is not failed for looping. It keeps its VM slot until the pod is deleted. The other slot still admits a pod. The 2-VM cap is not raised. |
 | `kubectl logs` of the VM | Via Guest Agent (unified log + agent ring buffer). Not a container runtime log driver. |
 | GPU scheduling | `darwin.node/metal` is a token, not isolation. See [gpu.md](gpu.md). |
 | hostPath | Shared into the guest via virtio-fs. Semantics ≠ Linux bind-mount. |
