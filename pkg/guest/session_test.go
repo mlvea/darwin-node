@@ -107,6 +107,47 @@ func TestSessionStreamWriteErrorClearsPending(t *testing.T) {
 	}
 }
 
+// A stream buffer that is already full must still deliver the next frame
+// when the reader arrives during the grace period. Dropping immediately
+// closes the stream and the exec exit frame is lost.
+func TestDispatchFullBufferWaitsForALateReceiver(t *testing.T) {
+	ch := make(chan Envelope, 1)
+	ch <- Envelope{ID: "1", Kind: KindStream, Payload: []byte("1")}
+	s := &Session{pending: map[string]chan Envelope{"1": ch}}
+
+	got := make(chan Envelope, 2)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		for i := 0; i < 2; i++ {
+			env, ok := <-ch
+			if !ok {
+				got <- Envelope{}
+				return
+			}
+			got <- env
+		}
+	}()
+
+	s.dispatch(Envelope{ID: "1", Kind: KindStream, Payload: []byte("2")})
+
+	var frames []Envelope
+	timeout := time.After(2 * time.Second)
+	for len(frames) < 2 {
+		select {
+		case env := <-got:
+			frames = append(frames, env)
+		case <-timeout:
+			t.Fatal("receiver did not return both frames")
+		}
+	}
+	if string(frames[0].Payload) != "1" || string(frames[1].Payload) != "2" {
+		t.Fatalf("frames %q %q, full buffer dropped the frame instead of waiting", frames[0].Payload, frames[1].Payload)
+	}
+	if s.pendingCount() != 1 {
+		t.Fatalf("pending=%d, stream was dropped while the receiver was late", s.pendingCount())
+	}
+}
+
 func TestSessionSlowStreamDoesNotBlockCall(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
