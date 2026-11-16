@@ -101,11 +101,21 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		interval = 10 * time.Second
 	}
 	var liveFails int32
-	if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
-		return
+	// The first pass runs immediately and checks the pod context before
+	// Create or Start. A call that has already entered Create or Start
+	// does not observe cancellation. Delete waits for this goroutine, then
+	// removes whatever that call started.
+	step := func() bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
+			return false
+		}
+		e.refreshSidecarStatus(ctx, rec)
+		return e.noteSidecarExit(rec) && e.restartExitedSidecars(ctx, rec) && e.tickSidecarStartup(ctx, rec) && e.tickProbes(ctx, rec, interval, &liveFails)
 	}
-	e.refreshSidecarStatus(ctx, rec)
-	if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickSidecarStartup(ctx, rec) || !e.tickProbes(ctx, rec, interval, &liveFails) {
+	if !step() {
 		return
 	}
 	t := time.NewTicker(interval)
@@ -115,11 +125,7 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
-				return
-			}
-			e.refreshSidecarStatus(ctx, rec)
-			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) || !e.tickSidecarStartup(ctx, rec) || !e.tickProbes(ctx, rec, interval, &liveFails) {
+			if !step() {
 				return
 			}
 		}
@@ -267,6 +273,11 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 	}
 	res, err := liveRes, liveErr
 	if err != nil || !res.OK {
+		// Cancellation is Delete or Close, not a failed probe. Starting the
+		// VM here races the slot release.
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
+		}
 		e.events.Warn(ctx, event.ReasonProbeFailed, probeMsg(res, err))
 		*liveFails++
 		if *liveFails < liveFailTh {
@@ -287,6 +298,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 				return false
 			}
 			if rerr := e.restartVM(ctx, rec); rerr != nil {
+				if ctx.Err() != nil || !podActive(rec) {
+					return false
+				}
 				e.fail(rec, fmt.Errorf("liveness restart: %w", rerr))
 				return false
 			}

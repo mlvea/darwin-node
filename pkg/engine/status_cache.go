@@ -201,7 +201,8 @@ func (e *Engine) noteSidecarExit(rec *podRecord) bool {
 // the fake runtime replaces that container's status. A Create error fails
 // the pod and releases the VM slot. The caller must stop when this is false.
 // Repeated exits use the kubelet CrashLoopBackOff delays (10s, 20s, up to
-// 5m). The VM is not restarted and the slot stays held.
+// 5m). The pod stays Running. Kubelet does not evict it, so the VM slot
+// stays held until the pod is deleted. The 2-VM cap is unchanged.
 func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool {
 	rec.mu.Lock()
 	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
@@ -244,14 +245,19 @@ func (e *Engine) restartExitedSidecars(ctx context.Context, rec *podRecord) bool
 			e.holdSidecar(ctx, rec, c.Name, st, msg)
 			continue
 		}
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
+		}
 		if err := e.sidecar.Create(ctx, pod, c, volRoot); err != nil {
-			rec.mu.Lock()
-			phase := rec.phase
-			rec.mu.Unlock()
-			if (phase != corev1.PodRunning && phase != corev1.PodPending) || ctx.Err() != nil {
+			if ctx.Err() != nil || !podActive(rec) {
 				return false
 			}
 			e.fail(rec, fmt.Errorf("sidecar %s restart: %w", c.Name, err))
+			return false
+		}
+		// Create may have started the container after Delete cancelled.
+		// Leave it for RemovePod, which runs once this watch returns.
+		if ctx.Err() != nil || !podActive(rec) {
 			return false
 		}
 		if e.sidecarBackOff != nil {

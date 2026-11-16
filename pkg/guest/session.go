@@ -7,11 +7,19 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
 	callBuf   = 8
 	streamBuf = 32
+
+	// streamConsumerGrace is how long a full stream buffer waits for its
+	// reader before the stream is dropped. A reader that is runnable but
+	// not yet scheduled — a burst of exec stdout frames — drains inside
+	// this window. A reader that never drains costs one wait, then the
+	// connection accepts other calls again.
+	streamConsumerGrace = 200 * time.Millisecond
 )
 
 // Session is a multiplexed framed connection used by both client and tests.
@@ -61,29 +69,66 @@ func (s *Session) failPending(err error) {
 	s.pending = map[string]chan Envelope{}
 }
 
-// dispatch delivers one envelope without blocking readLoop. A full pending
-// channel drops that RPC with "consumer too slow" so other calls still proceed.
+// dispatch delivers one envelope. A full pending channel waits briefly so a
+// live reader can drain. If it does not, that RPC is dropped with "consumer
+// too slow" and readLoop goes back to other calls.
 func (s *Session) dispatch(env Envelope) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ch, ok := s.pending[env.ID]
 	if !ok {
+		s.mu.Unlock()
 		return
 	}
 	select {
 	case ch <- env:
-		if env.Kind == KindResponse || env.Kind == KindError {
-			delete(s.pending, env.ID)
-			close(ch)
-		}
+		s.finishLocked(env, ch)
+		s.mu.Unlock()
+		return
 	default:
-		delete(s.pending, env.ID)
-		select {
-		case ch <- Envelope{ID: env.ID, Kind: KindError, Error: &CallError{Code: "consumer_too_slow", Message: "consumer too slow"}}:
-		default:
+	}
+	s.mu.Unlock()
+
+	timer := time.NewTimer(streamConsumerGrace)
+	select {
+	case ch <- env:
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
 		}
+		s.mu.Lock()
+		if cur, still := s.pending[env.ID]; still && cur == ch {
+			s.finishLocked(env, ch)
+		}
+		s.mu.Unlock()
+	case <-timer.C:
+		s.mu.Lock()
+		s.dropSlowLocked(env.ID, ch)
+		s.mu.Unlock()
+	}
+}
+
+// finishLocked closes the stream after its terminal frame. The caller holds s.mu.
+func (s *Session) finishLocked(env Envelope, ch chan Envelope) {
+	if env.Kind == KindResponse || env.Kind == KindError {
+		delete(s.pending, env.ID)
 		close(ch)
 	}
+}
+
+// dropSlowLocked forgets a stream whose reader did not drain in time.
+// The caller holds s.mu.
+func (s *Session) dropSlowLocked(id string, ch chan Envelope) {
+	if s.pending[id] != ch {
+		return
+	}
+	delete(s.pending, id)
+	select {
+	case ch <- Envelope{ID: id, Kind: KindError, Error: &CallError{Code: "consumer_too_slow", Message: "consumer too slow"}}:
+	default:
+	}
+	close(ch)
 }
 
 func (s *Session) id() string {

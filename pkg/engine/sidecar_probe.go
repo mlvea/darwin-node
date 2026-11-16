@@ -119,11 +119,11 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 			continue
 		}
 		if ctx.Err() != nil {
-			return true
+			return false
 		}
 		okProbe, msg := runSidecarProbe(ctx, e.sidecar, pod.Namespace, pod.Name, c.Name, c.StartupProbe)
 		if ctx.Err() != nil {
-			return true
+			return false
 		}
 		rec.mu.Lock()
 		if okProbe {
