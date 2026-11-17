@@ -1126,7 +1126,11 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	case corev1.PodPending:
 		cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: rec.reason, Message: rec.message}
 	case corev1.PodFailed:
-		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 1, Reason: rec.reason, Message: rec.message}
+		code := int32(1)
+		if vmStatus.ExitCode != nil {
+			code = *vmStatus.ExitCode
+		}
+		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: code, Reason: rec.reason, Message: rec.message}
 	case corev1.PodSucceeded:
 		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 0, Reason: rec.reason, Message: rec.message}
 	default:

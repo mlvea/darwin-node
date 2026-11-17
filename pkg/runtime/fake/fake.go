@@ -23,6 +23,9 @@ type Runtime struct {
 	ProbeFn       func(ctx context.Context, req guest.ProbeReq) guest.ProbeRes
 	MetricsFn     func() (guest.MetricsRes, error)
 	MaterializeFn func(req guest.MaterializeReq) guest.MaterializeRes
+	// ExitCode is copied onto every machine status when non-nil. The vz
+	// runtime leaves this unset; PodFailed then keeps exit code 1.
+	ExitCode *int32
 
 	starts   int32
 	running  int32
@@ -242,6 +245,9 @@ func (m *machine) Status() types.VMStatus {
 		FinishedAt: m.finished,
 		AgentOK:    m.agentOK,
 		Transport:  types.TransportLoop,
+	}
+	if m.rt != nil {
+		st.ExitCode = m.rt.ExitCode
 	}
 	if m.state == "" {
 		st.State = types.VMPending
