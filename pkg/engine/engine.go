@@ -963,10 +963,34 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
+	// The watch has returned, so it cannot arm the backoff again. Leaving
+	// the entry would keep a deleted pod's delay for the life of the
+	// process, and a new pod with the same UID would wait it out.
+	rec.mu.Lock()
+	pod := rec.pod
+	rec.mu.Unlock()
+	e.dropSidecarBackoff(pod)
+
 	e.mu.Lock()
 	delete(e.pods, key)
 	e.mu.Unlock()
 	return nil
+}
+
+// dropSidecarBackoff removes crash-loop entries for this pod. client-go's
+// GC only drops an entry after it has been stable for twice the cap, so a
+// Delete has to remove its own keys.
+func (e *Engine) dropSidecarBackoff(pod *corev1.Pod) {
+	if e.sidecarBackOff == nil || pod == nil || pod.UID == "" {
+		return
+	}
+	uid := string(pod.UID)
+	for _, c := range pod.Spec.InitContainers {
+		e.sidecarBackOff.DeleteEntry(uid + "/" + c.Name)
+	}
+	for _, c := range pod.Spec.Containers {
+		e.sidecarBackOff.DeleteEntry(uid + "/" + c.Name)
+	}
 }
 
 // Get returns a pod with status filled.
