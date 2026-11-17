@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/guest"
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
 
@@ -68,8 +69,11 @@ func sidecarStartupBlockLocked(rec *podRecord) (string, bool) {
 
 // tickSidecarStartup runs startup probes for hybrid sidecars. The VM's
 // probes stay on the guest agent; these run against the host container.
-// Past the failure threshold the pod fails and the VM slot is released,
-// the same as the main container's startup probe.
+// Past the failure threshold the container is stopped. The pod restart
+// policy then applies, the same as a container exit: Always and OnFailure
+// start it again and the pod stays up, Never does not and a non-zero kill
+// fails the pod. Kubelet kills a container whose startup probe fails and
+// restarts it under its restart policy; it does not fail the pod outright.
 func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 	rec.mu.Lock()
 	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
@@ -138,11 +142,36 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 		cur.msg = msg
 		rec.mu.Unlock()
 		if fails >= failTh {
-			e.fail(rec, fmt.Errorf("sidecar %s startup probe failed: %s", c.Name, msg))
-			return false
+			if ctx.Err() != nil || !podActive(rec) {
+				return false
+			}
+			// Stop, then let the exit path apply the restart policy. The
+			// container's own exit code is whatever the runtime records.
+			err := e.stopSidecarContainer(ctx, pod.Namespace, pod.Name, c.Name)
+			if ctx.Err() != nil || !podActive(rec) {
+				return false
+			}
+			if err != nil {
+				e.fail(rec, fmt.Errorf("sidecar %s startup probe failed: %s", c.Name, msg))
+				return false
+			}
+			e.events.Warn(ctx, event.ReasonProbeFailed, fmt.Sprintf("sidecar %s startup probe failed: %s", c.Name, msg))
+			e.refreshSidecarStatus(ctx, rec)
+			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
+				return false
+			}
+			return true
 		}
 	}
 	return true
+}
+
+func (e *Engine) stopSidecarContainer(ctx context.Context, ns, name, container string) error {
+	stopper, ok := e.sidecar.(sidecar.ContainerStopper)
+	if !ok {
+		return fmt.Errorf("sidecar runtime cannot stop containers")
+	}
+	return stopper.StopContainer(ctx, ns, name, container)
 }
 
 func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe) (bool, string) {

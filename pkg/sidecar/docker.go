@@ -33,6 +33,7 @@ type dockerAPI interface {
 	ContainerExecCreate(ctx context.Context, container string, config types.ExecConfig) (types.IDResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config types.ExecStartCheck) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (types.ContainerExecInspect, error)
+	ContainerKill(ctx context.Context, containerID, signal string) error
 }
 
 var _ dockerAPI = (*dockercl.Client)(nil)
@@ -196,6 +197,19 @@ func (d *Docker) restartTracked(ctx context.Context, id string) error {
 		return nil
 	}
 	return d.cli.ContainerStart(ctx, id, container.StartOptions{})
+}
+
+// StopContainer kills one sidecar. The daemon keeps the container so the
+// next List reports its exit code and Create can start it again.
+func (d *Docker) StopContainer(ctx context.Context, ns, name, containerName string) error {
+	id, err := d.lookup(ns, name, containerName)
+	if err != nil {
+		return err
+	}
+	if err := d.cli.ContainerKill(ctx, id, "SIGKILL"); err != nil {
+		return fmt.Errorf("docker kill %s: %w", containerName, err)
+	}
+	return nil
 }
 
 func (d *Docker) RemovePod(ctx context.Context, ns, name string, _ int64) error {

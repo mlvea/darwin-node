@@ -31,3 +31,23 @@ func TestMemoryCreateReplacesExitedContainer(t *testing.T) {
 		t.Fatalf("second Create left %+v, want one running container", list)
 	}
 }
+
+func TestMemoryStopContainerReportsKillCode(t *testing.T) {
+	m := NewMemory()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "p"}}
+	c := corev1.Container{Name: "log", Image: "busybox"}
+	ctx := context.Background()
+	if err := m.Create(ctx, pod, c, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.StopContainer(ctx, "ns", "p", "log"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := m.List(ctx, "ns", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].State != "terminated" || list[0].ExitCode != 137 {
+		t.Fatalf("after stop %+v", list)
+	}
+}

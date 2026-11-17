@@ -25,16 +25,35 @@ import (
 // can hold closed. Create leaves it running; it does not exit.
 type probeSidecar struct {
 	sidecar.None
-	mu    sync.Mutex
-	st    sidecar.Status
-	pass  atomic.Bool
-	execs atomic.Int32
+	mu      sync.Mutex
+	st      sidecar.Status
+	pass    atomic.Bool
+	execs   atomic.Int32
+	creates atomic.Int32
+	stops   atomic.Int32
+	stopErr error
 }
 
 func (s *probeSidecar) Create(_ context.Context, _ *corev1.Pod, c corev1.Container, _ string) error {
+	s.creates.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.st = sidecar.Status{Name: c.Name, ID: "mem://" + c.Name, State: "running", StartedAt: time.Now()}
+	return nil
+}
+
+// StopContainer is what a startup probe past its threshold has to call.
+// The container stays in the pod and reports the kill's exit code.
+func (s *probeSidecar) StopContainer(context.Context, string, string, string) error {
+	if s.stopErr != nil {
+		return s.stopErr
+	}
+	s.stops.Add(1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.st.State = "terminated"
+	s.st.ExitCode = 137
+	s.st.FinishedAt = time.Now()
 	return nil
 }
 
@@ -246,9 +265,88 @@ func TestSidecarStartupProbeRerunsAfterRestart(t *testing.T) {
 	t.Fatalf("startup probe did not pass after the sidecar restart: %+v", containerStatus(p, "log"))
 }
 
-func TestSidecarStartupProbeFailureReleasesSlot(t *testing.T) {
+// A startup probe that exhausts its threshold kills the sidecar. The pod
+// restart policy then decides. Always and OnFailure start it again and the
+// pod stays Running with its VM slot. Never does not start it, and the
+// non-zero kill fails the pod the same way any other non-zero sidecar exit
+// does. Restartable init containers in kubelet are restarted from the
+// container policy (Always); hybrid sidecars here follow the pod policy,
+// which is the policy the rest of the sidecar restart path already uses.
+func TestSidecarStartupProbeFailureFollowsRestartPolicy(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy corev1.RestartPolicy
+		fail   bool
+	}{
+		{name: "always", policy: corev1.RestartPolicyAlways},
+		{name: "on-failure", policy: corev1.RestartPolicyOnFailure},
+		{name: "never", policy: corev1.RestartPolicyNever, fail: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := fake.New()
+			sc := &probeSidecar{}
+			e := sidecarEngine(t, rt, sc)
+			pod := hybridPod("side", "uid-side-"+tc.name, tc.policy)
+			pod.Spec.Containers[1].StartupProbe = &corev1.Probe{
+				ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"sidecar-boot"}}},
+				PeriodSeconds:    1,
+				TimeoutSeconds:   1,
+				FailureThreshold: 2,
+			}
+			if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.fail {
+				p := waitPhase(t, e, "default", "side", corev1.PodFailed)
+				if sc.creates.Load() != 1 {
+					t.Fatalf("creates=%d, Never restarted the sidecar", sc.creates.Load())
+				}
+				if sc.stops.Load() < 1 {
+					t.Fatalf("stops=%d, startup failure did not stop the container", sc.stops.Load())
+				}
+				if !strings.Contains(p.Status.Message, "exited 137") {
+					t.Fatalf("message %q, want the runtime exit code", p.Status.Message)
+				}
+				waitVMReaped(t, e, rt, "side", "uid-side-"+tc.name)
+				return
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				p, err := e.Get("default", "side")
+				if err == nil && p.Status.Phase == corev1.PodFailed {
+					t.Fatalf("startup probe failed the pod: %s", p.Status.Message)
+				}
+				side := (*corev1.ContainerStatus)(nil)
+				if err == nil {
+					side = containerStatus(p, "log")
+				}
+				if err == nil && p.Status.Phase == corev1.PodRunning && side != nil && side.RestartCount >= 1 {
+					last := side.LastTerminationState.Terminated
+					if last == nil || last.ExitCode != 137 {
+						t.Fatalf("last exit %+v, want the kill code", last)
+					}
+					if e.slots.Used() != 1 || rt.Running() != 1 {
+						t.Fatalf("slots=%d running=%d", e.slots.Used(), rt.Running())
+					}
+					if sc.creates.Load() < 2 || sc.stops.Load() < 1 || sc.execs.Load() < 2 {
+						t.Fatalf("creates=%d stops=%d execs=%d", sc.creates.Load(), sc.stops.Load(), sc.execs.Load())
+					}
+					return
+				}
+				time.Sleep(15 * time.Millisecond)
+			}
+			p, _ := e.Get("default", "side")
+			t.Fatalf("sidecar was not restarted after the startup probe failed: phase=%s creates=%d stops=%d %+v", p.Status.Phase, sc.creates.Load(), sc.stops.Load(), containerStatus(p, "log"))
+		})
+	}
+}
+
+// A runtime that cannot stop the container still fails the pod. There is
+// no restart to apply until the container has actually exited.
+func TestSidecarStartupProbeFailureWithoutStopFailsPod(t *testing.T) {
 	rt := fake.New()
-	sc := &probeSidecar{}
+	sc := &probeSidecar{stopErr: fmt.Errorf("cannot stop")}
 	e := sidecarEngine(t, rt, sc)
 	pod := sidecarStartupPod("side", &corev1.Probe{
 		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"sidecar-boot"}}},
@@ -263,7 +361,10 @@ func TestSidecarStartupProbeFailureReleasesSlot(t *testing.T) {
 	if sc.execs.Load() < 2 {
 		t.Fatalf("execs=%d, startup probe was not run to its failure threshold", sc.execs.Load())
 	}
-	if !strings.Contains(p.Status.Message, "log") || !strings.Contains(p.Status.Message, "startup") {
+	if sc.stops.Load() != 0 {
+		t.Fatalf("stops=%d, the failed stop was counted as a kill", sc.stops.Load())
+	}
+	if !strings.Contains(p.Status.Message, "startup probe failed") {
 		t.Fatalf("message %q", p.Status.Message)
 	}
 	waitVMReaped(t, e, rt, "side", "uid-side")

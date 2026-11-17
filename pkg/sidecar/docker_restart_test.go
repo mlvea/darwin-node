@@ -28,6 +28,7 @@ type scriptedDocker struct {
 	creates     int
 	starts      int
 	removes     int
+	kills       int
 	started     []string
 }
 
@@ -53,6 +54,12 @@ func (f *scriptedDocker) ContainerStart(_ context.Context, id string, _ containe
 
 func (f *scriptedDocker) ContainerRemove(context.Context, string, container.RemoveOptions) error {
 	f.removes++
+	return nil
+}
+
+func (f *scriptedDocker) ContainerKill(context.Context, string, string) error {
+	f.kills++
+	f.running = false
 	return nil
 }
 
@@ -176,5 +183,19 @@ func TestDockerCreateReplacesContainerMissingFromDaemon(t *testing.T) {
 	}
 	if got := d.ids["ns/p"]["log"]; got != "new-id" {
 		t.Fatalf("id %q", got)
+	}
+}
+
+func TestDockerStopContainerKills(t *testing.T) {
+	cli := &scriptedDocker{running: true}
+	d := trackedDocker(cli)
+	if err := d.StopContainer(context.Background(), "ns", "p", "log"); err != nil {
+		t.Fatal(err)
+	}
+	if cli.kills != 1 || cli.running {
+		t.Fatalf("kills=%d running=%v, startup failure did not kill the container", cli.kills, cli.running)
+	}
+	if _, ok := d.ids["ns/p"]["log"]; !ok {
+		t.Fatal("kill removed the container id")
 	}
 }
