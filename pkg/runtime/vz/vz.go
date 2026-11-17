@@ -155,23 +155,25 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 		case <-ctx.Done():
 		}
 	}
+	var stopErr error
 	if m.vm.State() != vz.VirtualMachineStateStopped {
-		if err := m.vm.Stop(); err != nil {
-			return err
-		}
+		stopErr = m.vm.Stop()
 	}
-	if m.listener != nil {
-		_ = m.listener.Close()
-		m.listener = nil
-	}
+	// A nil *serialConsole passed as an io.Closer is not a nil interface
+	// and Close would panic. Pass a nil interface instead.
+	var console io.Closer
 	if m.console != nil {
-		// Release the pipe pairs so bridges and readers unblock.
-		_ = m.console.Close()
-		m.console = nil
+		console = m.console
 	}
-	now := time.Now()
-	m.finished = &now
-	return nil
+	// Close the listener and console even when Stop fails. finishStop
+	// leaves finished unset on that path.
+	finished, err := finishStop(stopErr, m.listener, console, time.Now())
+	m.listener = nil
+	m.console = nil
+	if finished != nil {
+		m.finished = finished
+	}
+	return err
 }
 
 func (m *machine) Status() types.VMStatus {
