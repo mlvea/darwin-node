@@ -25,7 +25,7 @@ func drainEngine(t *testing.T, cfg config.Config, sc sidecar.Runtime) (*Engine, 
 	}
 	rt := fake.New()
 	e := New(cfg, slots, rt, sc, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e, rt
 }
 
@@ -128,7 +128,7 @@ func TestDrainHonorsContextBudget(t *testing.T) {
 	e := New(cfg, slots, rt, sc, event.Nop{}, "10.0.0.1")
 	// Close force-stops whatever the budget left behind, and that path calls
 	// RemovePod with a context that is not the drain context.
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	t.Cleanup(func() { close(unblock) })
 
 	pods := []struct{ name, uid string }{{"pa", "uid-a"}, {"pb", "uid-b"}}

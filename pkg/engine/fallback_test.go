@@ -70,7 +70,7 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 	cfg.AgentReadyTimeout = 3 * time.Second
 	cfg.AllowNATWorkloads = true
 	e := New(cfg, slots, &hangDialRuntime{Runtime: fake.New()}, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 
 	uid := "uid-fb"
 	var accepted sync.Mutex

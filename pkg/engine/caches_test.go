@@ -180,7 +180,7 @@ func TestFailedStartDoesNotSnapshotCaches(t *testing.T) {
 		return 0, nil
 	}
 	e := New(cfg, slotTable, rt, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 
 	pod := cachePod("cf", "uid-cf", map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"})
 	pod.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{

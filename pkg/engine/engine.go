@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -88,9 +89,17 @@ type Engine struct {
 	lastImage  atomic.Value // string: most recently booted image ref
 	draining   atomic.Bool
 
+	closeOnce    sync.Once
+	closeErr     error
+	closeTimeout time.Duration // tests shorten the deadline; zero uses defaultCloseTimeout
+
 	mu   sync.RWMutex
 	pods map[string]*podRecord
 }
+
+// defaultCloseTimeout bounds Close when Create, Start, Stop, or RemovePod
+// does not return. The slot stays held until that call finishes.
+const defaultCloseTimeout = 30 * time.Second
 
 type podRecord struct {
 	mu sync.Mutex
@@ -166,18 +175,62 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 
 // Close rejects new creates, stops the warm pool, and force-stops every pod
 // machine still registered. Slots are released and cache volumes are
-// snapshotted through the normal delete path. A second call is a no-op.
-// Graceful shutdown still goes through Drain first; Close is what runs
-// when the drain budget is exhausted or draining was skipped.
-func (e *Engine) Close() {
-	e.draining.Store(true)
-	e.shutdownWarmPool()
-	e.stopPodMachines()
+// snapshotted through the normal delete path. A second call returns the
+// same error and does not stop anything again.
+//
+// A Create, Start, Stop, or RemovePod that does not return within the
+// deadline does not keep Close waiting. The error is logged and returned.
+// The VM slot stays held until that call returns and the normal path
+// releases it, so a VM that might still be booting is still accounted
+// against the 2-VM cap. Graceful shutdown still goes through Drain first;
+// Close is what runs when the drain budget is exhausted or draining was
+// skipped.
+func (e *Engine) Close() error {
+	e.closeOnce.Do(func() {
+		e.draining.Store(true)
+		e.closeErr = errors.Join(e.shutdownWarmPool(), e.stopPodMachines())
+	})
+	return e.closeErr
 }
+
+func (e *Engine) closeDeadline() time.Duration {
+	if e.closeTimeout > 0 {
+		return e.closeTimeout
+	}
+	return defaultCloseTimeout
+}
+
+// callWithin runs fn and returns errCloseDeadline if it is still running
+// when the deadline passes. fn is left running: the caller must not release
+// a VM slot that fn might still boot.
+func callWithin(d time.Duration, fn func()) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		select {
+		case <-done:
+			return nil
+		default:
+			return errCloseDeadline
+		}
+	}
+}
+
+var errCloseDeadline = errors.New("close deadline exceeded")
 
 // stopPodMachines force-stops whatever is still registered. Grace is zero.
 // When Drain ran, preStop and the guest shutdown RPC already had their turn.
-func (e *Engine) stopPodMachines() {
+// Pods are stopped together so one stuck call cannot consume the deadline
+// before the others are asked to stop.
+func (e *Engine) stopPodMachines() error {
 	e.mu.RLock()
 	victims := make([]drainVictim, 0, len(e.pods))
 	for _, rec := range e.pods {
@@ -195,9 +248,31 @@ func (e *Engine) stopPodMachines() {
 		}
 		return victims[i].name < victims[j].name
 	})
+	d := e.closeDeadline()
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
 	for _, v := range victims {
-		_ = e.Delete(context.Background(), v.ns, v.name, 0)
+		wg.Add(1)
+		go func(v drainVictim) {
+			defer wg.Done()
+			if err := callWithin(d, func() {
+				_ = e.Delete(context.Background(), v.ns, v.name, 0)
+			}); err == nil {
+				return
+			}
+			msg := fmt.Sprintf("close: pod %s/%s still stopping after %s; VM slot kept", v.ns, v.name, d)
+			slog.Error(msg)
+			e.events.Warn(context.Background(), event.ReasonFailed, msg)
+			mu.Lock()
+			errs = append(errs, errors.New(msg))
+			mu.Unlock()
+		}(v)
 	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 func (e *Engine) Slots() *capacity.Slots { return e.slots }
@@ -1027,11 +1102,12 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	st := rec.machine
 	ip := rec.pod.Status.PodIP
 	var vmState types.VMState
+	var vmStatus types.VMStatus
 	if st != nil {
-		vs := st.Status()
-		vmState = vs.State
-		if vs.IP != "" {
-			ip = vs.IP
+		vmStatus = st.Status()
+		vmState = vmStatus.State
+		if vmStatus.IP != "" {
+			ip = vmStatus.IP
 		}
 	}
 	started := rec.startupDone && rec.agentOK && rec.phase == corev1.PodRunning

@@ -34,7 +34,7 @@ func deathEngine(t *testing.T) *Engine {
 	cfg.AllowNATWorkloads = true
 	cfg.ProbeInterval = 20 * time.Millisecond
 	e := New(cfg, slots, fake.New(), sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e
 }
 

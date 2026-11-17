@@ -88,7 +88,9 @@ func (g *shutdownGate) Graceful(grace time.Duration) {
 		g.mu.Unlock()
 	}
 	if eng != nil {
-		eng.Close()
+		if err := eng.Close(); err != nil {
+			slog.Warn("close incomplete", "error", err)
+		}
 	}
 	close(g.finished)
 	g.holdIfForced()
@@ -119,7 +121,9 @@ func (g *shutdownGate) Force() {
 	eng := g.eng
 	g.mu.Unlock()
 	if eng != nil {
-		eng.Close()
+		if err := eng.Close(); err != nil {
+			slog.Warn("close incomplete", "error", err)
+		}
 	}
 	close(g.finished)
 }

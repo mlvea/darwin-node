@@ -111,7 +111,7 @@ func injectEngine(t *testing.T, fail failMode) *Engine {
 	}
 	rt := &injectRuntime{Runtime: inner, fail: fail, times: 1}
 	e := New(cfg, slots, rt, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e
 }
 
@@ -190,7 +190,7 @@ func TestWarmBootFailureCleansUp(t *testing.T) {
 	cfg.WarmImage = warmImg
 	e := New(cfg, slots, &injectRuntime{Runtime: fake.New(), fail: failCreate, times: 5},
 		sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 
 	// Give the one-second replenisher a couple of ticks to fail.
 	time.Sleep(1600 * time.Millisecond)

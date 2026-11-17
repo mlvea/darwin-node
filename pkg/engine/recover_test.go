@@ -176,7 +176,7 @@ func TestNewDropsYoungOrphansWithoutPinningSlots(t *testing.T) {
 	cfg.AgentReadyTimeout = 5 * time.Second
 	cfg.AllowNATWorkloads = true
 	e := New(cfg, slots, fake.New(), sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 
 	if _, err := os.Stat(secret); !os.IsNotExist(err) {
 		t.Fatalf("young secret still on disk: %v", err)

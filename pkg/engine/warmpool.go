@@ -397,16 +397,51 @@ func (e *Engine) reclaimWarmForPod(ref string, adoptable bool) (entry *warmEntry
 }
 
 // shutdownWarmPool stops all warm VMs and releases their slots. It waits for
-// in-flight boots to land first so nothing outlives the call.
-func (e *Engine) shutdownWarmPool() {
+// in-flight boots to land first so nothing outlives the call. A boot that
+// does not return keeps its slot; Close logs that and does not release it.
+func (e *Engine) shutdownWarmPool() error {
 	if e.warmCancel != nil {
 		e.warmCancel()
 	}
 	e.warm.mu.Lock()
 	e.warm.closed = true
 	e.warm.mu.Unlock()
-	e.warmBootWG.Wait()
-	for _, entry := range e.warm.drain() {
-		e.stopWarmEntry(entry)
+	d := e.closeDeadline()
+	var errs []error
+	if err := callWithin(d, e.warmBootWG.Wait); err != nil {
+		msg := fmt.Sprintf("close: warm boot still in flight after %s; VM slot kept", d)
+		slog.Error(msg)
+		e.events.Warn(context.Background(), event.ReasonFailed, msg)
+		errs = append(errs, errors.New(msg))
 	}
+	errs = append(errs, e.stopWarmEntries(d))
+	return errors.Join(errs...)
+}
+
+// stopWarmEntries stops VMs that have already joined the pool. Each stop has
+// its own deadline. A stop that does not return leaves that slot held.
+func (e *Engine) stopWarmEntries(d time.Duration) error {
+	entries := e.warm.drain()
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
+	for _, entry := range entries {
+		wg.Add(1)
+		go func(entry *warmEntry) {
+			defer wg.Done()
+			if err := callWithin(d, func() { e.stopWarmEntry(entry) }); err == nil {
+				return
+			}
+			msg := fmt.Sprintf("close: warm VM %s still stopping after %s; VM slot kept", entry.slotID, d)
+			slog.Error(msg)
+			e.events.Warn(context.Background(), event.ReasonFailed, msg)
+			mu.Lock()
+			errs = append(errs, errors.New(msg))
+			mu.Unlock()
+		}(entry)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }

@@ -90,7 +90,7 @@ func engineOnCache(t *testing.T, cache string) *Engine {
 	cfg.AgentReadyTimeout = 5 * time.Second
 	cfg.AllowNATWorkloads = true
 	e := New(cfg, slots, fake.New(), sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e
 }
 
