@@ -68,7 +68,7 @@ func newInteractiveEngine(t *testing.T, cfg config.Config, rt *fake.Runtime) *En
 		t.Fatal(err)
 	}
 	e := New(cfg, slots, rt, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e
 }
 

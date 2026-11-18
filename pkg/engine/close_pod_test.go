@@ -31,7 +31,7 @@ func closeTestEngine(t *testing.T) (*Engine, *fake.Runtime) {
 	cfg.AllowNATWorkloads = true
 	rt := fake.New()
 	e := New(cfg, slots, rt, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e, rt
 }
 
@@ -50,7 +50,9 @@ func TestCloseStopsRunningPodVMs(t *testing.T) {
 		t.Fatalf("running VMs before close: %d", got)
 	}
 
-	e.Close()
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := rt.Running(); got != 0 {
 		t.Fatalf("Close left %d VM(s) running", got)
@@ -91,7 +93,9 @@ func TestCloseSnapshotsCacheOfPodStillRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e.Close()
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := os.ReadFile(filepath.Join(e.cacheStorePath("default", "xc"), "state.bin"))
 	if err != nil || string(got) != "close-me" {

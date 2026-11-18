@@ -48,6 +48,25 @@ func (m *Memory) Create(_ context.Context, pod *corev1.Pod, c corev1.Container, 
 	return nil
 }
 
+// StopContainer marks the container killed. 137 is the exit code a
+// SIGKILL leaves, which is what Docker reports for the same call.
+func (m *Memory) StopContainer(_ context.Context, ns, name, container string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	list := m.pods[key(ns, name)]
+	for i := range list {
+		if list[i].Name != container {
+			continue
+		}
+		list[i].State = "terminated"
+		list[i].ExitCode = 137
+		list[i].FinishedAt = time.Now()
+		list[i].Error = "killed"
+		return nil
+	}
+	return fmt.Errorf("sidecar %s not found", container)
+}
+
 func (m *Memory) RemovePod(_ context.Context, ns, name string, _ int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

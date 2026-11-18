@@ -453,6 +453,55 @@ func TestCloseDuringCrashLoopBackoffDoesNotStartSidecar(t *testing.T) {
 	}
 }
 
+// Delete during CrashLoopBackOff has to return without waiting out the
+// backoff. The slot is the pod's, and kubelet frees it when the pod is
+// deleted. A backoff that swallowed Delete would leave the slot held.
+func TestDeleteDuringCrashLoopBackoffFreesTheSlot(t *testing.T) {
+	rt := fake.New()
+	sc := newRestartingSidecar()
+	sc.exitAlways["log"] = 1
+	e := sidecarEngine(t, rt, sc)
+	if err := e.Create(context.Background(), hybridPod("hy", "uid-hy-del", corev1.RestartPolicyAlways), Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := e.Get("default", "hy")
+		side := (*corev1.ContainerStatus)(nil)
+		if err == nil {
+			side = containerStatus(p, "log")
+		}
+		if err == nil && p.Status.Phase == corev1.PodRunning && sc.createsOf("log") == 2 &&
+			side != nil && side.State.Waiting != nil && side.State.Waiting.Reason == "CrashLoopBackOff" {
+			break
+		}
+		if err == nil && p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("crash loop failed the pod: %s", p.Status.Message)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sc.createsOf("log") != 2 {
+		t.Fatalf("creates=%d, backoff was not armed", sc.createsOf("log"))
+	}
+	deleted := make(chan error, 1)
+	go func() { deleted <- e.Delete(context.Background(), "default", "hy", 0) }()
+	select {
+	case err := <-deleted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Delete did not return during CrashLoopBackOff")
+	}
+	if rt.Running() != 0 || e.slots.Used() != 0 {
+		t.Fatalf("running=%d slots=%d, backoff kept the slot after Delete", rt.Running(), e.slots.Used())
+	}
+	if err := e.Create(context.Background(), samplePod("next", "uid-hy-next"), Credentials{}); err != nil {
+		t.Fatalf("next pod after delete: %v", err)
+	}
+	waitPhase(t, e, "default", "next", corev1.PodRunning)
+}
+
 // A crash-looping sidecar keeps the pod Running and holds one of the two
 // VM slots. That is the kubelet rule: CrashLoopBackOff delays the next
 // start and does not evict the pod. The other slot still admits a pod.

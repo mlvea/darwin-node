@@ -54,8 +54,10 @@ host and are started normally after adoption.
 ## Shutdown
 
 `Engine.Close()` marks the engine draining, cancels the replenisher,
-waits for any in-flight warm boot to land, stops every pooled guest, and
-then force-stops any pod machine still registered. Slots and overlay
+waits up to 30 seconds for any in-flight warm boot, stops every pooled
+guest, and then force-stops any pod machine still registered. A boot or
+stop that is still running at that deadline is logged and its slot stays
+held until the call returns. On the normal path, slots and overlay
 directories are released, and a pod's cache volumes are snapshotted.
 A second SIGINT/SIGTERM cancels the drain and still runs that stop
 before the process exits. A crash skips it.

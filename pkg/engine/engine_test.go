@@ -390,7 +390,7 @@ func TestInitContainerFailureKeepsExitCode(t *testing.T) {
 	cfg.AgentReadyTimeout = 5 * time.Second
 	cfg.AllowNATWorkloads = true
 	e := New(cfg, slots, fake.New(), exitInitSidecar{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	pod := samplePod("infail", "uid-infail")
 	pod.Spec.InitContainers = []corev1.Container{{Name: "setup", Image: "busybox"}}
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {

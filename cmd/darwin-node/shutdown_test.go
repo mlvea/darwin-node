@@ -206,7 +206,7 @@ func newSignalEngine(t *testing.T, sc sidecar.Runtime) (*engine.Engine, *fake.Ru
 	cfg.AllowNATWorkloads = true
 	rt := fake.New()
 	eng := engine.New(cfg, slots, rt, sc, event.Nop{}, "10.0.0.1")
-	t.Cleanup(eng.Close)
+	t.Cleanup(func() { _ = eng.Close() })
 	return eng, rt
 }
 

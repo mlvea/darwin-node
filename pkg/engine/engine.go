@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -88,9 +89,32 @@ type Engine struct {
 	lastImage  atomic.Value // string: most recently booted image ref
 	draining   atomic.Bool
 
+	closeOnce    sync.Once
+	closeErr     error
+	closeTimeout time.Duration // tests shorten the deadline; zero uses defaultCloseTimeout
+	reapTimeout  time.Duration // tests shorten the post-deadline reap; zero uses defaultReapTimeout
+
+	// Abandoned boots are VMs whose Create or Start was still running when
+	// Close returned. flights counts those calls. The reap polls it instead
+	// of waiting on a goroutine that would outlive the timeout.
+	abandonedMu sync.Mutex
+	inflight    map[string]abandonedBoot
+	abandoned   []abandonedBoot
+	settled     map[string]struct{}
+	flights     int
+
+	// cacheSnapMu serializes snapshot and restore of one cache store.
+	// Two pods in a namespace can name the same store, and Close deletes
+	// those pods together.
+	cacheSnapMu sync.Mutex
+
 	mu   sync.RWMutex
 	pods map[string]*podRecord
 }
+
+// defaultCloseTimeout bounds Close when Create, Start, Stop, or RemovePod
+// does not return. The slot stays held until that call finishes.
+const defaultCloseTimeout = 30 * time.Second
 
 type podRecord struct {
 	mu sync.Mutex
@@ -166,18 +190,80 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 
 // Close rejects new creates, stops the warm pool, and force-stops every pod
 // machine still registered. Slots are released and cache volumes are
-// snapshotted through the normal delete path. A second call is a no-op.
-// Graceful shutdown still goes through Drain first; Close is what runs
-// when the drain budget is exhausted or draining was skipped.
-func (e *Engine) Close() {
-	e.draining.Store(true)
-	e.shutdownWarmPool()
-	e.stopPodMachines()
+// snapshotted through the normal delete path. A second call returns the
+// same error and does not stop anything again.
+//
+// A Create, Start, Stop, or RemovePod that does not return within the
+// deadline does not keep Close waiting. The error is logged and returned.
+// The VM slot stays held until that call returns and the normal path
+// releases it, so a VM that might still be booting is still accounted
+// against the 2-VM cap. Process exit calls FinishShutdown, which waits a
+// short extra bound and records whatever is still in flight. Graceful
+// shutdown still goes through Drain first; Close is what runs when the
+// drain budget is exhausted or draining was skipped.
+func (e *Engine) Close() error {
+	e.closeOnce.Do(func() {
+		e.draining.Store(true)
+		e.closeErr = errors.Join(e.shutdownWarmPool(), e.stopPodMachines())
+	})
+	return e.closeErr
 }
+
+func (e *Engine) closeDeadline() time.Duration {
+	if e.closeTimeout > 0 {
+		return e.closeTimeout
+	}
+	return defaultCloseTimeout
+}
+
+// callWithin runs fn and returns errCloseDeadline if it is still running
+// when the deadline passes. fn is left running: the caller must not release
+// a VM slot that fn might still boot. A non-nil boot is recorded when the
+// deadline fires. A nil boot records every warm boot still in flight.
+// The flight is counted until fn returns, so FinishShutdown can tell a
+// late return from a boot that is still going.
+func (e *Engine) callWithin(d time.Duration, boot *abandonedBoot, fn func()) error {
+	var noted abandonedBoot
+	noteOne := boot != nil && boot.ID != ""
+	if noteOne {
+		noted = *boot
+	}
+	done := make(chan struct{})
+	e.beginFlight()
+	go func() {
+		defer close(done)
+		defer e.endFlight(noted, noteOne)
+		fn()
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		select {
+		case <-done:
+			return nil
+		default:
+			if boot != nil {
+				if noteOne {
+					e.noteAbandoned(noted)
+				}
+			} else {
+				e.noteInflightWarm()
+			}
+			return errCloseDeadline
+		}
+	}
+}
+
+var errCloseDeadline = errors.New("close deadline exceeded")
 
 // stopPodMachines force-stops whatever is still registered. Grace is zero.
 // When Drain ran, preStop and the guest shutdown RPC already had their turn.
-func (e *Engine) stopPodMachines() {
+// Pods are stopped together so one stuck call cannot consume the deadline
+// before the others are asked to stop.
+func (e *Engine) stopPodMachines() error {
 	e.mu.RLock()
 	victims := make([]drainVictim, 0, len(e.pods))
 	for _, rec := range e.pods {
@@ -185,6 +271,7 @@ func (e *Engine) stopPodMachines() {
 		victims = append(victims, drainVictim{
 			ns:   rec.pod.Namespace,
 			name: rec.pod.Name,
+			uid:  string(rec.pod.UID),
 		})
 		rec.mu.Unlock()
 	}
@@ -195,9 +282,32 @@ func (e *Engine) stopPodMachines() {
 		}
 		return victims[i].name < victims[j].name
 	})
+	d := e.closeDeadline()
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
 	for _, v := range victims {
-		_ = e.Delete(context.Background(), v.ns, v.name, 0)
+		wg.Add(1)
+		go func(v drainVictim) {
+			defer wg.Done()
+			boot := abandonedBoot{ID: v.uid, Kind: abandonedPodKind, Ref: v.ns + "/" + v.name}
+			if err := e.callWithin(d, &boot, func() {
+				_ = e.Delete(context.Background(), v.ns, v.name, 0)
+			}); err == nil {
+				return
+			}
+			msg := fmt.Sprintf("close: pod %s/%s still stopping after %s; VM slot kept", v.ns, v.name, d)
+			slog.Error(msg)
+			e.events.Warn(context.Background(), event.ReasonFailed, msg)
+			mu.Lock()
+			errs = append(errs, errors.New(msg))
+			mu.Unlock()
+		}(v)
 	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 func (e *Engine) Slots() *capacity.Slots { return e.slots }
@@ -865,8 +975,8 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 func (e *Engine) Draining() bool { return e.draining.Load() }
 
 type drainVictim struct {
-	ns, name string
-	grace    int64
+	ns, name, uid string
+	grace         int64
 }
 
 // Drain stops every pod gracefully, honoring each pod's termination grace
@@ -963,10 +1073,34 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
+	// The watch has returned, so it cannot arm the backoff again. Leaving
+	// the entry would keep a deleted pod's delay for the life of the
+	// process, and a new pod with the same UID would wait it out.
+	rec.mu.Lock()
+	pod := rec.pod
+	rec.mu.Unlock()
+	e.dropSidecarBackoff(pod)
+
 	e.mu.Lock()
 	delete(e.pods, key)
 	e.mu.Unlock()
 	return nil
+}
+
+// dropSidecarBackoff removes crash-loop entries for this pod. client-go's
+// GC only drops an entry after it has been stable for twice the cap, so a
+// Delete has to remove its own keys.
+func (e *Engine) dropSidecarBackoff(pod *corev1.Pod) {
+	if e.sidecarBackOff == nil || pod == nil || pod.UID == "" {
+		return
+	}
+	uid := string(pod.UID)
+	for _, c := range pod.Spec.InitContainers {
+		e.sidecarBackOff.DeleteEntry(uid + "/" + c.Name)
+	}
+	for _, c := range pod.Spec.Containers {
+		e.sidecarBackOff.DeleteEntry(uid + "/" + c.Name)
+	}
 }
 
 // Get returns a pod with status filled.
@@ -1003,11 +1137,12 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	st := rec.machine
 	ip := rec.pod.Status.PodIP
 	var vmState types.VMState
+	var vmStatus types.VMStatus
 	if st != nil {
-		vs := st.Status()
-		vmState = vs.State
-		if vs.IP != "" {
-			ip = vs.IP
+		vmStatus = st.Status()
+		vmState = vmStatus.State
+		if vmStatus.IP != "" {
+			ip = vmStatus.IP
 		}
 	}
 	started := rec.startupDone && rec.agentOK && rec.phase == corev1.PodRunning
@@ -1026,7 +1161,11 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	case corev1.PodPending:
 		cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: rec.reason, Message: rec.message}
 	case corev1.PodFailed:
-		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 1, Reason: rec.reason, Message: rec.message}
+		code := int32(1)
+		if vmStatus.ExitCode != nil {
+			code = *vmStatus.ExitCode
+		}
+		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: code, Reason: rec.reason, Message: rec.message}
 	case corev1.PodSucceeded:
 		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 0, Reason: rec.reason, Message: rec.message}
 	default:

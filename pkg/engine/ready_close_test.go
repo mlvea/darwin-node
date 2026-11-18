@@ -104,7 +104,7 @@ func TestReadyFailureClosesAgentConn(t *testing.T) {
 	cfg.AllowNATWorkloads = true
 	closed := make(chan struct{})
 	e := New(cfg, slots, &readyFailRuntime{inner: fake.New(), closed: closed}, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	if err := e.Create(context.Background(), samplePod("rdy", "uid-rdy"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}

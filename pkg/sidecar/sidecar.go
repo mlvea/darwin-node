@@ -21,6 +21,15 @@ type Runtime interface {
 	Exec(ctx context.Context, namespace, name, container string, cmd []string, attach api.AttachIO) error
 }
 
+// ContainerStopper stops one container and leaves it in place. A startup
+// probe that has exhausted its failure threshold uses this so the pod
+// restart policy can start the container again. List then reports the
+// runtime's exit code. Runtimes that do not implement it cannot restart
+// the container.
+type ContainerStopper interface {
+	StopContainer(ctx context.Context, namespace, name, container string) error
+}
+
 // Status is a sidecar container snapshot.
 type Status struct {
 	Name       string

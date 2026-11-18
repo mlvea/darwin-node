@@ -159,7 +159,7 @@ func newSignalEng(t *testing.T, rt runtime.Runtime, sc sidecar.Runtime) *engine.
 	cfg.AllowNATWorkloads = true
 	cfg.ProbeInterval = 20 * time.Millisecond
 	eng := engine.New(cfg, slots, rt, sc, event.Nop{}, "10.0.0.1")
-	t.Cleanup(eng.Close)
+	t.Cleanup(func() { _ = eng.Close() })
 	return eng
 }
 

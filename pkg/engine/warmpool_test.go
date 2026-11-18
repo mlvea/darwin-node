@@ -64,7 +64,7 @@ func warmEngine(t *testing.T, slots int, warmSlots int, img string) (*Engine, *f
 	rt := fake.New()
 	rec := &captureRecorder{}
 	e := New(cfg, slotTable, rt, sidecar.None{}, rec, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	return e, rt, rec
 }
 
@@ -249,7 +249,7 @@ func TestWarmAdoptDialsAfterProbeSessionReleased(t *testing.T) {
 	cfg.AllowNATWorkloads = true
 	inner := fake.New()
 	e := New(cfg, slots, &oneSessionRuntime{inner: inner}, sidecar.None{}, event.Nop{}, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 
 	if err := e.bootWarm(context.Background(), warmImg); err != nil {
 		t.Fatal(err)

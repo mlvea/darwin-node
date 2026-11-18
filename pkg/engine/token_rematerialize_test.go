@@ -101,7 +101,7 @@ func TestProjectedTokenRematerializeNotOKRetries(t *testing.T) {
 	}
 	ev := &refreshEvents{}
 	e := New(cfg, slots, rt, sidecar.None{}, ev, "10.0.0.1")
-	t.Cleanup(e.Close)
+	t.Cleanup(func() { _ = e.Close() })
 	e.SetTokenMinter(func(context.Context, *corev1.Pod) ([]volume.ProjectedToken, error) {
 		return []volume.ProjectedToken{{
 			Volume: "proj", Path: "token", Token: "second",

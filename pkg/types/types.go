@@ -162,4 +162,7 @@ type VMStatus struct {
 	Transport  AgentTransport
 	Message    string
 	Err        error
+	// ExitCode is set when this runtime recorded one. Nil means it has no
+	// code; a failed pod then reports 1 rather than inventing a reason code.
+	ExitCode *int32
 }

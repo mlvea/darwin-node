@@ -90,6 +90,9 @@ SIGTERM and SIGINT trigger a graceful drain before the process exits:
    (`--shutdown-grace-period=0`), `Engine.Close` force-stops every pod VM
    still running, snapshots its cache volumes, and releases its slot. The
    warm pool is paused during the drain and stopped as part of that close.
+   A VM call that is still running after 30 seconds does not hold the
+   close. The error is logged and that slot stays held until the call
+   returns.
 
 A second signal cancels the rest of the drain and still force-stops
 every remaining pod VM (`Engine.Close`: cache snapshot, slot release)
