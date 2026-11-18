@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/docker/docker/api/types"
@@ -21,6 +22,7 @@ import (
 // container this runtime already tracks has to start that container, not
 // pull and create another one with the same name.
 type scriptedDocker struct {
+	mu          sync.Mutex
 	running     bool
 	inspectErr  error
 	failStartID string
@@ -33,16 +35,22 @@ type scriptedDocker struct {
 }
 
 func (f *scriptedDocker) ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error) {
+	f.mu.Lock()
 	f.pulls++
+	f.mu.Unlock()
 	return io.NopCloser(bytes.NewReader(nil)), nil
 }
 
 func (f *scriptedDocker) ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error) {
+	f.mu.Lock()
 	f.creates++
+	f.mu.Unlock()
 	return container.CreateResponse{ID: "new-id"}, nil
 }
 
 func (f *scriptedDocker) ContainerStart(_ context.Context, id string, _ container.StartOptions) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.starts++
 	f.started = append(f.started, id)
 	if id == f.failStartID {
@@ -53,17 +61,23 @@ func (f *scriptedDocker) ContainerStart(_ context.Context, id string, _ containe
 }
 
 func (f *scriptedDocker) ContainerRemove(context.Context, string, container.RemoveOptions) error {
+	f.mu.Lock()
 	f.removes++
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *scriptedDocker) ContainerKill(context.Context, string, string) error {
+	f.mu.Lock()
 	f.kills++
 	f.running = false
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *scriptedDocker) ContainerInspect(_ context.Context, id string) (types.ContainerJSON, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.inspectErr != nil {
 		return types.ContainerJSON{}, f.inspectErr
 	}

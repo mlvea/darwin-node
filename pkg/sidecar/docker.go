@@ -214,7 +214,7 @@ func (d *Docker) StopContainer(ctx context.Context, ns, name, containerName stri
 
 func (d *Docker) RemovePod(ctx context.Context, ns, name string, _ int64) error {
 	d.mu.Lock()
-	ids := d.ids[podKey(ns, name)]
+	ids := copyContainerIDs(d.ids[podKey(ns, name)])
 	delete(d.ids, podKey(ns, name))
 	d.mu.Unlock()
 	var first error
@@ -238,9 +238,22 @@ func (d *Docker) Get(ctx context.Context, ns, name, containerName string) (Statu
 	return inspectJSON(containerName, ins), nil
 }
 
+// copyContainerIDs detaches the id map so List and RemovePod can inspect
+// containers without holding Docker.mu. Create writes that map.
+func copyContainerIDs(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 func (d *Docker) List(ctx context.Context, ns, name string) ([]Status, error) {
 	d.mu.Lock()
-	ids := d.ids[podKey(ns, name)]
+	ids := copyContainerIDs(d.ids[podKey(ns, name)])
 	d.mu.Unlock()
 	var out []Status
 	for cname, id := range ids {

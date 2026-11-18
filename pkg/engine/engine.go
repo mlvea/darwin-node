@@ -92,6 +92,21 @@ type Engine struct {
 	closeOnce    sync.Once
 	closeErr     error
 	closeTimeout time.Duration // tests shorten the deadline; zero uses defaultCloseTimeout
+	reapTimeout  time.Duration // tests shorten the post-deadline reap; zero uses defaultReapTimeout
+
+	// Abandoned boots are VMs whose Create or Start was still running when
+	// Close returned. flights counts those calls. The reap polls it instead
+	// of waiting on a goroutine that would outlive the timeout.
+	abandonedMu sync.Mutex
+	inflight    map[string]abandonedBoot
+	abandoned   []abandonedBoot
+	settled     map[string]struct{}
+	flights     int
+
+	// cacheSnapMu serializes snapshot and restore of one cache store.
+	// Two pods in a namespace can name the same store, and Close deletes
+	// those pods together.
+	cacheSnapMu sync.Mutex
 
 	mu   sync.RWMutex
 	pods map[string]*podRecord
@@ -182,9 +197,10 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 // deadline does not keep Close waiting. The error is logged and returned.
 // The VM slot stays held until that call returns and the normal path
 // releases it, so a VM that might still be booting is still accounted
-// against the 2-VM cap. Graceful shutdown still goes through Drain first;
-// Close is what runs when the drain budget is exhausted or draining was
-// skipped.
+// against the 2-VM cap. Process exit calls FinishShutdown, which waits a
+// short extra bound and records whatever is still in flight. Graceful
+// shutdown still goes through Drain first; Close is what runs when the
+// drain budget is exhausted or draining was skipped.
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.draining.Store(true)
@@ -202,11 +218,21 @@ func (e *Engine) closeDeadline() time.Duration {
 
 // callWithin runs fn and returns errCloseDeadline if it is still running
 // when the deadline passes. fn is left running: the caller must not release
-// a VM slot that fn might still boot.
-func callWithin(d time.Duration, fn func()) error {
+// a VM slot that fn might still boot. A non-nil boot is recorded when the
+// deadline fires. A nil boot records every warm boot still in flight.
+// The flight is counted until fn returns, so FinishShutdown can tell a
+// late return from a boot that is still going.
+func (e *Engine) callWithin(d time.Duration, boot *abandonedBoot, fn func()) error {
+	var noted abandonedBoot
+	noteOne := boot != nil && boot.ID != ""
+	if noteOne {
+		noted = *boot
+	}
 	done := make(chan struct{})
+	e.beginFlight()
 	go func() {
 		defer close(done)
+		defer e.endFlight(noted, noteOne)
 		fn()
 	}()
 	timer := time.NewTimer(d)
@@ -219,6 +245,13 @@ func callWithin(d time.Duration, fn func()) error {
 		case <-done:
 			return nil
 		default:
+			if boot != nil {
+				if noteOne {
+					e.noteAbandoned(noted)
+				}
+			} else {
+				e.noteInflightWarm()
+			}
 			return errCloseDeadline
 		}
 	}
@@ -238,6 +271,7 @@ func (e *Engine) stopPodMachines() error {
 		victims = append(victims, drainVictim{
 			ns:   rec.pod.Namespace,
 			name: rec.pod.Name,
+			uid:  string(rec.pod.UID),
 		})
 		rec.mu.Unlock()
 	}
@@ -258,7 +292,8 @@ func (e *Engine) stopPodMachines() error {
 		wg.Add(1)
 		go func(v drainVictim) {
 			defer wg.Done()
-			if err := callWithin(d, func() {
+			boot := abandonedBoot{ID: v.uid, Kind: abandonedPodKind, Ref: v.ns + "/" + v.name}
+			if err := e.callWithin(d, &boot, func() {
 				_ = e.Delete(context.Background(), v.ns, v.name, 0)
 			}); err == nil {
 				return
@@ -940,8 +975,8 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 func (e *Engine) Draining() bool { return e.draining.Load() }
 
 type drainVictim struct {
-	ns, name string
-	grace    int64
+	ns, name, uid string
+	grace         int64
 }
 
 // Drain stops every pod gracefully, honoring each pod's termination grace

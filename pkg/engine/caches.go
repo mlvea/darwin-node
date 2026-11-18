@@ -110,6 +110,10 @@ func (e *Engine) cacheStorePath(ns, name string) string {
 	return filepath.Join(e.cfg.CacheDir, cacheStoreDirName, ns, name)
 }
 
+// cloneCacheTree is cloneCacheDir. Tests replace it so two snapshots of
+// one store can be forced to overlap.
+var cloneCacheTree = cloneCacheDir
+
 // cloneCacheDir restores a cache tree. On Darwin, prefer a single-shot
 // clonefile(2) of the directory (APFS CoW); fall back to walk+per-file
 // clone/copy when that fails (non-APFS volumes). Elsewhere always use Dir
@@ -127,6 +131,8 @@ func cloneCacheDir(src, dst string) error {
 // present, empty dir otherwise) and returns the virtio-fs shares and link
 // placements that expose them at the annotated guest paths.
 func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placement, error) {
+	e.cacheSnapMu.Lock()
+	defer e.cacheSnapMu.Unlock()
 	caches, err := ParseCacheAnnotations(pod)
 	if err != nil || len(caches) == 0 {
 		return nil, nil, err
@@ -151,7 +157,7 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 			return nil, nil, fmt.Errorf("cache %q: %w", c.Name, err)
 		}
 		if _, err := os.Stat(store); err == nil {
-			if err := cloneCacheDir(store, hostDir); err != nil {
+			if err := cloneCacheTree(store, hostDir); err != nil {
 				return nil, nil, fmt.Errorf("cache %q restore: %w", c.Name, err)
 			}
 			e.events.Normal(context.Background(), event.ReasonCacheRestored, c.Name+" -> "+c.GuestPath)
@@ -172,6 +178,8 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 // snapshotPodCaches clones each declared cache out of the pod dir into the
 // node store. Best-effort: failures are logged and never fail the delete.
 func (e *Engine) snapshotPodCaches(rec *podRecord) {
+	e.cacheSnapMu.Lock()
+	defer e.cacheSnapMu.Unlock()
 	pod := rec.pod
 	if pod == nil {
 		return
@@ -203,7 +211,7 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q: %v", c.Name, err))
 			continue
 		}
-		if err := cloneCacheDir(src, tmp); err != nil {
+		if err := cloneCacheTree(src, tmp); err != nil {
 			_ = os.RemoveAll(tmp)
 			e.events.Warn(context.Background(), event.ReasonCacheSaved, fmt.Sprintf("cache %q clone: %v", c.Name, err))
 			continue

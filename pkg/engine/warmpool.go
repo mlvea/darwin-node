@@ -215,6 +215,8 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 	if err := e.slots.TryAcquire(slotID); err != nil {
 		return err
 	}
+	e.trackBoot(abandonedBoot{ID: slotID, Kind: abandonedWarmKind, Ref: slotID})
+	defer e.untrackBoot(slotID)
 	root := filepath.Join(e.cfg.CacheDir, "warm", fmt.Sprint(seq))
 	diskDir := podMACDir(e.cfg.CacheDir, slotID)
 	token, mac, cpu, mem, machine, probe, err := e.bootWarmMachine(ctx, slotID, ref, root)
@@ -408,7 +410,7 @@ func (e *Engine) shutdownWarmPool() error {
 	e.warm.mu.Unlock()
 	d := e.closeDeadline()
 	var errs []error
-	if err := callWithin(d, e.warmBootWG.Wait); err != nil {
+	if err := e.callWithin(d, nil, e.warmBootWG.Wait); err != nil {
 		msg := fmt.Sprintf("close: warm boot still in flight after %s; VM slot kept", d)
 		slog.Error(msg)
 		e.events.Warn(context.Background(), event.ReasonFailed, msg)
@@ -431,7 +433,8 @@ func (e *Engine) stopWarmEntries(d time.Duration) error {
 		wg.Add(1)
 		go func(entry *warmEntry) {
 			defer wg.Done()
-			if err := callWithin(d, func() { e.stopWarmEntry(entry) }); err == nil {
+			boot := abandonedBoot{ID: entry.slotID, Kind: abandonedWarmKind, Ref: entry.slotID}
+			if err := e.callWithin(d, &boot, func() { e.stopWarmEntry(entry) }); err == nil {
 				return
 			}
 			msg := fmt.Sprintf("close: warm VM %s still stopping after %s; VM slot kept", entry.slotID, d)

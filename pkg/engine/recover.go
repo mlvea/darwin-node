@@ -73,13 +73,17 @@ func (e *Engine) Recover() error {
 	// directories is gone, and so are its VMs.
 	errPods := RecoverCache(e.cfg.CacheDir, e.slots, -1)
 	errWarm := e.sweepWarmOrphans()
+	errBoots := consumeAbandonedBoots(e.cfg.CacheDir, e.slots)
 	if errStores != nil {
 		return errStores
 	}
 	if errPods != nil {
 		return errPods
 	}
-	return errWarm
+	if errWarm != nil {
+		return errWarm
+	}
+	return errBoots
 }
 
 // sweepWarmOrphans removes cache/warm from a previous process. The pool
