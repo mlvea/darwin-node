@@ -39,6 +39,16 @@ type Provider struct {
 	usageAt   time.Time
 	usageHost node.Host
 	usagePct  float64
+
+	healthMu sync.RWMutex
+	health   nodeHealth
+}
+
+// nodeHealth is the node status probe. CreatePod rejects work while it
+// reports the node NotReady. Nil means the process has not wired one
+// (tests that drive the engine directly).
+type nodeHealth interface {
+	NotReady() error
 }
 
 func New(cfg config.Config, eng *engine.Engine, inv node.Inventory, rec event.Recorder) *Provider {
@@ -51,6 +61,32 @@ func New(cfg config.Config, eng *engine.Engine, inv node.Inventory, rec event.Re
 func (p *Provider) Engine() *engine.Engine { return p.engine }
 
 func (p *Provider) Inventory() node.Inventory { return p.inv }
+
+// SetHealth is the live node probe. The virtual-kubelet callback installs
+// the same StatusProvider it returns as the NodeProvider.
+func (p *Provider) SetHealth(h nodeHealth) {
+	if p == nil {
+		return
+	}
+	p.healthMu.Lock()
+	p.health = h
+	p.healthMu.Unlock()
+}
+
+// InstallHealth pings np, rejects future creates while it is NotReady, and
+// copies the probed inventory so the next ConfigureNode publishes it.
+func (p *Provider) InstallHealth(ctx context.Context, np *node.StatusProvider) {
+	if p == nil || np == nil {
+		return
+	}
+	_ = np.Ping(ctx)
+	p.SetHealth(np)
+	inv := np.Inventory()
+	if p.engine != nil {
+		inv.Slots = p.engine.Slots()
+	}
+	p.inv = inv
+}
 
 func (p *Provider) SetCredentialResolver(r CredentialResolver) {
 	p.creds = r
@@ -71,6 +107,14 @@ func (p *Provider) SetCredentialResolver(r CredentialResolver) {
 }
 
 func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
+	p.healthMu.RLock()
+	h := p.health
+	p.healthMu.RUnlock()
+	if h != nil {
+		if err := h.NotReady(); err != nil {
+			return err
+		}
+	}
 	var creds engine.Credentials
 	if p.creds != nil {
 		c, err := p.creds.Resolve(ctx, pod)

@@ -2,6 +2,9 @@ package node
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +17,43 @@ type StatusProvider struct {
 	mu    sync.Mutex
 	inv   Inventory
 	Probe func(context.Context) (Host, error)
+	// Runtime reports whether a VM can be booted. Nil skips the check.
+	Runtime func(context.Context) error
+	// CacheDir is checked for writability when non-empty.
+	CacheDir string
+}
+
+// NotReady is nil when the last probe succeeded. Pod creates use it to
+// reject work while the node conditions say NotReady.
+func (p *StatusProvider) NotReady() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return notReady(p.inv)
+}
+
+func notReady(inv Inventory) error {
+	msg := unreadyMessage(inv)
+	if msg == "" {
+		return nil
+	}
+	return fmt.Errorf("node not ready: %s", msg)
+}
+
+func unreadyMessage(inv Inventory) string {
+	var parts []string
+	if inv.ProbeFailed != "" {
+		parts = append(parts, inv.ProbeFailed)
+	}
+	if inv.RuntimeFailed != "" {
+		parts = append(parts, inv.RuntimeFailed)
+	}
+	if inv.CacheFailed != "" {
+		parts = append(parts, inv.CacheFailed)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func NewStatusProvider(inv Inventory) *StatusProvider {
@@ -21,17 +61,69 @@ func NewStatusProvider(inv Inventory) *StatusProvider {
 }
 
 func (p *StatusProvider) Ping(ctx context.Context) error {
+	p.mu.Lock()
 	probe := p.Probe
+	runtimeCheck := p.Runtime
+	cacheDir := p.CacheDir
+	p.mu.Unlock()
 	if probe == nil {
 		probe = ProbeHost
 	}
-	h, err := probe(ctx)
-	if err != nil {
-		return nil
+	h, herr := probe(ctx)
+	var rerr error
+	if runtimeCheck != nil {
+		rerr = runtimeCheck(ctx)
+	}
+	var cerr error
+	if cacheDir != "" {
+		cerr = checkCacheWritable(cacheDir)
 	}
 	p.mu.Lock()
-	p.inv.Host = h
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	// Record the failure and return nil. Virtual-kubelet skips the node
+	// status patch and the lease renew when Ping returns an error, which
+	// would freeze the last Ready=True condition. The NotReady bit has to
+	// travel in the status update itself.
+	if herr != nil {
+		p.inv.ProbeFailed = herr.Error()
+	} else {
+		p.inv.Host = h
+		p.inv.ProbeFailed = ""
+	}
+	if runtimeCheck != nil {
+		if rerr != nil {
+			p.inv.RuntimeFailed = rerr.Error()
+		} else {
+			p.inv.RuntimeFailed = ""
+		}
+	}
+	if cacheDir != "" {
+		if cerr != nil {
+			p.inv.CacheFailed = cerr.Error()
+		} else {
+			p.inv.CacheFailed = ""
+		}
+	}
+	return nil
+}
+
+func checkCacheWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("cache dir not writable: %w", err)
+	}
+	f, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return fmt.Errorf("cache dir not writable: %w", err)
+	}
+	name := f.Name()
+	cerr := f.Close()
+	rerr := os.Remove(name)
+	if cerr != nil {
+		return fmt.Errorf("cache dir not writable: %w", cerr)
+	}
+	if rerr != nil {
+		return fmt.Errorf("cache dir not writable: %w", rerr)
+	}
 	return nil
 }
 
