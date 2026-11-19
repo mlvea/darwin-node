@@ -131,16 +131,26 @@ type machine struct {
 func (m *machine) ID() types.MachineID { return m.id }
 
 func (m *machine) Start(ctx context.Context) error {
+	_ = ctx
 	if devs := m.vm.SocketDevices(); len(devs) > 0 {
 		if ln, err := devs[0].Listen(uint32(types.GuestVsockPort)); err == nil {
 			m.listener = ln
 		}
 	}
-	if err := m.vm.Start(); err != nil {
+	// A nil *serialConsole passed as an io.Closer is not a nil interface.
+	var console io.Closer
+	if m.console != nil {
+		console = m.console
+	}
+	started, err := finishStart(m.vm.Start(), m.listener, console, time.Now())
+	if err != nil {
+		// Stop must not close these again. The VM did not come up, or
+		// Start failed after the listener was already open.
+		m.listener = nil
+		m.console = nil
 		return err
 	}
-	now := time.Now()
-	m.started = &now
+	m.started = started
 	return nil
 }
 
