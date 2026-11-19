@@ -142,6 +142,12 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 			defer func() { _ = shutdown(context.Background()) }()
 		}
 	}
+	// A killed process leaves its break-glass sockets in the temp dir.
+	// Sweep before any pod listens. Unit tests do not call this with
+	// os.TempDir, so they do not delete each other's sockets.
+	if err := engine.SweepConsoleSockets(os.TempDir()); err != nil {
+		slog.Warn("stale console sockets", "err", err)
+	}
 	eng := engine.New(cfg, slots, rt, sc, event.Slog{}, host.InternalIP)
 	gate.bind(eng)
 	defer eng.Close()

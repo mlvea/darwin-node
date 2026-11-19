@@ -225,7 +225,15 @@ func writeAbandonedBoots(cacheDir string, boots []abandonedBoot) error {
 		return err
 	}
 	body = append(body, '\n')
-	return os.WriteFile(filepath.Join(cacheDir, abandonedBootsFile), body, 0o600)
+	// Write the new record beside the previous one and rename it into
+	// place. WriteFile would truncate the live file first, so a crash
+	// mid-write would leave neither the old record nor a parseable new one.
+	final := filepath.Join(cacheDir, abandonedBootsFile)
+	tmp := final + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, final)
 }
 
 // consumeAbandonedBoots deletes bundles named by a previous process and
@@ -237,6 +245,9 @@ func consumeAbandonedBoots(cacheDir string, slots *capacity.Slots) error {
 		return nil
 	}
 	path := filepath.Join(cacheDir, abandonedBootsFile)
+	// A crash after the temp write and before the rename leaves the partial
+	// file beside the previous record. The partial is not a record.
+	_ = os.Remove(path + ".tmp")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -246,7 +257,11 @@ func consumeAbandonedBoots(cacheDir string, slots *capacity.Slots) error {
 	}
 	var boots []abandonedBoot
 	if err := json.Unmarshal(body, &boots); err != nil {
-		return err
+		// A truncated record cannot name bundles, and the next start would
+		// fail the same way forever. Drop it. Pod directories are swept
+		// separately, so this does not pin a slot or keep a secret.
+		slog.Error("abandoned boot record dropped", "error", err)
+		return os.Remove(path)
 	}
 	for _, b := range boots {
 		if err := safeSegment("boot id", b.ID); err != nil {
