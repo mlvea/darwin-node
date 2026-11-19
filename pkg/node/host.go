@@ -13,6 +13,15 @@ import (
 	psnet "github.com/shirou/gopsutil/v4/net"
 )
 
+// diskUsage is the host disk read. Tests replace it to simulate a failed disk probe.
+var diskUsage = func(ctx context.Context, path string) (total, used uint64, err error) {
+	d, err := disk.UsageWithContext(ctx, path)
+	if err != nil {
+		return 0, 0, err
+	}
+	return d.Total, d.Used, nil
+}
+
 // ProbeHost reads the current machine. Safe to call from tests; may return
 // zeros on failure (caller should treat that as error).
 func ProbeHost(ctx context.Context) (Host, error) {
@@ -27,10 +36,13 @@ func ProbeHost(ctx context.Context) (Host, error) {
 	if c, err := cpu.CountsWithContext(ctx, true); err == nil {
 		h.LogicalCPUs = int64(c)
 	}
-	if d, err := disk.UsageWithContext(ctx, "/"); err == nil {
-		h.DiskBytes = int64(d.Total)
-		if d.Total > 0 {
-			h.DiskUsedFrac = float64(d.Used) / float64(d.Total)
+	var diskErr error
+	if total, used, err := diskUsage(ctx, "/"); err != nil {
+		diskErr = err
+	} else {
+		h.DiskBytes = int64(total)
+		if total > 0 {
+			h.DiskUsedFrac = float64(used) / float64(total)
 		}
 	}
 	if info, err := host.InfoWithContext(ctx); err == nil {
@@ -62,6 +74,9 @@ func ProbeHost(ctx context.Context) (Host, error) {
 	}
 	if h.LogicalCPUs == 0 || h.MemoryBytes == 0 {
 		return h, fmt.Errorf("incomplete host probe (cpu=%d mem=%d)", h.LogicalCPUs, h.MemoryBytes)
+	}
+	if diskErr != nil {
+		return h, fmt.Errorf("disk probe: %w", diskErr)
 	}
 	return h, nil
 }

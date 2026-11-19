@@ -41,6 +41,14 @@ type Inventory struct {
 	Host  Host
 	Cfg   config.Config
 	Slots *capacity.Slots
+	// ProbeFailed is the latest host-probe error. Empty means the last
+	// probe succeeded, including callers that never probe. While it is set,
+	// memory and disk pressure are Unknown: the fractions are stale.
+	ProbeFailed string
+	// RuntimeFailed is set when the VM runtime cannot boot.
+	RuntimeFailed string
+	// CacheFailed is set when the cache directory is not writable.
+	CacheFailed string
 }
 
 // Capacity returns capacity and allocatable resource lists.
@@ -212,6 +220,12 @@ func mergeTaints(existing, extra []corev1.Taint) []corev1.Taint {
 func Conditions(inv Inventory) []corev1.NodeCondition {
 	now := metav1.Now()
 	ready := corev1.ConditionTrue
+	readyReason, readyMsg := "KubeletReady", "darwin-node is ready"
+	if msg := unreadyMessage(inv); msg != "" {
+		ready = corev1.ConditionFalse
+		readyReason = "KubeletNotReady"
+		readyMsg = msg
+	}
 	vmFull := corev1.ConditionFalse
 	vmReason := "VMSlotsAvailable"
 	vmMsg := "macOS VM slots available"
@@ -228,26 +242,40 @@ func Conditions(inv Inventory) []corev1.NodeCondition {
 	}
 	memPress := corev1.ConditionFalse
 	memReason, memMsg := "HasSufficientMemory", "host memory above reservation"
-	if inv.Host.MemoryUsedFrac > 0.90 {
-		memPress = corev1.ConditionTrue
-		memReason, memMsg = "MemoryPressure", "host memory used > 90%"
-	}
 	diskPress := corev1.ConditionFalse
 	diskReason, diskMsg := "HasNoDiskPressure", "host disk above reservation"
-	if inv.Host.DiskUsedFrac > 0.90 {
-		diskPress = corev1.ConditionTrue
-		diskReason, diskMsg = "DiskPressure", "host disk used > 90%"
+	if inv.ProbeFailed != "" {
+		memPress = corev1.ConditionUnknown
+		memReason, memMsg = "ProbeFailed", inv.ProbeFailed
+		diskPress = corev1.ConditionUnknown
+		diskReason, diskMsg = "ProbeFailed", inv.ProbeFailed
+	} else {
+		if inv.Host.MemoryUsedFrac > 0.90 {
+			memPress = corev1.ConditionTrue
+			memReason, memMsg = "MemoryPressure", "host memory used > 90%"
+		}
+		if inv.Host.DiskUsedFrac > 0.90 {
+			diskPress = corev1.ConditionTrue
+			diskReason, diskMsg = "DiskPressure", "host disk used > 90%"
+		}
+	}
+	guest := corev1.ConditionTrue
+	guestReason, guestMsg := "RuntimeReady", string(inv.Cfg.Runtime)+" runtime selected"
+	if inv.RuntimeFailed != "" {
+		guest = corev1.ConditionFalse
+		guestReason = "RuntimeUnavailable"
+		guestMsg = inv.RuntimeFailed
 	}
 
 	return []corev1.NodeCondition{
-		cond(corev1.NodeReady, ready, now, "KubeletReady", "darwin-node is ready"),
+		cond(corev1.NodeReady, ready, now, readyReason, readyMsg),
 		cond(corev1.NodeMemoryPressure, memPress, now, memReason, memMsg),
 		cond(corev1.NodeDiskPressure, diskPress, now, diskReason, diskMsg),
 		cond(corev1.NodePIDPressure, corev1.ConditionFalse, now, "HasNoPIDPressure", "pid pressure not applicable"),
 		cond(corev1.NodeNetworkUnavailable, corev1.ConditionFalse, now, "RouteCreated", "host network configured"),
 		cond(corev1.NodeConditionType("VMCapacity"), vmFull, now, vmReason, vmMsg),
 		cond(corev1.NodeConditionType("MetalReady"), metal, now, metalReason, "paravirtualized Metal device"),
-		cond(corev1.NodeConditionType("GuestRuntime"), corev1.ConditionTrue, now, "RuntimeReady", string(inv.Cfg.Runtime)+" runtime selected"),
+		cond(corev1.NodeConditionType("GuestRuntime"), guest, now, guestReason, guestMsg),
 	}
 }
 

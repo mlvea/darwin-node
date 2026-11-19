@@ -100,6 +100,18 @@ func attachInput(cfg *vz.VirtualMachineConfiguration) error {
 	return nil
 }
 
+// Available reports whether Virtualization.framework can size a VM.
+// A zero CPU window means the framework is missing or the OS is too old.
+// It does not start a VM.
+func Available() error {
+	min := vz.VirtualMachineConfigurationMinimumAllowedCPUCount()
+	max := vz.VirtualMachineConfigurationMaximumAllowedCPUCount()
+	if min == 0 || max == 0 || min > max {
+		return fmt.Errorf("Virtualization.framework is not available")
+	}
+	return nil
+}
+
 func clampCPU(n uint) (uint, error) {
 	max := vz.VirtualMachineConfigurationMaximumAllowedCPUCount()
 	min := vz.VirtualMachineConfigurationMinimumAllowedCPUCount()

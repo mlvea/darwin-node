@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/darwin-node/darwin-node/pkg/capacity"
+	"github.com/darwin-node/darwin-node/pkg/image"
 )
 
 const defaultPodCacheMaxAge = 24 * time.Hour
@@ -26,6 +27,18 @@ func RecoverCache(cacheDir string, slots *capacity.Slots, maxAge time.Duration) 
 		maxAge = defaultPodCacheMaxAge
 	}
 	podsDir := filepath.Join(cacheDir, "pods")
+	// ReadDir follows a symlink. A pods path that is not a real directory
+	// is removed as itself so the sweep cannot delete another tree.
+	fi, err := os.Lstat(podsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return os.Remove(podsDir)
+	}
 	entries, err := os.ReadDir(podsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -68,12 +81,16 @@ func (e *Engine) Recover() error {
 	if e == nil {
 		return nil
 	}
+	errImages := image.Recover(e.cfg.CacheDir)
 	errStores := recoverCacheStores(e.cfg.CacheDir)
 	// Negative maxAge: no grace period. The process that owned these
 	// directories is gone, and so are its VMs.
 	errPods := RecoverCache(e.cfg.CacheDir, e.slots, -1)
 	errWarm := e.sweepWarmOrphans()
 	errBoots := consumeAbandonedBoots(e.cfg.CacheDir, e.slots)
+	if errImages != nil {
+		return errImages
+	}
 	if errStores != nil {
 		return errStores
 	}
@@ -109,6 +126,16 @@ func recoverCacheStores(cacheDir string) error {
 		return nil
 	}
 	root := filepath.Join(cacheDir, cacheStoreDirName)
+	fi, err := os.Lstat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return os.Remove(root)
+	}
 	nsEnts, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
