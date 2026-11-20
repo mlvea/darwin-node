@@ -10,13 +10,20 @@ import (
 )
 
 func TestProbeTiming(t *testing.T) {
-	initial, period, th := probeTiming(&corev1.Probe{InitialDelaySeconds: 5, PeriodSeconds: 2, FailureThreshold: 4}, 10*time.Second)
+	initial, period, th := probeTiming(&corev1.Probe{InitialDelaySeconds: 5, PeriodSeconds: 2, FailureThreshold: 4})
 	if initial != 5*time.Second || period != 2*time.Second || th != 4 {
 		t.Fatalf("%v %v %d", initial, period, th)
 	}
-	_, period, th = probeTiming(nil, 10*time.Second)
+	_, period, th = probeTiming(nil)
 	if period != 10*time.Second || th != 3 {
 		t.Fatalf("defaults %v %d", period, th)
+	}
+	_, period, th = probeTiming(&corev1.Probe{})
+	if period != 10*time.Second || th != 3 {
+		t.Fatalf("zero period %v %d", period, th)
+	}
+	if probeSuccessThreshold(nil) != 1 || probeSuccessThreshold(&corev1.Probe{SuccessThreshold: 3}) != 3 {
+		t.Fatal("success threshold")
 	}
 }
 

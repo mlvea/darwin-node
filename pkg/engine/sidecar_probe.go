@@ -16,14 +16,27 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// sidecarStartState is the startup probe result for one sidecar generation.
+// sidecarStartState is the probe result for one sidecar generation.
 // at is the container start time the result belongs to. A new start time
-// means the container was restarted and the probe has to pass again.
+// means the container was restarted and every probe starts again.
+// last, liveLast, and readyLast are when that probe last started. Zero
+// means the next sample is due once the initial delay has elapsed.
 type sidecarStartState struct {
 	at    time.Time
 	done  bool
 	fails int32
+	oks   int32
+	last  time.Time
 	msg   string
+
+	liveFails int32
+	liveLast  time.Time
+
+	ready      bool
+	readyOKs   int32
+	readyFails int32
+	readyMsg   string
+	readyLast  time.Time
 }
 
 func sidecarStartupPassed(st *sidecarStartState, s sidecar.Status) bool {
@@ -34,6 +47,30 @@ func sidecarStartupPassed(st *sidecarStartState, s sidecar.Status) bool {
 		return false
 	}
 	return true
+}
+
+func sidecarReadyPassed(st *sidecarStartState, s sidecar.Status) bool {
+	if st == nil || !st.ready {
+		return false
+	}
+	if !s.StartedAt.IsZero() && !st.at.Equal(s.StartedAt) {
+		return false
+	}
+	return true
+}
+
+// sidecarProbeStateLocked returns the probe state for this container start.
+// The caller holds rec.mu. A new start time drops the previous generation.
+func sidecarProbeStateLocked(rec *podRecord, name string, started time.Time) *sidecarStartState {
+	if rec.sidecarStart == nil {
+		rec.sidecarStart = map[string]*sidecarStartState{}
+	}
+	cur := rec.sidecarStart[name]
+	if cur == nil || !cur.at.Equal(started) {
+		cur = &sidecarStartState{at: started}
+		rec.sidecarStart[name] = cur
+	}
+	return cur
 }
 
 // sidecarStartupBlockLocked reports a running sidecar whose startup probe
@@ -61,6 +98,37 @@ func sidecarStartupBlockLocked(rec *podRecord) (string, bool) {
 		msg := "startup probe"
 		if cur := rec.sidecarStart[c.Name]; cur != nil && cur.msg != "" {
 			msg = cur.msg
+		}
+		return fmt.Sprintf("sidecar %s %s", c.Name, msg), true
+	}
+	return "", false
+}
+
+// sidecarReadinessBlockLocked reports a running sidecar whose readiness
+// probe has not passed. The caller holds rec.mu. A sidecar that is not
+// running is left to the SidecarNotRunning condition.
+func sidecarReadinessBlockLocked(rec *podRecord) (string, bool) {
+	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
+		return "", false
+	}
+	byName := make(map[string]sidecar.Status, len(rec.sidecarStatuses))
+	for _, st := range rec.sidecarStatuses {
+		byName[st.Name] = st
+	}
+	for _, c := range rec.pod.Spec.Containers[1:] {
+		if !hasReadinessProbe(c) {
+			continue
+		}
+		s, ok := byName[c.Name]
+		if !ok || s.State != "running" {
+			continue
+		}
+		if sidecarReadyPassed(rec.sidecarStart[c.Name], s) {
+			continue
+		}
+		msg := "readiness probe"
+		if cur := rec.sidecarStart[c.Name]; cur != nil && cur.readyMsg != "" {
+			msg = cur.readyMsg
 		}
 		return fmt.Sprintf("sidecar %s %s", c.Name, msg), true
 	}
@@ -100,28 +168,25 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 		if !ok || s.State != "running" {
 			continue
 		}
+		now := e.now()
 		rec.mu.Lock()
-		if rec.sidecarStart == nil {
-			rec.sidecarStart = map[string]*sidecarStartState{}
-		}
-		cur := rec.sidecarStart[c.Name]
-		if cur == nil || !cur.at.Equal(s.StartedAt) {
-			cur = &sidecarStartState{at: s.StartedAt}
-			rec.sidecarStart[c.Name] = cur
-		}
+		cur := sidecarProbeStateLocked(rec, c.Name, s.StartedAt)
 		if cur.done {
 			rec.mu.Unlock()
 			continue
 		}
-		rec.mu.Unlock()
-
-		initial, _, failTh := probeTiming(c.StartupProbe, e.cfg.ProbeInterval)
-		if !s.StartedAt.IsZero() && time.Since(s.StartedAt) < initial {
-			rec.mu.Lock()
-			cur.msg = "initial delay"
+		initial, period, failTh := probeTiming(c.StartupProbe)
+		due, _ := probeDue(now, s.StartedAt, cur.last, initial, period)
+		if !due {
+			if initial > 0 && !s.StartedAt.IsZero() && now.Before(s.StartedAt.Add(initial)) {
+				cur.msg = "initial delay"
+			}
 			rec.mu.Unlock()
 			continue
 		}
+		cur.last = now
+		rec.mu.Unlock()
+
 		if ctx.Err() != nil {
 			return false
 		}
@@ -131,12 +196,16 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 		}
 		rec.mu.Lock()
 		if okProbe {
-			cur.done = true
+			cur.oks++
 			cur.fails = 0
-			cur.msg = ""
+			if cur.oks >= probeSuccessThreshold(c.StartupProbe) {
+				cur.done = true
+				cur.msg = ""
+			}
 			rec.mu.Unlock()
 			continue
 		}
+		cur.oks = 0
 		cur.fails++
 		fails := cur.fails
 		cur.msg = msg
@@ -162,6 +231,168 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 			}
 			return true
 		}
+	}
+	return true
+}
+
+func (e *Engine) sidecarProbePod(rec *podRecord) (*corev1.Pod, map[string]sidecar.Status, bool) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.pod == nil || len(rec.pod.Spec.Containers) < 2 {
+		return nil, nil, false
+	}
+	if rec.phase != corev1.PodPending && rec.phase != corev1.PodRunning {
+		return nil, nil, false
+	}
+	pod := rec.pod.DeepCopy()
+	byName := make(map[string]sidecar.Status, len(rec.sidecarStatuses))
+	for _, st := range rec.sidecarStatuses {
+		byName[st.Name] = st
+	}
+	return pod, byName, true
+}
+
+func sidecarStartupOpen(rec *podRecord, c corev1.Container, s sidecar.Status) bool {
+	if !hasStartupProbe(c) {
+		return false
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return !sidecarStartupPassed(rec.sidecarStart[c.Name], s)
+}
+
+// tickSidecarLiveness kills a sidecar once its liveness probe has failed
+// failureThreshold times in a row. The pod restart policy and the crash
+// backoff then apply, the same as an exit. The VM is not restarted.
+// Liveness waits until the startup probe has passed. Cancelling the watch
+// is not a failure and does not stop the container.
+func (e *Engine) tickSidecarLiveness(ctx context.Context, rec *podRecord) bool {
+	pod, byName, ok := e.sidecarProbePod(rec)
+	if !ok {
+		return true
+	}
+	for _, c := range pod.Spec.Containers[1:] {
+		if !hasLivenessProbe(c) {
+			continue
+		}
+		s, found := byName[c.Name]
+		if !found || s.State != "running" {
+			continue
+		}
+		if sidecarStartupOpen(rec, c, s) {
+			continue
+		}
+		now := e.now()
+		initial, period, failTh := probeTiming(c.LivenessProbe)
+		rec.mu.Lock()
+		cur := sidecarProbeStateLocked(rec, c.Name, s.StartedAt)
+		due, _ := probeDue(now, s.StartedAt, cur.liveLast, initial, period)
+		if !due {
+			rec.mu.Unlock()
+			continue
+		}
+		cur.liveLast = now
+		rec.mu.Unlock()
+		if ctx.Err() != nil {
+			return false
+		}
+		okProbe, msg := runSidecarProbe(ctx, e.sidecar, pod.Namespace, pod.Name, c.Name, c.LivenessProbe)
+		if ctx.Err() != nil {
+			return false
+		}
+		rec.mu.Lock()
+		if okProbe {
+			// A success clears the streak. Liveness successThreshold is 1.
+			cur.liveFails = 0
+			rec.mu.Unlock()
+			continue
+		}
+		cur.liveFails++
+		fails := cur.liveFails
+		rec.mu.Unlock()
+		if fails < failTh {
+			continue
+		}
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
+		}
+		err := e.stopSidecarContainer(ctx, pod.Namespace, pod.Name, c.Name)
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
+		}
+		if err != nil {
+			e.fail(rec, fmt.Errorf("sidecar %s liveness probe failed: %s", c.Name, msg))
+			return false
+		}
+		e.events.Warn(ctx, event.ReasonProbeFailed, fmt.Sprintf("sidecar %s liveness probe failed: %s", c.Name, msg))
+		e.refreshSidecarStatus(ctx, rec)
+		if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
+			return false
+		}
+		return true
+	}
+	return true
+}
+
+// tickSidecarReadiness updates the sidecar Ready bit. It does not stop the
+// container. The container stays unready until successThreshold successes,
+// and a later failureThreshold of failures clears Ready again. Readiness
+// waits until the startup probe has passed.
+func (e *Engine) tickSidecarReadiness(ctx context.Context, rec *podRecord) bool {
+	pod, byName, ok := e.sidecarProbePod(rec)
+	if !ok {
+		return true
+	}
+	for _, c := range pod.Spec.Containers[1:] {
+		if !hasReadinessProbe(c) {
+			continue
+		}
+		s, found := byName[c.Name]
+		if !found || s.State != "running" {
+			continue
+		}
+		if sidecarStartupOpen(rec, c, s) {
+			continue
+		}
+		now := e.now()
+		initial, period, failTh := probeTiming(c.ReadinessProbe)
+		successTh := probeSuccessThreshold(c.ReadinessProbe)
+		rec.mu.Lock()
+		cur := sidecarProbeStateLocked(rec, c.Name, s.StartedAt)
+		due, _ := probeDue(now, s.StartedAt, cur.readyLast, initial, period)
+		if !due {
+			if initial > 0 && !s.StartedAt.IsZero() && now.Before(s.StartedAt.Add(initial)) {
+				cur.readyMsg = "initial delay"
+			}
+			rec.mu.Unlock()
+			continue
+		}
+		cur.readyLast = now
+		rec.mu.Unlock()
+		if ctx.Err() != nil {
+			return false
+		}
+		okProbe, msg := runSidecarProbe(ctx, e.sidecar, pod.Namespace, pod.Name, c.Name, c.ReadinessProbe)
+		if ctx.Err() != nil {
+			return false
+		}
+		rec.mu.Lock()
+		if okProbe {
+			cur.readyOKs++
+			cur.readyFails = 0
+			if cur.readyOKs >= successTh {
+				cur.ready = true
+				cur.readyMsg = ""
+			}
+		} else {
+			cur.readyFails++
+			cur.readyOKs = 0
+			cur.readyMsg = msg
+			if cur.readyFails >= failTh {
+				cur.ready = false
+			}
+		}
+		rec.mu.Unlock()
 	}
 	return true
 }

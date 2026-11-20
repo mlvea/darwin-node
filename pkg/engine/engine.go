@@ -92,6 +92,7 @@ type Engine struct {
 	closeOnce    sync.Once
 	closeErr     error
 	closeTimeout time.Duration // tests shorten the deadline; zero uses defaultCloseTimeout
+	clock        probeClock    // tests move this; nil is the wall clock
 	reapTimeout  time.Duration // tests shorten the post-deadline reap; zero uses defaultReapTimeout
 
 	// Abandoned boots are VMs whose Create or Start was still running when
@@ -1190,6 +1191,13 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 			startupBlock = msg
 		}
 	}
+	readinessBlock := ""
+	if ready {
+		if msg, blocked := sidecarReadinessBlockLocked(rec); blocked {
+			ready = false
+			readinessBlock = msg
+		}
+	}
 	containersReady := boolCond(corev1.ContainersReady, ready, now, rec)
 	podReady := boolCond(corev1.PodReady, ready, now, rec)
 	if vmReady && !ready {
@@ -1198,6 +1206,9 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 		if startupBlock != "" {
 			reason = "StartupProbe"
 			msg = startupBlock
+		} else if readinessBlock != "" {
+			reason = "ReadinessProbe"
+			msg = readinessBlock
 		}
 		containersReady.Reason = reason
 		containersReady.Message = msg
@@ -1750,7 +1761,7 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 		rec.ready = false
 		rec.reason = "StartupProbe"
 		rec.message = "container restarted"
-		rec.startupSince = time.Now()
+		rec.startupSince = e.now()
 	}
 	rec.mu.Unlock()
 	if machine == nil {
