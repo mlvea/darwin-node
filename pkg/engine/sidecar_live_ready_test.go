@@ -35,6 +35,7 @@ type cmdSidecar struct {
 	stopErr error
 	fail    map[string]*atomic.Bool
 	count   map[string]*atomic.Int32
+	bad     map[string]*atomic.Int32
 	block   map[string]bool
 	entered chan struct{}
 	once    sync.Once
@@ -44,6 +45,7 @@ func newCmdSidecar() *cmdSidecar {
 	return &cmdSidecar{
 		fail:    map[string]*atomic.Bool{},
 		count:   map[string]*atomic.Int32{},
+		bad:     map[string]*atomic.Int32{},
 		block:   map[string]bool{},
 		entered: make(chan struct{}),
 	}
@@ -65,6 +67,17 @@ func (s *cmdSidecar) calls(cmd string) *atomic.Int32 {
 		s.count[cmd] = &atomic.Int32{}
 	}
 	return s.count[cmd]
+}
+
+// failures counts execs that already returned an error. calls counts starts,
+// including a probe that has not decided yet.
+func (s *cmdSidecar) failures(cmd string) *atomic.Int32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bad[cmd] == nil {
+		s.bad[cmd] = &atomic.Int32{}
+	}
+	return s.bad[cmd]
 }
 
 func (s *cmdSidecar) Create(_ context.Context, _ *corev1.Pod, c corev1.Container, _ string) error {
@@ -120,6 +133,7 @@ func (s *cmdSidecar) Exec(ctx context.Context, _, _, _ string, cmd []string, _ a
 		return ctx.Err()
 	}
 	if fail != nil && fail.Load() {
+		s.failures(name).Add(1)
 		return fmt.Errorf("exit code 1")
 	}
 	return nil
@@ -455,7 +469,10 @@ func TestSidecarReadinessFailureThreshold(t *testing.T) {
 	one := false
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		n := sc.calls("ready").Load()
+		// Completed failures only. calls includes a probe that has started
+		// but not yet read the gate, so calls-passed can show 2 when the
+		// third failure has already landed.
+		fails := sc.failures("ready").Load()
 		p, err := e.Get("default", "side")
 		if err != nil {
 			time.Sleep(10 * time.Millisecond)
@@ -469,11 +486,10 @@ func TestSidecarReadinessFailureThreshold(t *testing.T) {
 		if sc.stops.Load() != 0 || sc.creates.Load() != 1 {
 			t.Fatalf("readiness restarted the container: creates=%d stops=%d", sc.creates.Load(), sc.stops.Load())
 		}
-		fails := n - passed
 		if fails >= 1 && fails < 3 && (!side.Ready || !podReady(p)) {
 			t.Fatalf("readiness flipped before failureThreshold: fails=%d %+v podReady=%v", fails, side, podReady(p))
 		}
-		if fails >= 1 && fails < 3 && side.Ready {
+		if fails >= 1 && fails < 3 && side.Ready && podReady(p) {
 			one = true
 		}
 		if fails >= 3 && !side.Ready && !podReady(p) {
@@ -491,7 +507,7 @@ func TestSidecarReadinessFailureThreshold(t *testing.T) {
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
-	t.Fatalf("readiness failureThreshold was not applied: execs=%d passedAt=%d", sc.calls("ready").Load(), passed)
+	t.Fatalf("readiness failureThreshold was not applied: execs=%d failures=%d passedAt=%d", sc.calls("ready").Load(), sc.failures("ready").Load(), passed)
 }
 
 func TestSidecarLivenessAndReadinessWaitForStartup(t *testing.T) {
