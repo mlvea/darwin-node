@@ -9,6 +9,7 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/guest"
 	"github.com/darwin-node/darwin-node/pkg/hostport"
+	"github.com/darwin-node/darwin-node/pkg/sidecar"
 	"github.com/darwin-node/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
@@ -74,11 +75,8 @@ func (e *Engine) runHook(ctx context.Context, rec *podRecord, cmd []string, what
 	return nil
 }
 
-func probeTiming(p *corev1.Probe, defaultPeriod time.Duration) (initial, period time.Duration, failTh int32) {
-	period = defaultPeriod
-	if period <= 0 {
-		period = 10 * time.Second
-	}
+func probeTiming(p *corev1.Probe) (initial, period time.Duration, failTh int32) {
+	period = 10 * time.Second
 	failTh = 3
 	if p == nil {
 		return 0, period, failTh
@@ -95,16 +93,155 @@ func probeTiming(p *corev1.Probe, defaultPeriod time.Duration) (initial, period 
 	return initial, period, failTh
 }
 
+func probeSuccessThreshold(p *corev1.Probe) int32 {
+	if p != nil && p.SuccessThreshold > 0 {
+		return p.SuccessThreshold
+	}
+	return 1
+}
+
+// vmProbeSched is when each VM probe last started. A zero time means the
+// next sample is due once the initial delay has elapsed. A restart clears it
+// so the new container is probed immediately.
+type vmProbeSched struct {
+	startup time.Time
+	live    time.Time
+	ready   time.Time
+}
+
+// probeDue reports whether a probe should run at now, and the next time it
+// should be considered. The first sample after anchor+initial is immediate.
+// Later samples wait period.
+func probeDue(now, anchor, last time.Time, initial, period time.Duration) (bool, time.Time) {
+	if period <= 0 {
+		period = 10 * time.Second
+	}
+	if initial > 0 && !anchor.IsZero() {
+		start := anchor.Add(initial)
+		if now.Before(start) {
+			return false, start
+		}
+	}
+	if last.IsZero() {
+		return true, now
+	}
+	next := last.Add(period)
+	if now.Before(next) {
+		return false, next
+	}
+	return true, now
+}
+
+func clampProbeWait(d time.Duration) time.Duration {
+	if d < time.Millisecond {
+		return time.Millisecond
+	}
+	return d
+}
+
+// nextProbeDelay is how long the watch sleeps. It wakes for the soonest probe
+// deadline and at least every ProbeInterval, so exits and backoff are not
+// stuck behind a long period.
+func (e *Engine) nextProbeDelay(rec *podRecord, sched *vmProbeSched, interval time.Duration) time.Duration {
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	now := e.now()
+	wait := interval
+	tighten := func(next time.Time) {
+		if next.IsZero() {
+			return
+		}
+		d := next.Sub(now)
+		if d < 0 {
+			d = 0
+		}
+		if d < wait {
+			wait = d
+		}
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.pod == nil {
+		return clampProbeWait(wait)
+	}
+	running := rec.phase == corev1.PodRunning
+	if running && rec.agent != nil && len(rec.pod.Spec.Containers) > 0 && sched != nil {
+		c0 := rec.pod.Spec.Containers[0]
+		var anchor time.Time
+		if !rec.startupSince.IsZero() {
+			anchor = rec.startupSince
+		} else if rec.startedAt != nil {
+			anchor = rec.startedAt.Time
+		}
+		if !rec.startupDone && hasStartupProbe(c0) {
+			initial, period, _ := probeTiming(c0.StartupProbe)
+			_, next := probeDue(now, anchor, sched.startup, initial, period)
+			tighten(next)
+		} else {
+			if hasLivenessProbe(c0) {
+				initial, period, _ := probeTiming(c0.LivenessProbe)
+				_, next := probeDue(now, anchor, sched.live, initial, period)
+				tighten(next)
+			}
+			if hasReadinessProbe(c0) {
+				initial, period, _ := probeTiming(c0.ReadinessProbe)
+				_, next := probeDue(now, anchor, sched.ready, initial, period)
+				tighten(next)
+			}
+		}
+	}
+	if len(rec.pod.Spec.Containers) > 1 && (rec.phase == corev1.PodPending || running) {
+		byName := make(map[string]sidecar.Status, len(rec.sidecarStatuses))
+		for _, st := range rec.sidecarStatuses {
+			byName[st.Name] = st
+		}
+		for _, c := range rec.pod.Spec.Containers[1:] {
+			s, ok := byName[c.Name]
+			if !ok || s.State != "running" {
+				continue
+			}
+			var lastStart, lastLive, lastReady time.Time
+			startDone := !hasStartupProbe(c)
+			if ps := rec.sidecarStart[c.Name]; ps != nil && (s.StartedAt.IsZero() || ps.at.Equal(s.StartedAt)) {
+				lastStart = ps.last
+				lastLive = ps.liveLast
+				lastReady = ps.readyLast
+				startDone = ps.done || startDone
+			}
+			if hasStartupProbe(c) && !startDone {
+				initial, period, _ := probeTiming(c.StartupProbe)
+				_, next := probeDue(now, s.StartedAt, lastStart, initial, period)
+				tighten(next)
+				continue
+			}
+			if hasLivenessProbe(c) {
+				initial, period, _ := probeTiming(c.LivenessProbe)
+				_, next := probeDue(now, s.StartedAt, lastLive, initial, period)
+				tighten(next)
+			}
+			if hasReadinessProbe(c) {
+				initial, period, _ := probeTiming(c.ReadinessProbe)
+				_, next := probeDue(now, s.StartedAt, lastReady, initial, period)
+				tighten(next)
+			}
+		}
+	}
+	return clampProbeWait(wait)
+}
+
 func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	interval := e.cfg.ProbeInterval
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
 	var liveFails int32
+	var sched vmProbeSched
 	// The first pass runs immediately and checks the pod context before
 	// Create or Start. A call that has already entered Create or Start
 	// does not observe cancellation. Delete waits for this goroutine, then
-	// removes whatever that call started.
+	// removes whatever that call started. Later passes wait on the probe
+	// clock, not on a single ticker, so each probe keeps its own period.
 	step := func() bool {
 		if ctx.Err() != nil {
 			return false
@@ -113,18 +250,22 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 			return false
 		}
 		e.refreshSidecarStatus(ctx, rec)
-		return e.noteSidecarExit(rec) && e.restartExitedSidecars(ctx, rec) && e.tickSidecarStartup(ctx, rec) && e.tickProbes(ctx, rec, interval, &liveFails)
+		return e.noteSidecarExit(rec) && e.restartExitedSidecars(ctx, rec) && e.tickSidecarStartup(ctx, rec) && e.tickSidecarLiveness(ctx, rec) && e.tickSidecarReadiness(ctx, rec) && e.tickProbes(ctx, rec, &sched, &liveFails)
 	}
 	if !step() {
 		return
 	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+		timer := e.newProbeTimer(e.nextProbeDelay(rec, &sched, interval))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-t.C:
+		case <-timer.C():
+			timer.Stop()
 			if !step() {
 				return
 			}
@@ -157,7 +298,7 @@ func (e *Engine) noteVMDeath(rec *podRecord) bool {
 	}
 }
 
-func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod time.Duration, liveFails *int32) bool {
+func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeSched, liveFails *int32) bool {
 	if !e.noteVMDeath(rec) {
 		return false
 	}
@@ -177,21 +318,25 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 		return true
 	}
 	c0 := pod.Spec.Containers[0]
-	now := time.Now()
+	now := e.now()
 
 	// startupDone lives on the record so a liveness restart can clear it.
 	// A local flag would stay true and leave Started set across that restart.
 	if !startupDone {
 		if req, ok := k8sProbe(c0.StartupProbe); ok {
-			initial, _, failTh := probeTiming(c0.StartupProbe, defaultPeriod)
-			if !started.IsZero() && now.Before(started.Add(initial)) {
-				rec.mu.Lock()
-				rec.ready = false
-				rec.reason = "StartupProbe"
-				rec.message = "initial delay"
-				rec.mu.Unlock()
+			initial, period, failTh := probeTiming(c0.StartupProbe)
+			due, _ := probeDue(now, started, sched.startup, initial, period)
+			if !due {
+				if initial > 0 && !started.IsZero() && now.Before(started.Add(initial)) {
+					rec.mu.Lock()
+					rec.ready = false
+					rec.reason = "StartupProbe"
+					rec.message = "initial delay"
+					rec.mu.Unlock()
+				}
 				return true
 			}
+			sched.startup = now
 			res, err := cli.Probe(ctx, req)
 			if err != nil || !res.OK {
 				rec.mu.Lock()
@@ -224,8 +369,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 	var wg sync.WaitGroup
 
 	if req, ok := k8sProbe(c0.ReadinessProbe); ok {
-		initial, _, _ := probeTiming(c0.ReadinessProbe, defaultPeriod)
-		if started.IsZero() || !now.Before(started.Add(initial)) {
+		initial, period, _ := probeTiming(c0.ReadinessProbe)
+		if due, _ := probeDue(now, started, sched.ready, initial, period); due {
+			sched.ready = now
 			req := req
 			wg.Add(1)
 			go func() {
@@ -253,9 +399,10 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 	var liveRan bool
 	var liveFailTh int32
 	if req, ok := k8sProbe(c0.LivenessProbe); ok {
-		initial, _, failTh := probeTiming(c0.LivenessProbe, defaultPeriod)
+		initial, period, failTh := probeTiming(c0.LivenessProbe)
 		liveFailTh = failTh
-		if started.IsZero() || !now.Before(started.Add(initial)) {
+		if due, _ := probeDue(now, started, sched.live, initial, period); due {
+			sched.live = now
 			req := req
 			liveRan = true
 			wg.Add(1)
@@ -304,6 +451,7 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 				e.fail(rec, fmt.Errorf("liveness restart: %w", rerr))
 				return false
 			}
+			*sched = vmProbeSched{}
 			return true
 		}
 		e.fail(rec, fmt.Errorf("liveness probe failed: %s", probeMsg(res, err)))
@@ -315,6 +463,16 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, defaultPeriod t
 
 func hasStartupProbe(c corev1.Container) bool {
 	_, ok := k8sProbe(c.StartupProbe)
+	return ok
+}
+
+func hasLivenessProbe(c corev1.Container) bool {
+	_, ok := k8sProbe(c.LivenessProbe)
+	return ok
+}
+
+func hasReadinessProbe(c corev1.Container) bool {
+	_, ok := k8sProbe(c.ReadinessProbe)
 	return ok
 }
 

@@ -142,6 +142,12 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 			defer func() { _ = shutdown(context.Background()) }()
 		}
 	}
+	// A killed process leaves its break-glass sockets in the temp dir.
+	// Sweep before any pod listens. Unit tests do not call this with
+	// os.TempDir, so they do not delete each other's sockets.
+	if err := engine.SweepConsoleSockets(os.TempDir()); err != nil {
+		slog.Warn("stale console sockets", "err", err)
+	}
 	eng := engine.New(cfg, slots, rt, sc, event.Slog{}, host.InternalIP)
 	gate.bind(eng)
 	defer eng.Close()
@@ -182,6 +188,18 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	return nil
 }
 
+// configureNodeHealth attaches the checks Ping runs after startup.
+// Fake runtime skips the vz probe: CI and --runtime=fake are not Apple Silicon.
+func configureNodeHealth(np *node.StatusProvider, cfg dnconfig.Config) {
+	if np == nil {
+		return
+	}
+	np.CacheDir = cfg.CacheDir
+	if cfg.Runtime != types.RuntimeFake {
+		np.Runtime = func(context.Context) error { return vzrt.Available() }
+	}
+}
+
 func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
 	switch cfg.Runtime {
 	case types.RuntimeFake:
@@ -217,11 +235,16 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 	mux := http.NewServeMux()
 	n, err := nodeutil.NewNode(cfg.NodeName,
 		func(pc nodeutil.ProviderConfig) (nodeutil.Provider, vknode.NodeProvider, error) {
+			p.SetCredentialResolver(provider.KubeResolver{Client: k8s})
+			np := node.NewStatusProvider(p.Inventory())
+			configureNodeHealth(np, cfg)
+			// Ping before the first status is published. A failure stays
+			// inside the conditions; Ping itself returns nil so the node
+			// controller keeps patching them and renewing the lease.
+			p.InstallHealth(ctx, np)
 			if err := p.ConfigureNode(ctx, pc.Node); err != nil {
 				return nil, nil, err
 			}
-			p.SetCredentialResolver(provider.KubeResolver{Client: k8s})
-			np := node.NewStatusProvider(p.Inventory())
 			return p, np, nil
 		},
 		nodeutil.WithClient(k8s),

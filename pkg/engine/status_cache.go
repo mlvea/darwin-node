@@ -53,6 +53,14 @@ func sidecarContainerStatuses(containers []corev1.Container, cached []sidecar.St
 			started = sidecarStartupPassed(start[c.Name], s)
 			ready = run && started
 		}
+		if hasReadinessProbe(c) {
+			passed := sidecarReadyPassed(start[c.Name], s)
+			if hasStartupProbe(c) {
+				ready = run && started && passed
+			} else {
+				ready = run && passed
+			}
+		}
 		st := corev1.ContainerStatus{Name: c.Name, Image: c.Image, Ready: ready, Started: &started, ContainerID: s.ID, RestartCount: restarts[c.Name]}
 		if prev := last[c.Name]; prev != nil {
 			cp := *prev
