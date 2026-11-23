@@ -29,6 +29,9 @@ const (
 	// with the same ID (follows, long execs). Best-effort: unknown or
 	// finished IDs are ignored.
 	KindCancel Kind = "cancel"
+	// KindNotify is a one-way guest-to-host frame. The host records it
+	// and does not reply. Unknown IDs of any other kind are still dropped.
+	KindNotify Kind = "notify"
 )
 
 // Methods.
@@ -44,6 +47,8 @@ const (
 	MethodMaterialize = "Materialize"
 	MethodShutdown    = "Shutdown"
 	MethodSelftest    = "Selftest"
+	// MethodExit is the guest→host exit notice. See ExitReport.
+	MethodExit = "Exit"
 )
 
 // Envelope is one framed JSON message.

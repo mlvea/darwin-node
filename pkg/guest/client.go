@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -14,6 +15,10 @@ type Client struct {
 	sess  *Session
 	info  HandshakeRes
 	close io.Closer
+
+	exitMu sync.Mutex
+	exitFn func(ExitReport)
+	exit   *ExitReport
 }
 
 func newHandshakeNonce() (string, error) {
@@ -30,8 +35,10 @@ func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string) (*C
 	if err != nil {
 		return nil, err
 	}
-	s := NewSession(rw)
+	s := newSession(rw)
 	c := &Client{sess: s, close: rw}
+	s.onNotify = c.consumeNotify
+	go s.readLoop()
 	env, err := s.Call(ctx, MethodHandshake, HandshakeReq{Token: token, HostAgentVer: hostVer, Nonce: nonce})
 	if err != nil {
 		_ = s.Close()
@@ -51,6 +58,53 @@ func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string) (*C
 }
 
 func (c *Client) Info() HandshakeRes { return c.info }
+
+func (c *Client) consumeNotify(env Envelope) {
+	if c == nil || env.Kind != KindNotify || env.Method != MethodExit {
+		return
+	}
+	rep, err := Decode[ExitReport](env)
+	if err != nil || !rep.Reported() {
+		return
+	}
+	c.deliverExit(rep)
+}
+
+func (c *Client) deliverExit(rep ExitReport) {
+	if c == nil || !rep.Reported() {
+		return
+	}
+	code := *rep.ExitCode
+	stored := ExitReport{ExitCode: &code, Reason: rep.Reason}
+	c.exitMu.Lock()
+	c.exit = &stored
+	fn := c.exitFn
+	c.exitMu.Unlock()
+	if fn != nil {
+		fn(stored)
+	}
+}
+
+// OnExit receives guest exit reports, including one that arrived before the
+// callback was registered. The callback runs on the read loop when the
+// frame arrives, or on the caller when a frame was already buffered.
+func (c *Client) OnExit(fn func(ExitReport)) {
+	if c == nil {
+		return
+	}
+	c.exitMu.Lock()
+	c.exitFn = fn
+	var pending *ExitReport
+	if c.exit != nil && c.exit.Reported() {
+		code := *c.exit.ExitCode
+		cp := ExitReport{ExitCode: &code, Reason: c.exit.Reason}
+		pending = &cp
+	}
+	c.exitMu.Unlock()
+	if pending != nil && fn != nil {
+		fn(*pending)
+	}
+}
 
 func (c *Client) Health(ctx context.Context) (HealthRes, error) {
 	env, err := c.sess.Call(ctx, MethodHealth, nil)

@@ -80,6 +80,43 @@ Methods:
 | `NetInfo` | host->guest | interface IPs, primary pod IP |
 | `Materialize` | host->guest | map shared-dir entries onto mountPaths |
 | `Shutdown` | host->guest | graceful halt; host then `VM.Stop` |
+| `Exit` | guest->host, notify | one-way exit code; no reply |
+
+### Exit notify
+
+An unexpected VM death does not call `Shutdown`. `Shutdown` is the host
+asking the guest to stop, and its payload is a reason and a timeout. The
+serial console is a raw byte stream and is off unless `--serial-console`
+is set, so it is not this channel.
+
+The guest writes one frame on the agent connection it already has (vsock
+port 50051, or TCP when that fallback is on) and then halts:
+
+```json
+{"v":1,"id":"exit","kind":"notify","method":"Exit","payload":{"exitCode":137,"reason":"OOMKilled"}}
+```
+
+`exitCode` is required. Zero is a real code. A missing or null code is
+not a report, and the container stays at exit code 1 with the host reason
+(`VMStopped` or `VMFailed`). `reason` is optional. The host keeps it when
+it is 1–128 characters, starts with a letter, and continues with letters
+or digits. Anything else is dropped and the host reason stays. The last
+report that has a code wins. A later frame with no code does not clear it.
+The pod phase stays `Failed` even when the code is 0. The pod message
+stays the host's ("macOS VM Stopped unexpectedly"). Only
+`containerStatuses[].state.terminated.exitCode` and, when the reason is
+accepted, `terminated.reason` change.
+
+`ProtocolVersion` stays 1. An older host drops an unknown id, so this
+frame is additive. A graceful `Delete` still publishes `Succeeded` and
+exit 0 before the VM is torn down. A liveness restart clears the code so
+the new container does not inherit it.
+
+`Handler.ReportExit` is the in-process call that writes the frame.
+`cmd/guest-agent` serves the connection and does not call it, and it does
+not halt the VM. A guest image that wants a real `terminated.exitCode`
+calls `ReportExit` on its live handler before it halts. The fake runtime's
+`ReportExit` is the Linux test seam for the same frame.
 
 ## In-guest lifecycle
 

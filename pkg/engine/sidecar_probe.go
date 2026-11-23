@@ -21,26 +21,19 @@ import (
 // means the container was restarted and every probe starts again.
 // last, liveLast, and readyLast are when that probe last started. Zero
 // means the next sample is due once the initial delay has elapsed.
+// The streaks are the same probeStreak the VM probes use.
 type sidecarStartState struct {
-	at    time.Time
-	done  bool
-	fails int32
-	oks   int32
-	last  time.Time
-	msg   string
-
-	liveFails int32
+	at        time.Time
+	startup   probeStreak
+	last      time.Time
+	liveness  probeStreak
 	liveLast  time.Time
-
-	ready      bool
-	readyOKs   int32
-	readyFails int32
-	readyMsg   string
-	readyLast  time.Time
+	readiness probeStreak
+	readyLast time.Time
 }
 
 func sidecarStartupPassed(st *sidecarStartState, s sidecar.Status) bool {
-	if st == nil || !st.done {
+	if st == nil || !st.startup.passed {
 		return false
 	}
 	if !s.StartedAt.IsZero() && !st.at.Equal(s.StartedAt) {
@@ -50,7 +43,7 @@ func sidecarStartupPassed(st *sidecarStartState, s sidecar.Status) bool {
 }
 
 func sidecarReadyPassed(st *sidecarStartState, s sidecar.Status) bool {
-	if st == nil || !st.ready {
+	if st == nil || !st.readiness.passed {
 		return false
 	}
 	if !s.StartedAt.IsZero() && !st.at.Equal(s.StartedAt) {
@@ -96,8 +89,8 @@ func sidecarStartupBlockLocked(rec *podRecord) (string, bool) {
 			continue
 		}
 		msg := "startup probe"
-		if cur := rec.sidecarStart[c.Name]; cur != nil && cur.msg != "" {
-			msg = cur.msg
+		if cur := rec.sidecarStart[c.Name]; cur != nil && cur.startup.msg != "" {
+			msg = cur.startup.msg
 		}
 		return fmt.Sprintf("sidecar %s %s", c.Name, msg), true
 	}
@@ -127,8 +120,8 @@ func sidecarReadinessBlockLocked(rec *podRecord) (string, bool) {
 			continue
 		}
 		msg := "readiness probe"
-		if cur := rec.sidecarStart[c.Name]; cur != nil && cur.readyMsg != "" {
-			msg = cur.readyMsg
+		if cur := rec.sidecarStart[c.Name]; cur != nil && cur.readiness.msg != "" {
+			msg = cur.readiness.msg
 		}
 		return fmt.Sprintf("sidecar %s %s", c.Name, msg), true
 	}
@@ -171,7 +164,7 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 		now := e.now()
 		rec.mu.Lock()
 		cur := sidecarProbeStateLocked(rec, c.Name, s.StartedAt)
-		if cur.done {
+		if cur.startup.passed {
 			rec.mu.Unlock()
 			continue
 		}
@@ -179,7 +172,7 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 		due, _ := probeDue(now, s.StartedAt, cur.last, initial, period)
 		if !due {
 			if initial > 0 && !s.StartedAt.IsZero() && now.Before(s.StartedAt.Add(initial)) {
-				cur.msg = "initial delay"
+				cur.startup.msg = "initial delay"
 			}
 			rec.mu.Unlock()
 			continue
@@ -195,42 +188,30 @@ func (e *Engine) tickSidecarStartup(ctx context.Context, rec *podRecord) bool {
 			return false
 		}
 		rec.mu.Lock()
-		if okProbe {
-			cur.oks++
-			cur.fails = 0
-			if cur.oks >= probeSuccessThreshold(c.StartupProbe) {
-				cur.done = true
-				cur.msg = ""
-			}
-			rec.mu.Unlock()
+		_, failed := cur.startup.observe(okProbe, msg, probeSuccessThreshold(c.StartupProbe), failTh)
+		rec.mu.Unlock()
+		if !failed {
 			continue
 		}
-		cur.oks = 0
-		cur.fails++
-		fails := cur.fails
-		cur.msg = msg
-		rec.mu.Unlock()
-		if fails >= failTh {
-			if ctx.Err() != nil || !podActive(rec) {
-				return false
-			}
-			// Stop, then let the exit path apply the restart policy. The
-			// container's own exit code is whatever the runtime records.
-			err := e.stopSidecarContainer(ctx, pod.Namespace, pod.Name, c.Name)
-			if ctx.Err() != nil || !podActive(rec) {
-				return false
-			}
-			if err != nil {
-				e.fail(rec, fmt.Errorf("sidecar %s startup probe failed: %s", c.Name, msg))
-				return false
-			}
-			e.events.Warn(ctx, event.ReasonProbeFailed, fmt.Sprintf("sidecar %s startup probe failed: %s", c.Name, msg))
-			e.refreshSidecarStatus(ctx, rec)
-			if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
-				return false
-			}
-			return true
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
 		}
+		// Stop, then let the exit path apply the restart policy. The
+		// container's own exit code is whatever the runtime records.
+		err := e.stopSidecarContainer(ctx, pod.Namespace, pod.Name, c.Name)
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
+		}
+		if err != nil {
+			e.fail(rec, fmt.Errorf("sidecar %s startup probe failed: %s", c.Name, msg))
+			return false
+		}
+		e.events.Warn(ctx, event.ReasonProbeFailed, fmt.Sprintf("sidecar %s startup probe failed: %s", c.Name, msg))
+		e.refreshSidecarStatus(ctx, rec)
+		if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
+			return false
+		}
+		return true
 	}
 	return true
 }
@@ -301,16 +282,10 @@ func (e *Engine) tickSidecarLiveness(ctx context.Context, rec *podRecord) bool {
 			return false
 		}
 		rec.mu.Lock()
-		if okProbe {
-			// A success clears the streak. Liveness successThreshold is 1.
-			cur.liveFails = 0
-			rec.mu.Unlock()
-			continue
-		}
-		cur.liveFails++
-		fails := cur.liveFails
+		// A success clears the streak. Liveness successThreshold is 1.
+		_, failed := cur.liveness.observe(okProbe, msg, 1, failTh)
 		rec.mu.Unlock()
-		if fails < failTh {
+		if !failed {
 			continue
 		}
 		if ctx.Err() != nil || !podActive(rec) {
@@ -362,7 +337,7 @@ func (e *Engine) tickSidecarReadiness(ctx context.Context, rec *podRecord) bool 
 		due, _ := probeDue(now, s.StartedAt, cur.readyLast, initial, period)
 		if !due {
 			if initial > 0 && !s.StartedAt.IsZero() && now.Before(s.StartedAt.Add(initial)) {
-				cur.readyMsg = "initial delay"
+				cur.readiness.msg = "initial delay"
 			}
 			rec.mu.Unlock()
 			continue
@@ -377,21 +352,7 @@ func (e *Engine) tickSidecarReadiness(ctx context.Context, rec *podRecord) bool 
 			return false
 		}
 		rec.mu.Lock()
-		if okProbe {
-			cur.readyOKs++
-			cur.readyFails = 0
-			if cur.readyOKs >= successTh {
-				cur.ready = true
-				cur.readyMsg = ""
-			}
-		} else {
-			cur.readyFails++
-			cur.readyOKs = 0
-			cur.readyMsg = msg
-			if cur.readyFails >= failTh {
-				cur.ready = false
-			}
-		}
+		cur.readiness.observe(okProbe, msg, successTh, failTh)
 		rec.mu.Unlock()
 	}
 	return true

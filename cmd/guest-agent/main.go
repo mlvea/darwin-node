@@ -75,6 +75,11 @@ func defaultTokenFile() string {
 }
 
 func serve(ctx context.Context, listen, token, tokenFile string, insecure, tcpFallback bool) error {
+	// ReportExit is the guest→host exit contract (see guest.ExitReport).
+	// This process serves exec, probes, and logs. It does not halt the VM
+	// and it does not send an exit code. A workload that wants
+	// terminated.exitCode calls Handler.ReportExit on its connection
+	// before it halts.
 	h := &guest.Handler{
 		Token:                token,
 		AllowInsecureNoToken: insecure,

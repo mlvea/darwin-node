@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,8 +270,10 @@ func TestFirstReadinessProbeNotDelayed(t *testing.T) {
 	cfg.AllowNATWorkloads = true
 	cfg.ProbeInterval = 10 * time.Second
 	rt := fake.New()
+	var execs atomic.Int32
 	rt.ExecFn = func(ctx context.Context, req guest.ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		if len(req.Argv) > 0 && req.Argv[0] == "unready" {
+			execs.Add(1)
 			return 1, nil
 		}
 		return 0, nil
@@ -287,7 +290,7 @@ func TestFirstReadinessProbeNotDelayed(t *testing.T) {
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		p, err := e.Get("default", "rd")
-		if err == nil && p.Status.Phase == corev1.PodRunning && !podReady(p) {
+		if err == nil && p.Status.Phase == corev1.PodRunning && !podReady(p) && execs.Load() >= 1 {
 			_ = e.Delete(context.Background(), "default", "rd", 0)
 			return
 		}
@@ -295,7 +298,7 @@ func TestFirstReadinessProbeNotDelayed(t *testing.T) {
 	}
 	p, _ := e.Get("default", "rd")
 	_ = e.Delete(context.Background(), "default", "rd", 0)
-	t.Fatalf("readiness should fail immediately, not after ProbeInterval: ready=%v phase=%s", podReady(p), p.Status.Phase)
+	t.Fatalf("readiness should fail immediately, not after ProbeInterval: ready=%v phase=%s execs=%d", podReady(p), p.Status.Phase, execs.Load())
 }
 
 func TestInitContainersRun(t *testing.T) {
@@ -695,12 +698,14 @@ func TestReadinessNotBlockedByHangingLiveness(t *testing.T) {
 	cfg.AllowNATWorkloads = true
 	cfg.ProbeInterval = 10 * time.Second
 	rt := fake.New()
+	var execs atomic.Int32
 	rt.ExecFn = func(ctx context.Context, req guest.ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		if len(req.Argv) > 0 && req.Argv[0] == "hang" {
 			time.Sleep(2 * time.Second)
 			return 0, nil
 		}
 		if len(req.Argv) > 0 && req.Argv[0] == "unready" {
+			execs.Add(1)
 			return 1, nil
 		}
 		return 0, nil
@@ -725,7 +730,7 @@ func TestReadinessNotBlockedByHangingLiveness(t *testing.T) {
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		p, err := e.Get("default", "hol")
-		if err == nil && p.Status.Phase == corev1.PodRunning && !podReady(p) {
+		if err == nil && p.Status.Phase == corev1.PodRunning && !podReady(p) && execs.Load() >= 1 {
 			_ = e.Delete(context.Background(), "default", "hol", 0)
 			return
 		}
@@ -733,5 +738,5 @@ func TestReadinessNotBlockedByHangingLiveness(t *testing.T) {
 	}
 	p, _ := e.Get("default", "hol")
 	_ = e.Delete(context.Background(), "default", "hol", 0)
-	t.Fatalf("readiness should flip false well before liveness hang: ready=%v phase=%s", podReady(p), p.Status.Phase)
+	t.Fatalf("readiness should flip false well before liveness hang: ready=%v phase=%s execs=%d", podReady(p), p.Status.Phase, execs.Load())
 }

@@ -24,8 +24,10 @@ func statusStarted(cs *corev1.ContainerStatus) bool {
 
 func TestReadinessFailureKeepsContainerStarted(t *testing.T) {
 	rt := fake.New()
+	var execs atomic.Int32
 	rt.ExecFn = func(ctx context.Context, req guest.ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		if len(req.Argv) > 0 && req.Argv[0] == "unready" {
+			execs.Add(1)
 			return 1, nil
 		}
 		return 0, nil
@@ -49,7 +51,7 @@ func TestReadinessFailureKeepsContainerStarted(t *testing.T) {
 			continue
 		}
 		main := containerStatus(p, "macos")
-		if main == nil || main.Ready || main.State.Running == nil {
+		if main == nil || main.Ready || main.State.Running == nil || execs.Load() < 1 {
 			time.Sleep(15 * time.Millisecond)
 			continue
 		}

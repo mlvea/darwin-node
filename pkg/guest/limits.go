@@ -111,6 +111,10 @@ type handlerLive struct {
 	token  string
 	lim    *Limiter
 	nonces *nonceSet
+	// exits receives ReportExit for each live connection. pendingExit is
+	// the last report, replayed onto a connection that comes up after it.
+	exits       []chan ExitReport
+	pendingExit *ExitReport
 }
 
 func newHandlerLive(token string, lim *Limiter) *handlerLive {

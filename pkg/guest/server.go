@@ -50,6 +50,18 @@ type Handler struct {
 	MetalAvailableFn func() bool
 }
 
+// ReportExit sends rep on every agent connection this handler is serving.
+// A report with no exit code is ignored. The guest calls this before it
+// halts; the host does not ask. Safe to call before a connection exists:
+// the last report is replayed when one is accepted.
+func (h *Handler) ReportExit(rep ExitReport) {
+	if h == nil || !rep.Reported() {
+		return
+	}
+	h.Init()
+	h.live.publishExit(rep)
+}
+
 // Init allocates shared live state (token, nonces, limiter). Call once
 // before copying Handler into concurrent Serve goroutines.
 func (h *Handler) Init() {
@@ -152,6 +164,45 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	fc := NewFrameConn(rw)
 	fc.writeTimeout = h.writeTimeout()
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	exitStop := func() {}
+	var exitOnce sync.Once
+	writerDone := make(chan struct{})
+	startExitWriter := func() {
+		exitOnce.Do(func() {
+			ch := make(chan ExitReport, 1)
+			exitStop = h.live.addExitSink(ch)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-writerDone:
+						return
+					case rep := <-ch:
+						env, err := exitNotifyEnvelope(rep)
+						if err != nil {
+							continue
+						}
+						if err := fc.Write(env); err != nil {
+							return
+						}
+					}
+				}
+			}()
+		})
+	}
+	// Runs before Wait: drop the sink and wake the writer, then join it.
+	// A Serve that never handshakes still closes writerDone.
+	defer func() {
+		exitStop()
+		close(writerDone)
+	}()
+
 	if !h.live.lim.TryConn() {
 		env, err := fc.Read()
 		if err != nil {
@@ -165,8 +216,6 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	defer h.live.lim.ReleaseConn()
 
 	var handshook atomic.Bool
-	var wg sync.WaitGroup
-	defer wg.Wait()
 	defer func() { _ = rw.Close() }()
 
 	inflight := newSemaphore(DefaultMaxInflight)
@@ -228,6 +277,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			}
 			if handshook.Load() {
 				setConnDeadline(rw, 0)
+				startExitWriter()
 			}
 			continue
 		}
