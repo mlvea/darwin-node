@@ -17,6 +17,7 @@ package image
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -207,13 +208,27 @@ func writePatchFile(basePath, targetPath string, baseSize, targetSize int64, out
 // ApplyDelta produces destDir as a full copy of the base image dir with
 // every listed patch applied. Base files are digest-verified before
 // patching; results are verified after; destDir must not already exist.
+// A destination size above DefaultMaxImageBytes is rejected before the
+// base is cloned or the destination is truncated.
 func ApplyDelta(baseDir, deltaDir, destDir string) error {
+	return applyDelta(context.Background(), baseDir, deltaDir, destDir, defaultLimits())
+}
+
+func applyDelta(ctx context.Context, baseDir, deltaDir, destDir string, lim byteLimits) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	man, err := ReadDeltaManifest(deltaDir)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(destDir); err == nil {
 		return fmt.Errorf("destination %s already exists", destDir)
+	}
+	for _, p := range man.Patches {
+		if err := lim.checkDeclared(p.DestSize); err != nil {
+			return fmt.Errorf("%s: %w", p.Name, err)
+		}
 	}
 
 	img, err := LoadDir(baseDir)
@@ -233,6 +248,9 @@ func ApplyDelta(baseDir, deltaDir, destDir string) error {
 
 	seen := map[string]struct{}{}
 	for _, p := range man.Patches {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := safePathSegment(p.Name); err != nil {
 			return fmt.Errorf("delta patch: %w", err)
 		}
@@ -240,7 +258,7 @@ func ApplyDelta(baseDir, deltaDir, destDir string) error {
 			return fmt.Errorf("delta patch %q listed more than once", p.Name)
 		}
 		seen[p.Name] = struct{}{}
-		if err := applyOne(filepath.Join(baseDir, p.Name), filepath.Join(tmpDir, p.Name), filepath.Join(deltaDir, p.Name+".patch"), p); err != nil {
+		if err := applyOne(ctx, filepath.Join(baseDir, p.Name), filepath.Join(tmpDir, p.Name), filepath.Join(deltaDir, p.Name+".patch"), p, lim); err != nil {
 			return err
 		}
 	}
@@ -250,8 +268,11 @@ func ApplyDelta(baseDir, deltaDir, destDir string) error {
 	return nil
 }
 
-func applyOne(src, dst, patchPath string, p PatchRef) error {
-	sum, err := digest.FileSHA256(src)
+func applyOne(ctx context.Context, src, dst, patchPath string, p PatchRef, lim byteLimits) error {
+	if err := lim.checkDeclared(p.DestSize); err != nil {
+		return fmt.Errorf("%s: %w", p.Name, err)
+	}
+	sum, err := hashFile(ctx, src)
 	if err != nil {
 		return err
 	}
@@ -283,6 +304,9 @@ func applyOne(src, dst, patchPath string, p PatchRef) error {
 	}
 	hdr := make([]byte, 12)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := io.ReadFull(patch, hdr); err != nil {
 			if err == io.EOF {
 				break
@@ -318,7 +342,7 @@ func applyOne(src, dst, patchPath string, p PatchRef) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	result, err := digest.FileSHA256(dst)
+	result, err := hashFile(ctx, dst)
 	if err != nil {
 		return err
 	}

@@ -1,12 +1,16 @@
 package guest
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +36,10 @@ const (
 	// KindNotify is a one-way guest-to-host frame. The host records it
 	// and does not reply. Unknown IDs of any other kind are still dropped.
 	KindNotify Kind = "notify"
+	// KindWindow is a host→guest credit grant for one stream ID. The
+	// payload is a WindowUpdate. A guest that ignores it can still write;
+	// the host then fails that call at its byte cap.
+	KindWindow Kind = "window"
 )
 
 // Methods.
@@ -59,6 +67,9 @@ type Envelope struct {
 	Method  string          `json:"method,omitempty"`
 	Error   *CallError      `json:"error,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// Window, on a host→guest request, is the initial stream credit in
+	// payload bytes. Zero means the peer is not using flow control.
+	Window int `json:"window,omitempty"`
 }
 
 // CallError is a protocol-level error.
@@ -142,6 +153,10 @@ type FrameConn struct {
 	rw           io.ReadWriteCloser
 	mu           sync.Mutex
 	writeTimeout time.Duration
+	// wake bumps when a call context gives up. The writer holding mu
+	// re-arms its deadline so a later, shorter call is not stuck behind
+	// a guest that has stopped reading.
+	wake atomic.Uint64
 }
 
 func NewFrameConn(rw io.ReadWriteCloser) *FrameConn {
@@ -153,10 +168,89 @@ func (c *FrameConn) Write(env Envelope) error {
 	defer c.mu.Unlock()
 	setWriteDeadline(c.rw, c.writeTimeout)
 	err := WriteFrame(c.rw, env)
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+	if isNetTimeout(err) {
 		_ = c.rw.Close()
 	}
 	return err
+}
+
+// WriteContext writes one frame. The deadline is the sooner of the
+// connection write timeout and ctx. A cancelled ctx aborts this write and
+// any write already blocked on the same connection, then closes it: a
+// partial frame cannot be resynchronized. The connection stays open when
+// ctx is already done before any byte is written.
+func (c *FrameConn) WriteContext(ctx context.Context, env Envelope) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		c.wake.Add(1)
+		expireWriteDeadline(c.rw)
+		close(done)
+	})
+
+	c.mu.Lock()
+	err := c.writeLocked(ctx, env)
+	// Stop (or wait out) the canceller before clearing the deadline, still
+	// holding mu, so the clear cannot race the next writer's arm.
+	if !stop() {
+		<-done
+	}
+	setWriteDeadlineAt(c.rw, time.Time{})
+	c.mu.Unlock()
+	return err
+}
+
+func (c *FrameConn) writeLocked(ctx context.Context, env Envelope) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timeout := c.writeTimeout
+	if timeout <= 0 {
+		timeout = DefaultWriteTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	// A net timeout and ctx.Err can surface in either order when the
+	// armed deadline is the context's. Prefer the context in that case
+	// so a short pod-delete grace is what the caller observes.
+	armedCtx := false
+	if d, ok := ctx.Deadline(); ok && !d.After(deadline) {
+		deadline = d
+		armedCtx = true
+	}
+	mark := c.wake.Load()
+	setWriteDeadlineAt(c.rw, deadline)
+	if ctx.Err() != nil || c.wake.Load() != mark {
+		expireWriteDeadline(c.rw)
+	}
+	err := WriteFrame(c.rw, env)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		_ = c.rw.Close()
+		return ctx.Err()
+	}
+	if isNetTimeout(err) {
+		_ = c.rw.Close()
+		if armedCtx {
+			return context.DeadlineExceeded
+		}
+		return fmt.Errorf("guest write deadline exceeded: %w", err)
+	}
+	return err
+}
+
+func isNetTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func (c *FrameConn) Read() (Envelope, error) {
@@ -176,15 +270,31 @@ func setReadDeadline(rw io.ReadWriteCloser, d time.Duration) {
 }
 
 func setWriteDeadline(rw io.ReadWriteCloser, d time.Duration) {
+	if d <= 0 {
+		setWriteDeadlineAt(rw, time.Time{})
+		return
+	}
+	setWriteDeadlineAt(rw, time.Now().Add(d))
+}
+
+func setWriteDeadlineAt(rw io.ReadWriteCloser, t time.Time) {
 	c, ok := rw.(interface{ SetWriteDeadline(time.Time) error })
 	if !ok {
 		return
 	}
-	if d <= 0 {
-		_ = c.SetWriteDeadline(time.Time{})
+	_ = c.SetWriteDeadline(t)
+}
+
+// expireWriteDeadline unblocks a write parked in the peer window. A stream
+// with no deadline support is closed instead, which is the only way to
+// interrupt it.
+func expireWriteDeadline(rw io.ReadWriteCloser) {
+	c, ok := rw.(interface{ SetWriteDeadline(time.Time) error })
+	if !ok {
+		_ = rw.Close()
 		return
 	}
-	_ = c.SetWriteDeadline(time.Now().Add(d))
+	_ = c.SetWriteDeadline(time.Now())
 }
 
 func setConnDeadline(rw io.ReadWriteCloser, d time.Duration) {

@@ -182,7 +182,7 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 		sc = sidecar.None{}
 	}
 	puller := image.NewManager(cfg.CacheDir)
-	puller.InsecureRegistries = cfg.InsecureRegistries
+	configurePuller(puller, cfg)
 	e := &Engine{
 		cfg:            cfg,
 		slots:          slots,
@@ -200,6 +200,18 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 		e.startWarmPool()
 	}
 	return e
+}
+
+// configurePuller copies the image-pull budget onto the cache. Zero values
+// keep the image package defaults (256 GiB declared and compressed, 10 GiB
+// free, 30m deadline, 2m read stall).
+func configurePuller(m *image.Manager, cfg config.Config) {
+	m.InsecureRegistries = cfg.InsecureRegistries
+	m.PullTimeout = cfg.ImagePullTimeout
+	m.ReadStall = cfg.ImageReadStall
+	m.MaxImageBytes = cfg.MaxImageBytes
+	m.MaxCompressedBytes = cfg.MaxImageCompressedBytes
+	m.DiskHeadroom = cfg.ImageDiskHeadroom
 }
 
 // Close rejects new creates, stops the warm pool, and force-stops every pod

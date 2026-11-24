@@ -72,6 +72,16 @@ type Config struct {
 
 	InsecureRegistries []string
 
+	// Image pull limits. Zero means the image package default, which is
+	// also what Default sets so the flags show the real value.
+	// MaxImageBytes caps a declared or decompressed disk. A 128 GiB sparse
+	// macOS disk fits in 256 GiB; a 1 PiB annotation does not.
+	MaxImageBytes           int64
+	MaxImageCompressedBytes int64
+	ImageDiskHeadroom       int64
+	ImagePullTimeout        time.Duration
+	ImageReadStall          time.Duration
+
 	OTELEndpoint string
 
 	// AgentTCPFallback enables plaintext TCP to the guest agent (opt-in; vsock is primary).
@@ -92,26 +102,31 @@ func Default() Config {
 	cache := filepath.Join(home, "Library", "Caches", types.DefaultCacheBundleID)
 	host, _ := os.Hostname()
 	return Config{
-		NodeName:          strings.ToLower(host),
-		Runtime:           types.RuntimeVZ,
-		MaxVMs:            types.AppleMaxConcurrentVMs,
-		NetworkMode:       types.NetworkNAT,
-		ReservedCPU:       resource.MustParse("2"),
-		ReservedMemory:    resource.MustParse("4Gi"),
-		ReservedEphemeral: resource.MustParse("20Gi"),
-		Graphics:          types.DefaultGraphics(),
-		CacheDir:          cache,
-		KubeConfig:        filepath.Join(home, ".kube", "config"),
-		ListenAddress:     "127.0.0.1",
-		ListenPort:        10250,
-		LogLevel:          "info",
-		Resync:            time.Minute,
-		Workers:           10,
-		AgentReadyTimeout: 2 * time.Minute,
-		IPTimeout:         60 * time.Second,
-		ProbeInterval:     10 * time.Second,
-		InitTimeout:       2 * time.Minute,
-		ShutdownGrace:     60 * time.Second,
+		NodeName:                strings.ToLower(host),
+		Runtime:                 types.RuntimeVZ,
+		MaxVMs:                  types.AppleMaxConcurrentVMs,
+		NetworkMode:             types.NetworkNAT,
+		ReservedCPU:             resource.MustParse("2"),
+		ReservedMemory:          resource.MustParse("4Gi"),
+		ReservedEphemeral:       resource.MustParse("20Gi"),
+		Graphics:                types.DefaultGraphics(),
+		CacheDir:                cache,
+		KubeConfig:              filepath.Join(home, ".kube", "config"),
+		ListenAddress:           "127.0.0.1",
+		ListenPort:              10250,
+		LogLevel:                "info",
+		Resync:                  time.Minute,
+		Workers:                 10,
+		AgentReadyTimeout:       2 * time.Minute,
+		IPTimeout:               60 * time.Second,
+		ProbeInterval:           10 * time.Second,
+		InitTimeout:             2 * time.Minute,
+		ShutdownGrace:           60 * time.Second,
+		MaxImageBytes:           256 << 30,
+		MaxImageCompressedBytes: 256 << 30,
+		ImageDiskHeadroom:       10 << 30,
+		ImagePullTimeout:        30 * time.Minute,
+		ImageReadStall:          2 * time.Minute,
 	}
 }
 
@@ -204,6 +219,41 @@ func (c *Config) ApplyEnv() error {
 	if v := os.Getenv("DARWIN_NODE_INSECURE_REGISTRIES"); v != "" {
 		c.InsecureRegistries = splitComma(v)
 	}
+	if v := os.Getenv("DARWIN_NODE_MAX_IMAGE_BYTES"); v != "" {
+		n, err := parseByteSize("DARWIN_NODE_MAX_IMAGE_BYTES", v)
+		if err != nil {
+			return err
+		}
+		c.MaxImageBytes = n
+	}
+	if v := os.Getenv("DARWIN_NODE_MAX_IMAGE_COMPRESSED_BYTES"); v != "" {
+		n, err := parseByteSize("DARWIN_NODE_MAX_IMAGE_COMPRESSED_BYTES", v)
+		if err != nil {
+			return err
+		}
+		c.MaxImageCompressedBytes = n
+	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_DISK_HEADROOM"); v != "" {
+		n, err := parseByteSize("DARWIN_NODE_IMAGE_DISK_HEADROOM", v)
+		if err != nil {
+			return err
+		}
+		c.ImageDiskHeadroom = n
+	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_PULL_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_IMAGE_PULL_TIMEOUT: %w", err)
+		}
+		c.ImagePullTimeout = d
+	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_READ_STALL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_IMAGE_READ_STALL: %w", err)
+		}
+		c.ImageReadStall = d
+	}
 	if v := os.Getenv("DARWIN_NODE_AGENT_TCP_FALLBACK"); v != "" {
 		c.AgentTCPFallback = v == "true" || v == "1"
 	}
@@ -282,7 +332,26 @@ func (c Config) Validate() error {
 	if c.SSHPassword != "" {
 		return fmt.Errorf("password auth removed: DARWIN_NODE_SSH_PASSWORD and VZ_SSH_PASSWORD are no longer supported")
 	}
+	if c.MaxImageBytes < 0 || c.MaxImageCompressedBytes < 0 || c.ImageDiskHeadroom < 0 {
+		return fmt.Errorf("image size limits must not be negative")
+	}
+	if c.ImagePullTimeout < 0 || c.ImageReadStall < 0 {
+		return fmt.Errorf("image pull timeouts must not be negative")
+	}
 	return nil
+}
+
+// parseByteSize accepts a Kubernetes quantity (256Gi, 10Gi) or a plain integer.
+func parseByteSize(name, v string) (int64, error) {
+	q, err := resource.ParseQuantity(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	n := q.Value()
+	if n < 0 {
+		return 0, fmt.Errorf("%s: negative", name)
+	}
+	return n, nil
 }
 
 // ParseGraphics parses "1920x1200@80" or "none".

@@ -2,8 +2,11 @@ package disk
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,3 +47,50 @@ func TestCopySparseTrailingZerosUnknownSize(t *testing.T) {
 		t.Fatal("payload mismatch")
 	}
 }
+
+// A delta annotation can name a destination of 1 PiB. Truncating to that
+// size and then hashing the hole reads zeros until the process is killed.
+func TestCopySparseRejectsOnePiBDeclaredSize(t *testing.T) {
+	const onePiB = int64(1) << 50
+	err := CopySparse(filepath.Join(t.TempDir(), "big"), bytes.NewReader(nil), onePiB)
+	if err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("1 PiB declared size was not rejected by a size limit: %v", err)
+	}
+}
+
+func TestCopySparseHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var reads int
+	r := readerFunc(func(p []byte) (int, error) {
+		reads++
+		if reads == 2 {
+			cancel()
+		}
+		if reads > 2 {
+			return 0, fmt.Errorf("read %d times after cancel", reads)
+		}
+		n := 64
+		if n > len(p) {
+			n = len(p)
+		}
+		return n, nil
+	})
+	err := CopySparseContext(ctx, filepath.Join(t.TempDir(), "blob"), r, 0, Options{})
+	if err != context.Canceled {
+		t.Fatalf("got %v after %d reads, want context.Canceled", err, reads)
+	}
+}
+
+func TestCopySparseStopsWhenFreeSpaceBelowHeadroom(t *testing.T) {
+	orig := Available
+	Available = func(string) (int64, error) { return 100, nil }
+	t.Cleanup(func() { Available = orig })
+	err := CopySparse(filepath.Join(t.TempDir(), "blob"), bytes.NewReader([]byte("not-all-zero")), 0)
+	if err == nil || !strings.Contains(err.Error(), "headroom") {
+		t.Fatalf("got %v, want a headroom error", err)
+	}
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

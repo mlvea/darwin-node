@@ -223,6 +223,9 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 
 	inflight := newSemaphore(DefaultMaxInflight)
 	conn := &connState{upstream: newUpstreamRouter()}
+	// A handler blocked on stream credit must wake when the read loop
+	// ends. Otherwise Serve waits forever on that handler.
+	defer conn.cancelAll()
 
 	setConnDeadline(rw, h.handshakeTimeout())
 
@@ -267,6 +270,15 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 		// One-way cancellation for long-running streams (follows, execs).
 		if env.Kind == KindCancel {
 			conn.cancelByID(env.ID)
+			continue
+		}
+		// Host→guest stream credit. Unknown IDs are ignored so a grant
+		// for a finished call cannot stall the read loop.
+		if env.Kind == KindWindow {
+			var up WindowUpdate
+			if err := json.Unmarshal(env.Payload, &up); err == nil {
+				conn.addCredit(env.ID, up.Credit)
+			}
 			continue
 		}
 		if env.Kind != KindRequest {
@@ -355,6 +367,7 @@ type connState struct {
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
+	credit  map[string]*streamCredit
 }
 
 func (c *connState) registerCancel(id string, cancel context.CancelFunc) {
@@ -366,13 +379,109 @@ func (c *connState) registerCancel(id string, cancel context.CancelFunc) {
 	c.mu.Unlock()
 }
 
-func (c *connState) cancelByID(id string) {
+// streamCredit is the guest's view of one stream's send window.
+type streamCredit struct {
+	mu     sync.Mutex
+	left   int
+	window int
+	notify chan struct{}
+}
 
+func (c *connState) armCredit(id string, window int) {
+	if c == nil || window <= 0 || id == "" {
+		return
+	}
+	cr := &streamCredit{left: window, window: window, notify: make(chan struct{}, 1)}
+	c.mu.Lock()
+	if c.credit == nil {
+		c.credit = map[string]*streamCredit{}
+	}
+	c.credit[id] = cr
+	c.mu.Unlock()
+}
+
+func (c *connState) disarmCredit(id string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	delete(c.credit, id)
+	c.mu.Unlock()
+}
+
+func (c *connState) addCredit(id string, n int) {
+	if c == nil || n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	cr := c.credit[id]
+	c.mu.Unlock()
+	if cr == nil {
+		return
+	}
+	cr.mu.Lock()
+	cr.left += n
+	cr.mu.Unlock()
+	select {
+	case cr.notify <- struct{}{}:
+	default:
+	}
+}
+
+// acquireCredit waits until the host has granted n payload bytes. A frame
+// larger than the whole window is sent anyway; the host rejects it at the
+// cap instead of deadlocking the producer.
+func (c *connState) acquireCredit(ctx context.Context, id string, n int) error {
+	if c == nil || n <= 0 {
+		return nil
+	}
+	c.mu.Lock()
+	cr := c.credit[id]
+	c.mu.Unlock()
+	if cr == nil || (cr.window > 0 && n > cr.window) {
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cr.mu.Lock()
+		if cr.left >= n {
+			cr.left -= n
+			cr.mu.Unlock()
+			return nil
+		}
+		cr.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-cr.notify:
+		}
+	}
+}
+
+func (c *connState) cancelByID(id string) {
+	if c == nil {
+		return
+	}
 	c.mu.Lock()
 	cancel, ok := c.cancels[id]
 	delete(c.cancels, id)
 	c.mu.Unlock()
 	if ok {
+		cancel()
+	}
+}
+
+func (c *connState) cancelAll() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	cancels := c.cancels
+	c.cancels = nil
+	c.mu.Unlock()
+	for _, cancel := range cancels {
 		cancel()
 	}
 }
@@ -441,7 +550,16 @@ func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *a
 		if interactive && conn != nil {
 			defer conn.upstream.unregister(env.ID)
 		}
+		if conn != nil && env.Window > 0 {
+			conn.armCredit(env.ID, env.Window)
+			defer conn.disarmCredit(env.ID)
+		}
 		for ev := range stream {
+			if ev.Kind == KindStream && conn != nil && env.Window > 0 {
+				if err := conn.acquireCredit(sctx, env.ID, len(ev.Payload)); err != nil {
+					return err
+				}
+			}
 			if err := fc.Write(ev); err != nil {
 				return err
 			}
@@ -1051,11 +1169,24 @@ type streamWriter struct {
 	emit func([]byte)
 }
 
+// maxStreamChunk bounds one exec stdout/stderr frame so a single Write
+// cannot be larger than the host flow-control window.
+const maxStreamChunk = 32 << 10
+
 func (w *streamWriter) Write(p []byte) (int, error) {
-	if w.emit != nil && len(p) > 0 {
-		w.emit(p)
+	if w.emit == nil || len(p) == 0 {
+		return len(p), nil
 	}
-	return len(p), nil
+	total := len(p)
+	for len(p) > 0 {
+		n := len(p)
+		if n > maxStreamChunk {
+			n = maxStreamChunk
+		}
+		w.emit(p[:n])
+		p = p[n:]
+	}
+	return total, nil
 }
 
 // LogBuffer is a small in-memory ring of log lines.
