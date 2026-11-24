@@ -127,7 +127,10 @@ func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 }
 
 func (p *Provider) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
-	return errdefs.InvalidInput("pod updates are not supported; delete and recreate")
+	if p == nil || p.engine == nil {
+		return errdefs.InvalidInput("pod updates are not supported; delete and recreate")
+	}
+	return p.engine.UpdateMetadata(pod)
 }
 
 func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {

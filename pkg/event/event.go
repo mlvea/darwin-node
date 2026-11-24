@@ -44,6 +44,7 @@ const (
 	ReasonStarting            = "Starting"
 	ReasonVMDialing           = "VMDialing"
 	ReasonStarted             = "Started"
+	ReasonCompleted           = "Completed"
 	ReasonFailed              = "Failed"
 	ReasonFailedCreate        = "FailedCreate"
 	ReasonFailedStart         = "FailedStart"

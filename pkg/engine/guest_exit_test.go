@@ -65,7 +65,9 @@ func terminated(t *testing.T, p *corev1.Pod) *corev1.ContainerStateTerminated {
 func TestStoppedVMPublishesGuestExitCode(t *testing.T) {
 	rt := fake.New()
 	e := sidecarEngine(t, rt, sidecar.None{})
-	if err := e.Create(context.Background(), samplePod("die", "uid-guest-exit"), Credentials{}); err != nil {
+	pod := samplePod("die", "uid-guest-exit")
+	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
 	waitPhase(t, e, "default", "die", corev1.PodRunning)
@@ -96,7 +98,9 @@ func TestStoppedVMPublishesGuestExitCode(t *testing.T) {
 func TestGuestExitZeroIsPublished(t *testing.T) {
 	rt := fake.New()
 	e := sidecarEngine(t, rt, sidecar.None{})
-	if err := e.Create(context.Background(), samplePod("die", "uid-guest-zero"), Credentials{}); err != nil {
+	pod := samplePod("die", "uid-guest-zero")
+	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
 	waitPhase(t, e, "default", "die", corev1.PodRunning)
@@ -106,7 +110,7 @@ func TestGuestExitZeroIsPublished(t *testing.T) {
 	if err := podMachine(t, e, "default/die").Stop(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
-	p := waitPhase(t, e, "default", "die", corev1.PodFailed)
+	p := waitPhase(t, e, "default", "die", corev1.PodSucceeded)
 	term := terminated(t, p)
 	if term.ExitCode != 0 || term.Reason != "Completed" {
 		t.Fatalf("exit %d reason %q, a guest exit of 0 was dropped", term.ExitCode, term.Reason)
@@ -135,7 +139,9 @@ func TestGuestExitWithoutCodeStaysOne(t *testing.T) {
 func TestGuestExitBadReasonKeepsHostReason(t *testing.T) {
 	rt := fake.New()
 	e := sidecarEngine(t, rt, sidecar.None{})
-	if err := e.Create(context.Background(), samplePod("die", "uid-guest-bad-reason"), Credentials{}); err != nil {
+	pod := samplePod("die", "uid-guest-bad-reason")
+	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
 	waitPhase(t, e, "default", "die", corev1.PodRunning)
