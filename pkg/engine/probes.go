@@ -2,13 +2,18 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/darwin-node/darwin-node/internal/netutil"
 	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/guest"
 	"github.com/darwin-node/darwin-node/pkg/hostport"
+	"github.com/darwin-node/darwin-node/pkg/runtime"
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
 	"github.com/darwin-node/darwin-node/pkg/types"
 
@@ -643,15 +648,18 @@ func probeMsg(res guest.ProbeRes, err error) string {
 	return ""
 }
 
-func hostPortReservations(pod *corev1.Pod) []hostport.Mapping {
+func hostPortReservations(pod *corev1.Pod, bindHost string) []hostport.Mapping {
 	var out []hostport.Mapping
+	if pod == nil {
+		return out
+	}
 	for _, c := range pod.Spec.Containers {
 		for _, p := range c.Ports {
 			if p.HostPort == 0 {
 				continue
 			}
 			out = append(out, hostport.Mapping{
-				HostIP:        p.HostIP,
+				HostIP:        portBindHost(p.HostIP, bindHost),
 				HostPort:      int(p.HostPort),
 				ContainerPort: int(p.ContainerPort),
 				Protocol:      string(p.Protocol),
@@ -661,9 +669,15 @@ func hostPortReservations(pod *corev1.Pod) []hostport.Mapping {
 	return out
 }
 
-func hostPortMaps(pod *corev1.Pod, ip string) []hostport.Mapping {
+// hostPortMaps is the forward table for one pod. ip must be the address
+// the host assigned to the VM. A guest-reported loopback, link-local, or
+// other address is not forwarded, including from a liveness restart.
+// An empty port hostIP listens on bindHost when that is a real interface
+// address; otherwise the port's own hostIP is kept.
+func hostPortMaps(pod *corev1.Pod, ip, bindHost string) []hostport.Mapping {
 	var out []hostport.Mapping
-	if ip == "" {
+	canonical, err := forwardableIP(ip)
+	if err != nil || pod == nil {
 		return out
 	}
 	for _, c := range pod.Spec.Containers {
@@ -672,13 +686,223 @@ func hostPortMaps(pod *corev1.Pod, ip string) []hostport.Mapping {
 				continue
 			}
 			out = append(out, hostport.Mapping{
-				HostIP:        p.HostIP,
+				HostIP:        portBindHost(p.HostIP, bindHost),
 				HostPort:      int(p.HostPort),
-				PodIP:         ip,
+				PodIP:         canonical,
 				ContainerPort: int(p.ContainerPort),
 				Protocol:      string(p.Protocol),
 			})
 		}
 	}
 	return out
+}
+
+func portBindHost(explicit, bindHost string) string {
+	if strings.TrimSpace(explicit) != "" {
+		return explicit
+	}
+	return bindHost
+}
+
+// vmForwardIP is the address the host may publish or proxy to.
+// assigned is the runtime's address (DHCP lease, ARP for the VM MAC, or
+// the fake runtime's recorded IP). reported is the guest's NetInfo.
+// The guest is believed only when it names that same address. Loopback,
+// link-local, multicast, broadcast, and unspecified addresses are never
+// a VM target. When the host has not assigned an address, reported is
+// rejected and the result is empty. When the guest names something else,
+// the result is still the host assignment and err explains the mismatch.
+func vmForwardIP(reported, assigned string) (string, error) {
+	assignedIP, aerr := forwardableIP(assigned)
+	reported = strings.TrimSpace(reported)
+	if aerr != nil {
+		if reported == "" {
+			return "", aerr
+		}
+		if _, rerr := forwardableIP(reported); rerr != nil {
+			return "", fmt.Errorf("guest reported %s: %w", reported, rerr)
+		}
+		return "", fmt.Errorf("host has not assigned %s", reported)
+	}
+	if reported == "" {
+		return assignedIP, nil
+	}
+	reportedIP, rerr := forwardableIP(reported)
+	if rerr != nil {
+		return assignedIP, fmt.Errorf("guest reported %s: %w", reported, rerr)
+	}
+	if reportedIP != assignedIP {
+		return assignedIP, fmt.Errorf("guest reported %s, host assigned %s", reportedIP, assignedIP)
+	}
+	return assignedIP, nil
+}
+
+func forwardableIP(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", errors.New("no VM address")
+	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return "", fmt.Errorf("%s is not an IP address", s)
+	}
+	if !ipUsableForVM(ip) {
+		return "", fmt.Errorf("%s is not a VM address", ip)
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String(), nil
+	}
+	return ip.String(), nil
+}
+
+func ipUsableForVM(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil && v4[0] == 255 && v4[1] == 255 && v4[2] == 255 && v4[3] == 255 {
+		return false
+	}
+	return true
+}
+
+// chooseBindHost picks the address an empty hostIP port listens on.
+// A non-loopback local ListenAddress wins, then the node IP when that is
+// also a local non-loopback address. Loopback is not used here: the kubelet
+// default listen address is 127.0.0.1, and the host probe often reports lo
+// first. Binding hostPort there would hide it from the rest of the machine.
+// An explicit container hostIP of 127.0.0.1 is still honored by the caller.
+// An empty result means the listener stays on all interfaces.
+func chooseBindHost(listenAddr, nodeIP string, local func(net.IP) bool) string {
+	if ip := bindableHost(listenAddr, local, false); ip != "" {
+		return ip
+	}
+	return bindableHost(nodeIP, local, false)
+}
+
+func bindableHost(s string, local func(net.IP) bool, allowLoopback bool) string {
+	ip := net.ParseIP(strings.TrimSpace(s))
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
+		return ""
+	}
+	if ip.IsLoopback() && !allowLoopback {
+		return ""
+	}
+	if local != nil && !local(ip) {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
+func (e *Engine) hostPortBindHost() string {
+	if e == nil {
+		return ""
+	}
+	return chooseBindHost(e.cfg.ListenAddress, e.hostIP, ipAssignedLocal)
+}
+
+func ipAssignedLocal(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP == nil {
+			continue
+		}
+		if n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// assignedVMIP is the address the host recorded for this VM. The guest's
+// NetInfo is not a source. An empty status IP falls back to the ARP row
+// for the VM MAC, which is the lease the host can see.
+func assignedVMIP(machine runtime.Machine) string {
+	if machine == nil {
+		return ""
+	}
+	st := machine.Status()
+	if ip := strings.TrimSpace(st.IP); ip != "" {
+		return ip
+	}
+	if st.MAC == "" {
+		return ""
+	}
+	found, err := netutil.IPForMAC(st.MAC)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(found)
+}
+
+// notePodIP stores the host-assigned address. A guest report that does not
+// match is not stored. The previous address is left in place when the host
+// still has nothing forwardable, so a later lie cannot retarget the proxy.
+func (e *Engine) notePodIP(ctx context.Context, rec *podRecord, machine runtime.Machine, reported string) string {
+	ip, err := vmForwardIP(reported, assignedVMIP(machine))
+	// An empty report with no host assignment is the normal "no address yet"
+	// case. Warn only when the guest named an address we will not use.
+	if err != nil && e != nil && strings.TrimSpace(reported) != "" {
+		e.events.Warn(ctx, event.ReasonFailed, "pod IP: "+err.Error())
+	}
+	if ip == "" || rec == nil {
+		return ""
+	}
+	rec.mu.Lock()
+	old := ""
+	if rec.pod != nil {
+		old = rec.pod.Status.PodIP
+		rec.pod.Status.PodIP = ip
+	}
+	rec.mu.Unlock()
+	if old != "" && old != ip && e != nil {
+		e.events.Normal(ctx, event.ReasonPodIPChanged, old+" -> "+ip)
+	}
+	return ip
+}
+
+// syncHostPorts binds the proxy the first time the VM has a forwardable
+// address, and retargets it after that. A restart that learns the address
+// the host assigned still opens the listener; UpdateDest alone would not.
+func (e *Engine) syncHostPorts(rec *podRecord, pod *corev1.Pod, ip string) error {
+	if e == nil || pod == nil {
+		return nil
+	}
+	bindHost := e.hostPortBindHost()
+	on := false
+	if rec != nil {
+		rec.mu.Lock()
+		if rec.hostPortBindSet {
+			bindHost = rec.hostPortBind
+		}
+		on = rec.hostPortOn
+		rec.mu.Unlock()
+	}
+	maps := hostPortMaps(pod, ip, bindHost)
+	if len(maps) == 0 {
+		return nil
+	}
+	key := Key(pod.Namespace, pod.Name)
+	if on {
+		e.hostports.UpdateDest(key, maps)
+		return nil
+	}
+	if err := e.hostports.Bind(key, maps); err != nil {
+		return err
+	}
+	if rec != nil {
+		rec.mu.Lock()
+		rec.hostPortOn = true
+		rec.mu.Unlock()
+	}
+	return nil
 }

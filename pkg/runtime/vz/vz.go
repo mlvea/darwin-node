@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Code-Hex/vz/v3"
@@ -125,6 +126,7 @@ type machine struct {
 	finished *time.Time
 	ip       string
 	listener net.Listener
+	disp     *agentDispatch
 	console  *serialConsole
 }
 
@@ -132,11 +134,15 @@ func (m *machine) ID() types.MachineID { return m.id }
 
 func (m *machine) Start(ctx context.Context) error {
 	_ = ctx
+	var ln net.Listener
 	if devs := m.vm.SocketDevices(); len(devs) > 0 {
-		if ln, err := devs[0].Listen(uint32(types.GuestVsockPort)); err == nil {
-			m.listener = ln
+		if l, err := devs[0].Listen(uint32(types.GuestVsockPort)); err == nil {
+			ln = l
 		}
 	}
+	// Accept starts before the guest can dial. Connections that arrive
+	// with nobody waiting are closed instead of sitting in the vz buffer.
+	m.armVsock(ln)
 	// A nil *serialConsole passed as an io.Closer is not a nil interface.
 	var console io.Closer
 	if m.console != nil {
@@ -146,12 +152,29 @@ func (m *machine) Start(ctx context.Context) error {
 	if err != nil {
 		// Stop must not close these again. The VM did not come up, or
 		// Start failed after the listener was already open.
+		if m.disp != nil {
+			_ = m.disp.Close()
+			m.disp = nil
+		}
 		m.listener = nil
 		m.console = nil
 		return err
 	}
 	m.started = started
 	return nil
+}
+
+// armVsock replaces the accept loop. The previous listener is closed with
+// the previous loop so a restart cannot leave two of them running.
+func (m *machine) armVsock(ln net.Listener) {
+	if m.disp != nil {
+		_ = m.disp.Close()
+		m.disp = nil
+	}
+	m.listener = ln
+	if ln != nil {
+		m.disp = startAgentDispatch(ln)
+	}
 }
 
 func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
@@ -168,6 +191,12 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 	var stopErr error
 	if m.vm.State() != vz.VirtualMachineStateStopped {
 		stopErr = m.vm.Stop()
+	}
+	// Drop the accept loop before finishStop closes the listener again.
+	// Close is idempotent; a conn nobody is waiting for is already closed.
+	if m.disp != nil {
+		_ = m.disp.Close()
+		m.disp = nil
 	}
 	// A nil *serialConsole passed as an io.Closer is not a nil interface
 	// and Close would panic. Pass a nil interface instead.
@@ -211,29 +240,23 @@ func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	dialCtx, cancel := agentDialContext(ctx)
 	defer cancel()
 	m.ensureVsockListener()
-	if m.listener != nil {
+	if m.disp != nil {
 		vsockCtx, vcancel := vsockAttemptContext(dialCtx)
-		conn, err := acceptAgent(vsockCtx, m.listener)
+		conn, err := m.disp.Wait(vsockCtx)
 		vcancel()
 		if err == nil {
 			cli, derr := guest.Dial(dialCtx, conn, m.token, "darwin-node")
 			if derr == nil {
+				m.trackAssignedIP()
 				return cli, nil
 			}
 			_ = conn.Close()
-		} else if m.listener != nil {
-			// acceptAgent closes the listener on timeout. Drop the reference
-			// so the next attempt can Listen again instead of reusing a dead fd.
-			_ = m.listener.Close()
-			m.listener = nil
 		}
 	}
-	if ip := m.ip; ip == "" {
-		if found, err := netutil.IPForMAC(m.spec.MAC); err == nil {
-			m.ip = found
-			ip = found
-		}
-	}
+	// ARP is the host's record of the address it handed the VM. A miss
+	// leaves the previous address in place. The success path records it
+	// before returning. The guest's NetInfo is not this record.
+	m.trackAssignedIP()
 	if m.ip != "" {
 		d := net.Dialer{}
 		addr := net.JoinHostPort(m.ip, fmt.Sprintf("%d", types.GuestTCPPort))
@@ -250,9 +273,26 @@ func (m *machine) ensureVsockListener() {
 	}
 	if devs := m.vm.SocketDevices(); len(devs) > 0 {
 		if ln, err := devs[0].Listen(uint32(types.GuestVsockPort)); err == nil {
-			m.listener = ln
+			m.armVsock(ln)
 		}
 	}
+}
+
+// trackAssignedIP records the ARP entry for this VM's MAC. An empty lookup
+// leaves the previous address in place.
+func (m *machine) trackAssignedIP() {
+	if m.spec.MAC == "" {
+		return
+	}
+	found, err := netutil.IPForMAC(m.spec.MAC)
+	if err != nil {
+		return
+	}
+	found = strings.TrimSpace(found)
+	if found == "" {
+		return
+	}
+	m.ip = found
 }
 
 func (m *machine) Logs() io.ReadCloser {

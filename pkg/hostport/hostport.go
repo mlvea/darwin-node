@@ -125,6 +125,21 @@ func (m *Manager) Bind(pod string, maps []Mapping) error {
 	return nil
 }
 
+// Dest reports the current splice target for a listener, if one is bound.
+func (m *Manager) Dest(host string, port int) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.proxies[key(host, port)]
+	if !ok || p == nil {
+		return "", false
+	}
+	s, _ := p.dst.Load().(string)
+	return s, s != ""
+}
+
 // UpdateDest retargets existing listeners for pod after a VM reboot/IP change.
 func (m *Manager) UpdateDest(pod string, maps []Mapping) {
 	m.mu.Lock()
