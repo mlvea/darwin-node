@@ -56,10 +56,6 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 	}
 	srvCtx, srvCancel := context.WithCancel(context.Background())
 
-	oldDial := agentDialTimeout
-	agentDialTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { agentDialTimeout = oldDial })
-
 	slots, err := capacity.New(1)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +63,8 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 	cfg := config.Default()
 	cfg.Runtime = "fake"
 	cfg.CacheDir = t.TempDir()
-	cfg.AgentReadyTimeout = 3 * time.Second
+	// The vsock dial uses this budget, then TCP gets a fresh context.
+	cfg.AgentReadyTimeout = 400 * time.Millisecond
 	cfg.AllowNATWorkloads = true
 	e := New(cfg, slots, &hangDialRuntime{Runtime: fake.New()}, sidecar.None{}, event.Nop{}, "10.0.0.1")
 	t.Cleanup(func() { _ = e.Close() })

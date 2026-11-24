@@ -108,16 +108,27 @@ func TestReadyFailureClosesAgentConn(t *testing.T) {
 	if err := e.Create(context.Background(), samplePod("rdy", "uid-rdy"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	p := waitPhase(t, e, "default", "rdy", corev1.PodFailed)
-	if p.Status.Message == "" {
-		t.Fatal("failed pod missing message")
-	}
+	// A not-ready agent is retried. The failed attempt must still close its
+	// connection, or each retry leaks a pipe. The slot stays held.
 	select {
 	case <-closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("guest agent connection still open after Ready failure")
 	}
+	p, err := e.Get("default", "rdy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Status.Phase == corev1.PodFailed {
+		t.Fatalf("ready failure failed the pod: %s", p.Status.Message)
+	}
+	if used := e.slots.Used(); used != 1 {
+		t.Fatalf("slot released while the dial is retried: %d", used)
+	}
+	if err := e.Delete(context.Background(), "default", "rdy", 0); err != nil {
+		t.Fatal(err)
+	}
 	if used := e.slots.Used(); used != 0 {
-		t.Fatalf("slot leak after Ready failure: %d", used)
+		t.Fatalf("slot leak after delete: %d", used)
 	}
 }
