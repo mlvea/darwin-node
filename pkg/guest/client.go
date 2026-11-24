@@ -235,6 +235,26 @@ func (c *Client) Shutdown(ctx context.Context, req ShutdownReq) error {
 	return err
 }
 
+// StartWorkload asks the guest to run the VM container's command. The
+// call returns once the process has been started. Exit is a later notify.
+func (c *Client) StartWorkload(ctx context.Context, req WorkloadReq) error {
+	env, err := c.sess.Call(ctx, MethodWorkload, req)
+	if err != nil {
+		return err
+	}
+	res, err := Decode[WorkloadRes](env)
+	if err != nil {
+		return err
+	}
+	if !res.OK {
+		if res.Message == "" {
+			res.Message = "workload refused"
+		}
+		return fmt.Errorf("%s", res.Message)
+	}
+	return nil
+}
+
 func (c *Client) Selftest(ctx context.Context, name string) (SelftestRes, error) {
 	env, err := c.sess.Call(ctx, MethodSelftest, SelftestReq{Name: name})
 	if err != nil {

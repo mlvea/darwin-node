@@ -40,11 +40,14 @@ type Handler struct {
 	live *handlerLive
 
 	// Hooks allow tests to stub OS work. Nil → real implementation.
-	ExecFn           func(ctx context.Context, req ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error)
-	ProbeHTTPFn      func(ctx context.Context, req ProbeReq) ProbeRes
-	NetInfoFn        func() (NetInfoRes, error)
-	MetricsFn        func() (MetricsRes, error)
-	MaterializeFn    func(req MaterializeReq) MaterializeRes
+	ExecFn        func(ctx context.Context, req ExecReq, stdin io.Reader, stdout, stderr io.Writer) (int, error)
+	ProbeHTTPFn   func(ctx context.Context, req ProbeReq) ProbeRes
+	NetInfoFn     func() (NetInfoRes, error)
+	MetricsFn     func() (MetricsRes, error)
+	MaterializeFn func(req MaterializeReq) MaterializeRes
+	// WorkloadFn, when set, handles the Workload RPC instead of starting a
+	// process. The fake runtime and tests use it.
+	WorkloadFn       func(ctx context.Context, req WorkloadReq) error
 	ShutdownFn       func(ctx context.Context, req ShutdownReq) error
 	SelftestFn       func(req SelftestReq) SelftestRes
 	MetalAvailableFn func() bool
@@ -666,7 +669,7 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		ch := make(chan Envelope, 16)
 		go func() {
 			defer close(ch)
-			lines := h.LogBuffer.Tail(req.TailLines)
+			lines := h.LogBuffer.TailFormatted(req.TailLines, req.Timestamps)
 			for _, ln := range lines {
 				b, _ := json.Marshal(LogsEvent{Line: ln})
 				if !sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}) {
@@ -686,11 +689,11 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 				select {
 				case <-ctx.Done():
 					return
-				case ln, ok := <-notify:
+				case rec, ok := <-notify:
 					if !ok {
 						return
 					}
-					b, _ := json.Marshal(LogsEvent{Line: ln})
+					b, _ := json.Marshal(LogsEvent{Line: formatLogLine(rec.at, rec.data, req.Timestamps)})
 					select {
 					case ch <- Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}:
 					default:
@@ -743,6 +746,22 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodExec, Payload: b})
 		}()
 		return Envelope{}, ch
+
+	case MethodWorkload:
+		req, err := DecodePayload[WorkloadReq](env)
+		if err != nil {
+			return reply(nil, &CallError{Code: "bad_request", Message: err.Error()}), nil
+		}
+		if h.WorkloadFn != nil {
+			if err := h.WorkloadFn(ctx, req); err != nil {
+				return reply(nil, &CallError{Code: "workload", Message: err.Error()}), nil
+			}
+			return reply(WorkloadRes{OK: true}, nil), nil
+		}
+		if err := h.launchWorkload(req); err != nil {
+			return reply(nil, &CallError{Code: "workload", Message: err.Error()}), nil
+		}
+		return reply(WorkloadRes{OK: true}, nil), nil
 	}
 
 	return reply(nil, &CallError{Code: "unknown_method", Message: env.Method}), nil
@@ -1111,6 +1130,13 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
+// logLine is one ring entry. at is when the bytes were appended, so
+// kubectl logs --timestamps can prefix them without storing the prefix.
+type logLine struct {
+	at   time.Time
+	data []byte
+}
+
 // LogBuffer is a small in-memory ring of log lines.
 type LogBuffer struct {
 	mu       sync.Mutex
@@ -1118,8 +1144,8 @@ type LogBuffer struct {
 	maxLine  int
 	maxBytes int
 	nbytes   int
-	lines    [][]byte
-	subs     []chan []byte
+	lines    []logLine
+	subs     []chan logLine
 }
 
 func NewLogBuffer(n int) *LogBuffer {
@@ -1131,9 +1157,10 @@ func NewLogBuffer(n int) *LogBuffer {
 
 func (b *LogBuffer) Write(p []byte) (int, error) {
 	n := len(p)
-	if n == 0 {
-		return 0, nil
+	if n == 0 || b == nil {
+		return n, nil
 	}
+	now := time.Now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	maxLine := b.maxLine
@@ -1147,10 +1174,11 @@ func (b *LogBuffer) Write(p []byte) (int, error) {
 		}
 		p = p[len(chunk):]
 		cp := append([]byte(nil), chunk...)
-		b.lines = append(b.lines, cp)
+		line := logLine{at: now, data: cp}
+		b.lines = append(b.lines, line)
 		b.nbytes += len(cp)
 		b.dropLocked()
-		b.notifyLocked(cp)
+		b.notifyLocked(line)
 	}
 	return n, nil
 }
@@ -1162,30 +1190,61 @@ func (b *LogBuffer) dropLocked() {
 		if !overBytes && !overLines {
 			break
 		}
-		b.nbytes -= len(b.lines[0])
-		b.lines[0] = nil
+		b.nbytes -= len(b.lines[0].data)
+		b.lines[0].data = nil
 		b.lines = b.lines[1:]
 	}
 }
 
-func (b *LogBuffer) Tail(n int) [][]byte {
+func (b *LogBuffer) snapshot(n int) []logLine {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if n <= 0 || n >= len(b.lines) {
-		out := make([][]byte, len(b.lines))
+		out := make([]logLine, len(b.lines))
 		copy(out, b.lines)
 		return out
 	}
-	out := make([][]byte, n)
+	out := make([]logLine, n)
 	copy(out, b.lines[len(b.lines)-n:])
+	return out
+}
+
+func (b *LogBuffer) Tail(n int) [][]byte {
+	entries := b.snapshot(n)
+	out := make([][]byte, len(entries))
+	for i, e := range entries {
+		out[i] = e.data
+	}
+	return out
+}
+
+// TailFormatted is Tail with an RFC3339Nano prefix on each line when
+// timestamps is set. The prefix is the time the line was written.
+func (b *LogBuffer) TailFormatted(n int, timestamps bool) [][]byte {
+	entries := b.snapshot(n)
+	out := make([][]byte, len(entries))
+	for i, e := range entries {
+		out[i] = formatLogLine(e.at, e.data, timestamps)
+	}
+	return out
+}
+
+func formatLogLine(at time.Time, line []byte, timestamps bool) []byte {
+	if !timestamps || at.IsZero() {
+		return line
+	}
+	prefix := at.UTC().Format(time.RFC3339Nano) + " "
+	out := make([]byte, 0, len(prefix)+len(line))
+	out = append(out, prefix...)
+	out = append(out, line...)
 	return out
 }
 
 // Subscribe returns a channel receiving every line appended from now on.
 // Delivery is best-effort: a subscriber that falls more than its buffer
 // behind loses lines rather than blocking writers. cancel releases the slot.
-func (b *LogBuffer) Subscribe() (<-chan []byte, func()) {
-	ch := make(chan []byte, 256)
+func (b *LogBuffer) Subscribe() (<-chan logLine, func()) {
+	ch := make(chan logLine, 256)
 	b.mu.Lock()
 	b.subs = append(b.subs, ch)
 	b.mu.Unlock()
@@ -1203,7 +1262,7 @@ func (b *LogBuffer) Subscribe() (<-chan []byte, func()) {
 	return ch, cancel
 }
 
-func (b *LogBuffer) notifyLocked(line []byte) {
+func (b *LogBuffer) notifyLocked(line logLine) {
 	for i := 0; i < len(b.subs); i++ {
 		select {
 		case b.subs[i] <- line:

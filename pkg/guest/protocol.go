@@ -56,6 +56,10 @@ const (
 	MethodMaterialize = "Materialize"
 	MethodShutdown    = "Shutdown"
 	MethodSelftest    = "Selftest"
+	// MethodWorkload starts the VM container's command. An older agent
+	// replies unknown_method; the host then rejects the pod instead of
+	// leaving the command unused.
+	MethodWorkload = "Workload"
 	// MethodExit is the guest→host exit notice. See ExitReport.
 	MethodExit = "Exit"
 )

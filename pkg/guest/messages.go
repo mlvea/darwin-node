@@ -159,6 +159,21 @@ type MaterializeRes struct {
 	Message string   `json:"message,omitempty"`
 }
 
+// WorkloadReq is the VM container's command, args, and env. The host
+// sends it once the agent is up. An empty argv is not a request.
+type WorkloadReq struct {
+	Argv []string          `json:"argv,omitempty"`
+	Env  map[string]string `json:"env,omitempty"`
+	Dir  string            `json:"dir,omitempty"`
+}
+
+// WorkloadRes is the agent's acceptance of WorkloadReq. The process is
+// started before the response; its exit is a later Exit notify.
+type WorkloadRes struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+}
+
 // ShutdownReq asks the guest to halt.
 type ShutdownReq struct {
 	Reason  string `json:"reason,omitempty"`

@@ -24,6 +24,10 @@ type Runtime struct {
 	ProbeFn       func(ctx context.Context, req guest.ProbeReq) guest.ProbeRes
 	MetricsFn     func() (guest.MetricsRes, error)
 	MaterializeFn func(req guest.MaterializeReq) guest.MaterializeRes
+	// WorkloadFn handles the VM container command. Nil accepts the RPC
+	// and does not start a process. The engine tests that apply a pod
+	// command record the request here.
+	WorkloadFn func(ctx context.Context, req guest.WorkloadReq) error
 	// FailDialAfter makes DialAgent fail once the machine has already
 	// dialed this many times. Zero never fails. Start does not count.
 	FailDialAfter int
@@ -192,6 +196,12 @@ func (m *machine) Start(ctx context.Context) error {
 		},
 		ExecFn:    execFn,
 		MetricsFn: metricsFn,
+		WorkloadFn: func(ctx context.Context, req guest.WorkloadReq) error {
+			if m.rt != nil && m.rt.WorkloadFn != nil {
+				return m.rt.WorkloadFn(ctx, req)
+			}
+			return nil
+		},
 		MaterializeFn: func(req guest.MaterializeReq) guest.MaterializeRes {
 			if m.rt != nil {
 				atomic.AddInt32(&m.rt.matCalls, 1)

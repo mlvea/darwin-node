@@ -170,6 +170,9 @@ type handlerLive struct {
 	token  string
 	lim    *Limiter
 	nonces *nonceSet
+	// workload is set once the main process has been claimed, either by
+	// Supervise or by the Workload RPC.
+	workload bool
 	// exits receives ReportExit for each live connection. pendingExit is
 	// the last report, replayed onto a connection that comes up after it.
 	// pendingSeq matches waitSeq when that report is the one a caller is
@@ -204,6 +207,22 @@ func (l *handlerLive) setToken(token string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.token = token
+}
+
+// claimWorkload lets one caller own the main process. A second claim is
+// the host trying to apply a pod command after the image already started
+// one, or a second Workload RPC.
+func (l *handlerLive) claimWorkload() bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.workload {
+		return false
+	}
+	l.workload = true
+	return true
 }
 
 type nonceSet struct {
