@@ -36,9 +36,10 @@ const (
 	// KindNotify is a one-way guest-to-host frame. The host records it
 	// and does not reply. Unknown IDs of any other kind are still dropped.
 	KindNotify Kind = "notify"
-	// KindWindow is a host→guest credit grant for one stream ID. The
-	// payload is a WindowUpdate. A guest that ignores it can still write;
-	// the host then fails that call at its byte cap.
+	// KindWindow is a credit grant for one stream ID. Host→guest grants
+	// let the guest write stdout. Guest→host grants let the host write
+	// stdin. The payload is a WindowUpdate. A peer that ignores it can
+	// still write; the sender then waits or fails at its own cap.
 	KindWindow Kind = "window"
 )
 

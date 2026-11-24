@@ -162,39 +162,28 @@ func readLineNonblock(r io.Reader, wait time.Duration) string {
 
 func TestUpstreamRouterForwardAndDrop(t *testing.T) {
 	u := newUpstreamRouter()
-	ch := u.register("42")
+	q := u.register("42")
 	env := Envelope{ID: "42", Kind: KindStream, Method: MethodExec, Payload: mustJSON(ExecStdin{Data: []byte("x")})}
 	for i := 0; i < 200; i++ {
 		u.forward(env)
 	}
-	drained := 0
-drain:
-	for {
-		select {
-		case <-ch:
-			drained++
-		default:
-			break drain
-		}
-	}
-	if drained == 0 || drained > cap(ch)+1 {
-		t.Fatalf("forward delivered %d frames (cap=%d)", drained, cap(ch))
+	if q.len() != 200 {
+		t.Fatalf("forward kept %d frames, want 200", q.len())
 	}
 	u.unregister("42")
-	before := len(ch)
 	u.forward(env)
-	if len(ch) != before {
+	if q.len() != 200 {
 		t.Fatal("unregistered id still receives frames")
 	}
 }
 
 func TestExecStdinReaderDecodesAndEOFs(t *testing.T) {
-	ch := make(chan Envelope, 4)
-	r := newExecStdinReader(ch, true)
-	ch <- Envelope{Payload: mustJSON(ExecStdin{Data: []byte("ab")})}
-	ch <- Envelope{Payload: mustJSON(TtyResize{Cols: 80, Rows: 24})}
-	ch <- Envelope{Payload: mustJSON(ExecStdin{Data: []byte("cd")})}
-	ch <- Envelope{Payload: mustJSON(ExecStdin{EOF: true})}
+	q := newStdinQueue()
+	r := newExecStdinReader(q, true)
+	q.push(Envelope{Payload: mustJSON(ExecStdin{Data: []byte("ab")})})
+	q.push(Envelope{Payload: mustJSON(TtyResize{Cols: 80, Rows: 24})})
+	q.push(Envelope{Payload: mustJSON(ExecStdin{Data: []byte("cd")})})
+	q.push(Envelope{Payload: mustJSON(ExecStdin{EOF: true})})
 
 	buf := make([]byte, 8)
 	n, err := r.Read(buf)
@@ -257,7 +246,7 @@ func TestTTYExecSurvivesIdleTimeout(t *testing.T) {
 
 // Aborting the stdin reader must unblock a Read parked on upstream frames.
 func TestExecStdinReaderAbort(t *testing.T) {
-	r := newExecStdinReader(make(chan Envelope), true)
+	r := newExecStdinReader(newStdinQueue(), true)
 	errCh := make(chan error, 1)
 	buf := make([]byte, 4)
 	go func() {

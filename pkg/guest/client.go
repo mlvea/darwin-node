@@ -16,6 +16,11 @@ type Client struct {
 	info  HandshakeRes
 	close io.Closer
 
+	// stdinWindow is the guest's advertised stdin credit. Zero is an
+	// older guest: stdin is sent without waiting.
+	stdinWindow int
+	heartbeat   time.Duration
+
 	exitMu sync.Mutex
 	exitFn func(ExitReport)
 	exit   *ExitReport
@@ -58,7 +63,71 @@ func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string, cfg
 		return nil, fmt.Errorf("handshake rejected")
 	}
 	c.info = hs
+	c.stdinWindow = hs.StdinWindow
+	idle := time.Duration(hs.IdleMS) * time.Millisecond
+	if idle <= 0 {
+		idle = DefaultIdleTimeout
+	}
+	c.heartbeat = heartbeatEvery(hc, idle)
+	if c.heartbeat > 0 {
+		go c.heartbeatLoop()
+	}
 	return c, nil
+}
+
+// heartbeatEvery is how often the host sends Health. The result is
+// strictly inside the guest's idle window so a session with no probes
+// is not closed. A negative config value disables it.
+func heartbeatEvery(cfg HostConfig, idle time.Duration) time.Duration {
+	if cfg.HeartbeatInterval < 0 {
+		return 0
+	}
+	if cfg.HeartbeatInterval > 0 {
+		return cfg.HeartbeatInterval
+	}
+	if idle <= 0 {
+		idle = DefaultIdleTimeout
+	}
+	every := idle / 3
+	if every < time.Millisecond {
+		every = time.Millisecond
+	}
+	if every >= idle {
+		every = idle / 2
+	}
+	return every
+}
+
+// Done closes when the session's read loop ends.
+func (c *Client) Done() <-chan struct{} {
+	if c == nil || c.sess == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return c.sess.closed
+}
+
+func (c *Client) heartbeatLoop() {
+	t := time.NewTicker(c.heartbeat)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.Done():
+			return
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), c.heartbeat)
+			_, err := c.Health(ctx)
+			cancel()
+			if err != nil {
+				select {
+				case <-c.Done():
+					return
+				default:
+				}
+			}
+		}
+	}
 }
 
 func (c *Client) Info() HandshakeRes { return c.info }
@@ -202,6 +271,9 @@ func (c *Client) ExecInteractive(ctx context.Context, req ExecReq, stdin io.Read
 		return -1, err
 	}
 	if stdin != nil {
+		if c.stdinWindow > 0 {
+			c.sess.armSendCredit(id, c.stdinWindow)
+		}
 		go c.pumpStdin(ctx, id, stdin)
 	}
 	if resize != nil {
@@ -245,7 +317,10 @@ func (c *Client) ExecInteractive(ctx context.Context, req ExecReq, stdin io.Read
 func (c *Client) pumpStdin(ctx context.Context, id string, stdin io.Reader) {
 	defer func() {
 		if ctx.Err() == nil {
-			_ = c.sess.writeStream(ctx, id, ExecStdin{EOF: true})
+			// EOF is a frame like any other. It waits for credit so it
+			// cannot pass unread bytes, and it is not dropped when the
+			// guest is still reading.
+			_ = c.sess.writeUpstream(ctx, id, ExecStdin{EOF: true})
 		}
 	}()
 	buf := make([]byte, 32<<10)
@@ -253,7 +328,7 @@ func (c *Client) pumpStdin(ctx context.Context, id string, stdin io.Reader) {
 		n, rerr := stdin.Read(buf)
 		if n > 0 {
 			data := append([]byte(nil), buf[:n]...)
-			if err := c.sess.writeStream(ctx, id, ExecStdin{Data: data}); err != nil {
+			if err := c.sess.writeUpstream(ctx, id, ExecStdin{Data: data}); err != nil {
 				return
 			}
 		}

@@ -109,7 +109,12 @@ and `OnFailure`, and stays `Failed` under `Never`. A stop with no code
 stays `Failed` with the host message ("macOS VM Stopped unexpectedly").
 
 `ProtocolVersion` stays 1. An older host drops an unknown id, so this
-frame is additive. Delete, drain, and eviction of a pod whose workload
+frame is additive. Handshake may also carry `idleMs` and `stdinWindow`.
+An older guest omits both. The host then heartbeats on a 30s idle and
+sends stdin without waiting for credit. `KindWindow` is a credit grant
+in either direction: host to guest for stdout, guest to host for stdin.
+An older host treats a guest credit frame as an empty exec event and
+continues. Delete, drain, and eviction of a pod whose workload
 has not exited publish `Failed` with exit 137 when the grace period is 0
 and 143 otherwise, reason `Error`. A workload that already exited 0 stays
 `Succeeded`. A liveness restart clears the code so the new container does

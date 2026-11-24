@@ -471,7 +471,7 @@ func TestOverloadedInteractiveDoesNotPinConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() { _ = Serve(ctx, a, h) }()
-	cli, err := Dial(ctx, b, "secret", "host")
+	cli, err := Dial(ctx, b, "secret", "host", HostConfig{HeartbeatInterval: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
