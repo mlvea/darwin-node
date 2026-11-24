@@ -106,6 +106,9 @@ func TestUpdatePodAcceptsLabelAndAnnotation(t *testing.T) {
 // change when only a label changed. That is still a metadata update.
 func TestUpdatePodAcceptsEnvReorderWithLabel(t *testing.T) {
 	pod := neverPod("job", "uid-env-order")
+	// Env is applied with command. Without command the pod is rejected,
+	// because the host cannot inject variables into the image entrypoint.
+	pod.Spec.Containers[0].Command = []string{"/bin/work"}
 	pod.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}}
 	p, _, rt := runningProvider(t, pod)
 	starts := rt.Starts()

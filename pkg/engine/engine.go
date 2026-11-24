@@ -813,6 +813,12 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	}
 	e.notePodIP(ctx, rec, machine, reported)
 
+	if err := e.applyContainerWorkload(ctx, cli, pod); err != nil {
+		_ = cli.Close()
+		e.fail(rec, err)
+		return
+	}
+
 	rec.mu.Lock()
 	rec.machine = machine
 	rec.agent = cli
@@ -1578,7 +1584,7 @@ func (e *Engine) LogsVM(ctx context.Context, namespace, name string, opts api.Co
 			go func() {
 				fctx, cancel := context.WithCancel(ctx)
 				defer cancel()
-				ferr := cli.LogsFollow(fctx, guest.LogsReq{TailLines: opts.Tail, Follow: true}, w)
+				ferr := cli.LogsFollow(fctx, guest.LogsReq{TailLines: opts.Tail, Follow: true, Timestamps: opts.Timestamps}, w)
 				if ferr != nil && ferr != context.Canceled && ctx.Err() == nil {
 					_ = w.CloseWithError(ferr)
 					return
@@ -1587,7 +1593,7 @@ func (e *Engine) LogsVM(ctx context.Context, namespace, name string, opts api.Co
 			}()
 			return r, nil
 		}
-		lines, err := cli.Logs(ctx, guest.LogsReq{TailLines: opts.Tail})
+		lines, err := cli.Logs(ctx, guest.LogsReq{TailLines: opts.Tail, Timestamps: opts.Timestamps})
 		if err != nil {
 			return nil, err
 		}
@@ -2079,6 +2085,10 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	}
 	cli, err := machine.DialAgent(ctx)
 	if err != nil {
+		return err
+	}
+	if err := e.applyContainerWorkload(ctx, cli, pod); err != nil {
+		_ = cli.Close()
 		return err
 	}
 	rec.mu.Lock()

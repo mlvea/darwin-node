@@ -79,7 +79,8 @@ Methods:
 | `Metrics` | host->guest | CPU, memory, disk, net, optional GPU |
 | `NetInfo` | host->guest | interface IPs, primary pod IP |
 | `Materialize` | host->guest | map shared-dir entries onto mountPaths |
-| `Shutdown` | host->guest | graceful halt; host then `VM.Stop` |
+| `Shutdown` | host->guest | sync, then halt; host then `VM.Stop` |
+| `Workload` | host->guest | VM container command, args, env, directory |
 | `Exit` | guest->host, notify | one-way exit code; no reply |
 
 ### Exit notify
@@ -132,6 +133,17 @@ Darwin and a no-op elsewhere, so a Linux test can inject its own halt.
 The stock launchd job still starts the agent with no workload. An image
 that wants `terminated.exitCode` starts the workload with `run`. The fake
 runtime's `ReportExit` is the Linux test seam for the same frame.
+
+`Workload` is how the host applies the VM container's `command`, `args`,
+`env`, and `workingDir` after the agent is ready. The process stdout and
+stderr are appended to the agent log ring, one line at a time, and the
+exit frame is sent when it exits. A second `Workload`, or `run` plus a
+pod command, fails with `workload already started`. An older agent
+answers `unknown_method`. The host then rejects the pod instead of
+leaving the command unused. A pod with no command does not send
+`Workload`. `Shutdown` syncs the filesystem and then halts. On Darwin
+that is `sync(2)` and `shutdown -h now`. The halt runs even when sync
+returns an error. Elsewhere both are no-ops.
 
 ## In-guest lifecycle
 

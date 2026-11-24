@@ -89,16 +89,25 @@ func runServe(cmd *cobra.Command, listen, token, tokenFile string, insecure, tcp
 	return serve(cmd.Context(), listen, token, tokenFile, insecure, tcpFallback, workload)
 }
 
-func serve(ctx context.Context, listen, token, tokenFile string, insecure, tcpFallback bool, workload []string) error {
-	// With no workload the agent serves exec, probes, and logs until the
-	// process is stopped. `run` supervises the main process and, when it
-	// exits, writes an Exit notify before halting. See guest.ExitReport.
-	h := &guest.Handler{
+func newHandler(token string, insecure bool, stop guest.Stopper) *guest.Handler {
+	if stop == nil {
+		stop = guest.OSStopper{}
+	}
+	return &guest.Handler{
 		Token:                token,
 		AllowInsecureNoToken: insecure,
 		AgentVersion:         config.Version,
 		LogBuffer:            guest.NewLogBuffer(1024),
+		ShutdownFn:           guest.ShutdownFunc(stop),
 	}
+}
+
+func serve(ctx context.Context, listen, token, tokenFile string, insecure, tcpFallback bool, workload []string) error {
+	// With no workload the agent serves exec, probes, and logs until the
+	// process is stopped. `run` supervises the main process and, when it
+	// exits, writes an Exit notify before halting. See guest.ExitReport.
+	// Shutdown syncs and halts so a pod stop flushes shared volumes.
+	h := newHandler(token, insecure, nil)
 	h.Init()
 	if tokenFile != "" {
 		go h.WatchTokenFile(ctx, tokenFile, 2*time.Second)
