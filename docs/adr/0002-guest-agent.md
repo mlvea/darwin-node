@@ -113,10 +113,17 @@ exit 0 before the VM is torn down. A liveness restart clears the code so
 the new container does not inherit it.
 
 `Handler.ReportExit` is the in-process call that writes the frame.
-`cmd/guest-agent` serves the connection and does not call it, and it does
-not halt the VM. A guest image that wants a real `terminated.exitCode`
-calls `ReportExit` on its live handler before it halts. The fake runtime's
-`ReportExit` is the Linux test seam for the same frame.
+`darwin-guest-agent` with no workload serves the connection and does not
+send a code or halt. `darwin-guest-agent run -- <command>` runs that
+command as the main workload. When the process exits, the agent writes
+this frame with the real exit code and then halts. Exit 0 uses reason
+`Completed`. Any other code, including a signal death mapped to `128+N`,
+uses reason `Error`. The send waits at most 2s. A host that never reads
+is disconnected so the halt is not stuck. Halt is `shutdown -h now` on
+Darwin and a no-op elsewhere, so a Linux test can inject its own halt.
+The stock launchd job still starts the agent with no workload. An image
+that wants `terminated.exitCode` starts the workload with `run`. The fake
+runtime's `ReportExit` is the Linux test seam for the same frame.
 
 ## In-guest lifecycle
 

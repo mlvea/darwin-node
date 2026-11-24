@@ -245,11 +245,17 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	}
 	var probes vmProbeState
 	var sched vmProbeSched
+	// Sidecar probe I/O runs off this goroutine. The watch still applies
+	// the results, so a slow sidecar sample cannot hold a VM probe.
+	flights := newSideFlights()
+	defer flights.stop()
 	// The first pass runs immediately and checks the pod context before
 	// Create or Start. A call that has already entered Create or Start
 	// does not observe cancellation. Delete waits for this goroutine, then
 	// removes whatever that call started. Later passes wait on the probe
 	// clock, not on a single ticker, so each probe keeps its own period.
+	// A finished sidecar probe wakes the loop so its result is applied
+	// without waiting out the next period.
 	step := func() bool {
 		if ctx.Err() != nil {
 			return false
@@ -258,7 +264,14 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 			return false
 		}
 		e.refreshSidecarStatus(ctx, rec)
-		return e.noteSidecarExit(rec) && e.restartExitedSidecars(ctx, rec) && e.tickSidecarStartup(ctx, rec) && e.tickSidecarLiveness(ctx, rec) && e.tickSidecarReadiness(ctx, rec) && e.tickProbes(ctx, rec, &sched, &probes)
+		if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
+			return false
+		}
+		if !e.settleSidecarProbes(ctx, rec, flights) {
+			return false
+		}
+		e.launchSidecarProbes(ctx, rec, flights)
+		return e.tickProbes(ctx, rec, &sched, &probes)
 	}
 	if !step() {
 		return
@@ -270,13 +283,31 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		timer := e.newProbeTimer(e.nextProbeDelay(rec, &sched, interval))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
+			stopProbeTimer(timer)
 			return
-		case <-timer.C():
-			timer.Stop()
+		case <-flights.wake:
+			stopProbeTimer(timer)
 			if !step() {
 				return
 			}
+		case <-timer.C():
+			if !step() {
+				return
+			}
+		}
+	}
+}
+
+// stopProbeTimer releases a wait. A timer that already fired is drained so
+// the value does not sit on the channel.
+func stopProbeTimer(timer probeTimer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C():
+		default:
 		}
 	}
 }
