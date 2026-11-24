@@ -260,8 +260,10 @@ func TestWarmAdoptDialsAfterProbeSessionReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := waitPhase(t, e, "default", "hot", corev1.PodRunning)
-	if p.Status.PodIP == "" {
-		t.Fatal("adopted pod missing IP")
+	// This machine clears the runtime address. A guest NetInfo of
+	// 192.168.64.9 must not be published: the host never assigned it.
+	if p.Status.PodIP != "" {
+		t.Fatalf("PodIP %q was published from the guest; the runtime assigned no address", p.Status.PodIP)
 	}
 	if inner.Starts() != 1 {
 		t.Fatalf("adoption must not cold-boot, starts=%d", inner.Starts())

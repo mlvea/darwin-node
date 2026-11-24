@@ -168,6 +168,9 @@ type podRecord struct {
 	tokens          []volume.ProjectedToken
 	refreshAt       time.Time
 	tokensNeedCopy  bool
+	hostPortBind    string // address reserved at admission; empty means every interface
+	hostPortBindSet bool
+	hostPortOn      bool // proxy is bound; later IP updates retarget it
 }
 
 // New constructs an engine.
@@ -390,7 +393,14 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 	e.pods[key] = rec
 	e.mu.Unlock()
 
-	if maps := hostPortReservations(pod); len(maps) > 0 {
+	// Freeze the listen address with the reservation. A later interface
+	// change must not Bind or Release under a different key.
+	bindHost := e.hostPortBindHost()
+	rec.mu.Lock()
+	rec.hostPortBind = bindHost
+	rec.hostPortBindSet = true
+	rec.mu.Unlock()
+	if maps := hostPortReservations(pod, bindHost); len(maps) > 0 {
 		if err := e.hostports.Reserve(key, maps); err != nil {
 			e.mu.Lock()
 			adopted := rec.adopt
@@ -801,11 +811,11 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		}
 	}
 
-	if netinfo, err := cli.NetInfo(ctx); err == nil && netinfo.PrimaryIP != "" {
-		rec.mu.Lock()
-		rec.pod.Status.PodIP = netinfo.PrimaryIP
-		rec.mu.Unlock()
+	reported := ""
+	if netinfo, err := cli.NetInfo(ctx); err == nil {
+		reported = netinfo.PrimaryIP
 	}
+	e.notePodIP(ctx, rec, machine, reported)
 
 	rec.mu.Lock()
 	rec.machine = machine
@@ -856,12 +866,10 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	rec.ready = rec.startupDone && !hasReadyProbe
 	ip := rec.pod.Status.PodIP
 	rec.mu.Unlock()
-	if maps := hostPortMaps(pod, ip); len(maps) > 0 {
-		if err := e.hostports.Bind(Key(pod.Namespace, pod.Name), maps); err != nil {
-			e.events.Warn(ctx, event.ReasonFailed, "hostPort: "+err.Error())
-			e.fail(rec, err)
-			return
-		}
+	if err := e.syncHostPorts(rec, pod, ip); err != nil {
+		e.events.Warn(ctx, event.ReasonFailed, "hostPort: "+err.Error())
+		e.fail(rec, err)
+		return
 	}
 	e.events.Normal(ctx, event.ReasonStarted, "macOS VM running; guest agent ready")
 	// Count the watch before it runs. Delete waits for it, then stops the
@@ -1341,9 +1349,18 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	if st != nil {
 		vmStatus = st.Status()
 		vmState = vmStatus.State
-		if vmStatus.IP != "" {
-			ip = vmStatus.IP
+		// Status.IP is the address the runtime recorded (DHCP, ARP, or the
+		// fake runtime). A loopback or link-local value is not published:
+		// the TCP fallback may still dial it, but kubelet must not be told
+		// the pod lives there.
+		if canonical, ferr := forwardableIP(vmStatus.IP); ferr == nil {
+			ip = canonical
 		}
+	}
+	if canonical, ferr := forwardableIP(ip); ferr == nil {
+		ip = canonical
+	} else {
+		ip = ""
 	}
 	started := rec.startupDone && rec.agentOK && rec.phase == corev1.PodRunning
 	vmReady := rec.phase == corev1.PodRunning && rec.ready && rec.agentOK
@@ -2005,22 +2022,16 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	rec.mu.Unlock()
 	e.watchGuestExit(rec, cli)
 
-	if netinfo, err := cli.NetInfo(ctx); err == nil && netinfo.PrimaryIP != "" {
-		rec.mu.Lock()
-		old := ""
-		if rec.pod != nil {
-			old = rec.pod.Status.PodIP
-			rec.pod.Status.PodIP = netinfo.PrimaryIP
-		}
-		rec.mu.Unlock()
-		if old != "" && old != netinfo.PrimaryIP {
-			e.events.Normal(ctx, event.ReasonPodIPChanged, old+" -> "+netinfo.PrimaryIP)
-		}
-		if pod != nil {
-			if maps := hostPortMaps(pod, netinfo.PrimaryIP); len(maps) > 0 {
-				e.hostports.UpdateDest(Key(pod.Namespace, pod.Name), maps)
-			}
-		}
+	reported := ""
+	if netinfo, err := cli.NetInfo(ctx); err == nil {
+		reported = netinfo.PrimaryIP
+	}
+	// A liveness restart learns the address the host assigned. The guest's
+	// NetInfo is accepted only when it names that same address, so the
+	// proxy cannot be pointed at loopback or another network.
+	ip := e.notePodIP(ctx, rec, machine, reported)
+	if err := e.syncHostPorts(rec, pod, ip); err != nil {
+		return err
 	}
 	if len(places) > 0 {
 		var vp []guest.VolumePlace
@@ -2078,10 +2089,16 @@ func (e *Engine) DebugSnapshot() (used, max int, pods []DebugPod) {
 			RestartCount: rec.restartCount,
 		}
 		if rec.machine != nil {
-			dp.VMState = string(rec.machine.Status().State)
-			if rec.machine.Status().IP != "" {
-				dp.PodIP = rec.machine.Status().IP
+			st := rec.machine.Status()
+			dp.VMState = string(st.State)
+			if canonical, ferr := forwardableIP(st.IP); ferr == nil {
+				dp.PodIP = canonical
 			}
+		}
+		if canonical, ferr := forwardableIP(dp.PodIP); ferr == nil {
+			dp.PodIP = canonical
+		} else {
+			dp.PodIP = ""
 		}
 		rec.mu.Unlock()
 		pods = append(pods, dp)
