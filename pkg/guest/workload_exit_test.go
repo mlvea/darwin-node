@@ -82,7 +82,10 @@ func TestWorkloadExitReachesHostBeforeHalt(t *testing.T) {
 		code   int32
 		reason string
 	}{
-		{name: "zero", argv: []string{"/bin/true"}, code: 0, reason: "Completed"},
+		// /bin/true did not exit 0 on the macOS CI runner: the host recorded
+		// reason Error, which is sent only for a non-zero status. The
+		// non-zero case already runs under /bin/sh, so exit 0 uses it too.
+		{name: "zero", argv: []string{"/bin/sh", "-c", "exit 0"}, code: 0, reason: "Completed"},
 		{name: "nonzero", argv: []string{"/bin/sh", "-c", "exit 7"}, code: 7, reason: "Error"},
 		{name: "signal", argv: []string{"/bin/sh", "-c", "kill -KILL $$"}, code: 128 + 9, reason: "Error"},
 	}
@@ -124,7 +127,7 @@ func TestWorkloadExitReachesHostBeforeHalt(t *testing.T) {
 				t.Fatalf("host did not observe workload exit %d", tc.code)
 			}
 			if *rep.ExitCode != tc.code || rep.Reason != tc.reason {
-				t.Fatalf("exit code %d reason %q, workload reported %+v", tc.code, tc.reason, rep)
+				t.Fatalf("want exit %d reason %q, got code %d reason %q", tc.code, tc.reason, *rep.ExitCode, rep.Reason)
 			}
 			if got := NormalizeExitReason(rep.Reason); got != rep.Reason {
 				t.Fatalf("reason %q is not a valid exit reason", rep.Reason)
@@ -162,7 +165,7 @@ func TestWorkloadExitHostUnreachableStillHalts(t *testing.T) {
 	start := time.Now()
 	done := make(chan struct{})
 	go func() {
-		Supervise(context.Background(), h, []string{"/bin/true"}, 200*time.Millisecond, func() { close(halted) })
+		Supervise(context.Background(), h, []string{"/bin/sh", "-c", "exit 0"}, 200*time.Millisecond, func() { close(halted) })
 		close(done)
 	}()
 	select {
