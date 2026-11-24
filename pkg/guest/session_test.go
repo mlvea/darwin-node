@@ -107,20 +107,29 @@ func TestSessionStreamWriteErrorClearsPending(t *testing.T) {
 	}
 }
 
-// A stream buffer that is already full must still deliver the next frame
-// when the reader arrives during the grace period. Dropping immediately
-// closes the stream and the exec exit frame is lost.
+// A frame that arrives while its reader is paused must still be delivered.
+// The old 200ms grace dropped it, and the exec exit frame went with it.
 func TestDispatchFullBufferWaitsForALateReceiver(t *testing.T) {
-	ch := make(chan Envelope, 1)
-	ch <- Envelope{ID: "1", Kind: KindStream, Payload: []byte("1")}
-	s := &Session{pending: map[string]chan Envelope{"1": ch}}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	s := newSession(a, HostConfig{})
+	if _, err := s.register("1", true); err != nil {
+		t.Fatal(err)
+	}
+	s.dispatch(Envelope{ID: "1", Kind: KindStream, Payload: []byte("1")})
 
 	got := make(chan Envelope, 2)
 	go func() {
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
+		w := func() *waiter {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.pending["1"]
+		}()
 		for i := 0; i < 2; i++ {
-			env, ok := <-ch
-			if !ok {
+			env, err := s.recvReleased(context.Background(), w)
+			if err != nil {
 				got <- Envelope{}
 				return
 			}
@@ -141,7 +150,7 @@ func TestDispatchFullBufferWaitsForALateReceiver(t *testing.T) {
 		}
 	}
 	if string(frames[0].Payload) != "1" || string(frames[1].Payload) != "2" {
-		t.Fatalf("frames %q %q, full buffer dropped the frame instead of waiting", frames[0].Payload, frames[1].Payload)
+		t.Fatalf("frames %q %q, a late receiver lost a frame", frames[0].Payload, frames[1].Payload)
 	}
 	if s.pendingCount() != 1 {
 		t.Fatalf("pending=%d, stream was dropped while the receiver was late", s.pendingCount())

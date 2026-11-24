@@ -22,13 +22,61 @@ const (
 	DefaultHandshakeTimeout = 10 * time.Second
 	DefaultIdleTimeout      = 30 * time.Second
 	DefaultWriteTimeout     = 30 * time.Second
+
+	// DefaultMaxCallBytes is the unread stream payload one host call may
+	// hold, and the most log bytes Client.Logs will collect. The guest log
+	// ring is 8 MiB; past this the call fails instead of growing the heap.
+	DefaultMaxCallBytes = 8 << 20
+	// DefaultMaxSessionBytes is the unread stream payload one host session
+	// may hold across every call. Eight full call buffers.
+	DefaultMaxSessionBytes = 64 << 20
 )
 
 const (
 	ErrCodeOverloaded      = "overloaded"
 	ErrCodeUnauthorized    = "unauthorized"
 	ErrCodeUnauthenticated = "unauthenticated"
+	ErrCodeLimit           = "limit"
 )
+
+// HostConfig overrides host-side session limits. The zero value selects the
+// defaults. Dial accepts one HostConfig; there is no process-wide flag.
+type HostConfig struct {
+	// WriteTimeout is the deadline for one host write. A guest that stops
+	// reading fails the call here, or sooner when the call context expires.
+	WriteTimeout time.Duration
+	// MaxCallBytes caps unread stream payload for one call, and the log
+	// bytes Client.Logs retains.
+	MaxCallBytes int
+	// MaxSessionBytes caps unread stream payload for the whole session.
+	// A frame that would pass it fails that call.
+	MaxSessionBytes int
+}
+
+func (c HostConfig) writeTimeout() time.Duration {
+	if c.WriteTimeout > 0 {
+		return c.WriteTimeout
+	}
+	return DefaultWriteTimeout
+}
+
+func (c HostConfig) maxCallBytes() int {
+	if c.MaxCallBytes > 0 {
+		return c.MaxCallBytes
+	}
+	return DefaultMaxCallBytes
+}
+
+func (c HostConfig) maxSessionBytes() int {
+	n := c.MaxSessionBytes
+	if n <= 0 {
+		n = DefaultMaxSessionBytes
+	}
+	if call := c.maxCallBytes(); n < call {
+		n = call
+	}
+	return n
+}
 
 // Limiter caps concurrent Serve connections and Exec calls.
 type Limiter struct {
