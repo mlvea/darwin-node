@@ -4,6 +4,9 @@ The serial console is the rescue hatch for the failure mode SSH-era
 nodes cannot handle: the in-guest agent is down, SSH is disabled, and
 you still need single-user mode. It attaches a VM serial port that is
 independent of `darwin-guest-agent`, of sshd, and of the network stack.
+Guest exit codes travel on the agent connection as an `Exit` frame
+([ADR 0002](adr/0002-guest-agent.md)). This console stays a raw serial
+byte stream.
 
 ## Enabling
 

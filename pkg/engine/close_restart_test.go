@@ -372,10 +372,14 @@ func TestCloseDuringSidecarStartupProbeDoesNotRestartVM(t *testing.T) {
 	sc := &blockingProbeSidecar{entered: make(chan struct{})}
 	e := sidecarEngine(t, rt, sc)
 	pod := hybridPod("hy", "uid-hy-probe", corev1.RestartPolicyAlways)
+	// Sidecar probes no longer block the watch, so a due failing VM liveness
+	// would restart on its own. The delay keeps this test on the
+	// cancellation path.
 	pod.Spec.Containers[0].LivenessProbe = &corev1.Probe{
-		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"live"}}},
-		FailureThreshold: 1,
-		TimeoutSeconds:   1,
+		ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"live"}}},
+		FailureThreshold:    1,
+		TimeoutSeconds:      1,
+		InitialDelaySeconds: 3600,
 	}
 	pod.Spec.Containers[1].StartupProbe = &corev1.Probe{
 		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"sidecar-boot"}}},

@@ -28,22 +28,25 @@ func main() {
 		Use:   "darwin-guest-agent",
 		Short: "In-guest agent for darwin-node (exec, logs, probes, metrics)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if token == "" && tokenFile != "" {
-				if t, err := guest.ReadTokenFile(tokenFile); err == nil {
-					token = t
-				}
-			}
-			if listen == "" {
-				listen = ":" + strconv.Itoa(types.GuestTCPPort)
-			}
-			return serve(cmd.Context(), listen, token, tokenFile, insecure, tcpFallback)
+			return runServe(cmd, listen, token, tokenFile, insecure, tcpFallback, nil)
 		},
 	}
-	cmd.Flags().StringVar(&listen, "listen", ":"+strconv.Itoa(types.GuestTCPPort), "TCP listen address (used with --agent-tcp-fallback)")
-	cmd.Flags().StringVar(&token, "token", os.Getenv("DARWIN_NODE_AGENT_TOKEN"), "shared handshake token")
-	cmd.Flags().StringVar(&tokenFile, "token-file", defaultTokenFile(), "token file (virtio-fs control share)")
-	cmd.Flags().BoolVar(&insecure, "insecure-no-token", false, "allow empty token (development only)")
-	cmd.Flags().BoolVar(&tcpFallback, "agent-tcp-fallback", false, "listen on plaintext TCP in addition to vsock")
+	// Persistent so `run` accepts the same flags. The names and defaults
+	// are unchanged.
+	f := cmd.PersistentFlags()
+	f.StringVar(&listen, "listen", ":"+strconv.Itoa(types.GuestTCPPort), "TCP listen address (used with --agent-tcp-fallback)")
+	f.StringVar(&token, "token", os.Getenv("DARWIN_NODE_AGENT_TOKEN"), "shared handshake token")
+	f.StringVar(&tokenFile, "token-file", defaultTokenFile(), "token file (virtio-fs control share)")
+	f.BoolVar(&insecure, "insecure-no-token", false, "allow empty token (development only)")
+	f.BoolVar(&tcpFallback, "agent-tcp-fallback", false, "listen on plaintext TCP in addition to vsock")
+	cmd.AddCommand(&cobra.Command{
+		Use:   "run -- command [args...]",
+		Short: "Run the main workload, report its exit code, then halt",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServe(cmd, listen, token, tokenFile, insecure, tcpFallback, args)
+		},
+	})
 	cmd.AddCommand(&cobra.Command{
 		Use:   "selftest [name]",
 		Short: "Run an in-guest self-test (agent|metal)",
@@ -74,7 +77,22 @@ func defaultTokenFile() string {
 	return types.GuestAutomountRoot + "/" + types.ControlShareName + "/" + types.GuestAgentTokenFile
 }
 
-func serve(ctx context.Context, listen, token, tokenFile string, insecure, tcpFallback bool) error {
+func runServe(cmd *cobra.Command, listen, token, tokenFile string, insecure, tcpFallback bool, workload []string) error {
+	if token == "" && tokenFile != "" {
+		if t, err := guest.ReadTokenFile(tokenFile); err == nil {
+			token = t
+		}
+	}
+	if listen == "" {
+		listen = ":" + strconv.Itoa(types.GuestTCPPort)
+	}
+	return serve(cmd.Context(), listen, token, tokenFile, insecure, tcpFallback, workload)
+}
+
+func serve(ctx context.Context, listen, token, tokenFile string, insecure, tcpFallback bool, workload []string) error {
+	// With no workload the agent serves exec, probes, and logs until the
+	// process is stopped. `run` supervises the main process and, when it
+	// exits, writes an Exit notify before halting. See guest.ExitReport.
 	h := &guest.Handler{
 		Token:                token,
 		AllowInsecureNoToken: insecure,
@@ -87,12 +105,28 @@ func serve(ctx context.Context, listen, token, tokenFile string, insecure, tcpFa
 	}
 	go dialHostVsock(ctx, h)
 
+	if len(workload) > 0 {
+		if tcpFallback {
+			go func() { _ = listenTCP(ctx, h, listen, tokenFile, insecure) }()
+		}
+		if err := guest.Supervise(ctx, h, workload, guest.DefaultExitSendTimeout, guest.HaltGuest); err != nil {
+			fmt.Fprintf(os.Stderr, "workload: %v\n", err)
+		}
+		// KeepAlive would start the workload again if this process
+		// returned. Block until the VM halt or a signal kills us.
+		<-ctx.Done()
+		return nil
+	}
+
 	if !tcpFallback {
 		fmt.Fprintf(os.Stderr, "darwin-guest-agent %s vsock-only (TCP fallback disabled)\n", config.Version)
 		<-ctx.Done()
 		return nil
 	}
+	return listenTCP(ctx, h, listen, tokenFile, insecure)
+}
 
+func listenTCP(ctx context.Context, h *guest.Handler, listen, tokenFile string, insecure bool) error {
 	if h.CurrentToken() == "" && !insecure {
 		fmt.Fprintf(os.Stderr, "waiting for non-empty agent token before TCP listen (%s)\n", tokenFile)
 		if err := waitForToken(ctx, h, tokenFile); err != nil {

@@ -120,20 +120,24 @@ const defaultCloseTimeout = 30 * time.Second
 type podRecord struct {
 	mu sync.Mutex
 
-	pod             *corev1.Pod
-	machine         runtime.Machine
-	agent           *guest.Client
-	places          []volume.Placement
-	token           string
-	phase           corev1.PodPhase
-	reason          string
-	message         string
-	startedAt       *metav1.Time
-	agentOK         bool
-	ready           bool
-	startupDone     bool      // startup probe passed, or there is no startup probe
-	startupFails    int32     // consecutive startup failures since the last start
-	startupSince    time.Time // anchor for the startup initial delay; zero uses startedAt
+	pod          *corev1.Pod
+	machine      runtime.Machine
+	agent        *guest.Client
+	places       []volume.Placement
+	token        string
+	phase        corev1.PodPhase
+	reason       string
+	message      string
+	startedAt    *metav1.Time
+	agentOK      bool
+	ready        bool
+	startupDone  bool      // startup probe passed, or there is no startup probe
+	startupSince time.Time // anchor for the startup initial delay; zero uses startedAt
+	// guestExit is the last Exit notify from this container generation.
+	// Nil means the guest sent none. A liveness restart clears it.
+	guestExit       *int32
+	guestExitReason string
+	agentGen        uint64
 	failedErr       error
 	cancel          context.CancelFunc
 	restartCount    int32
@@ -802,6 +806,7 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	rec.agent = cli
 	rec.token = token
 	rec.mu.Unlock()
+	e.watchGuestExit(rec, cli)
 
 	if lc := pod.Spec.Containers[0].Lifecycle; lc != nil && lc.PostStart != nil && lc.PostStart.Exec != nil {
 		if err := e.runHook(ctx, rec, lc.PostStart.Exec.Command, "postStart"); err != nil {
@@ -837,8 +842,12 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	rec.message = ""
 	rec.startedAt = &now
 	rec.agentOK = true
-	rec.ready = true
 	rec.startupDone = !hasStartupProbe(pod.Spec.Containers[0])
+	// A readiness probe starts not-ready. One sample must not flip it;
+	// successThreshold successes do, and it stays ready until
+	// failureThreshold failures.
+	_, hasReadyProbe := k8sProbe(pod.Spec.Containers[0].ReadinessProbe)
+	rec.ready = rec.startupDone && !hasReadyProbe
 	ip := rec.pod.Status.PodIP
 	rec.mu.Unlock()
 	if maps := hostPortMaps(pod, ip); len(maps) > 0 {
@@ -857,6 +866,55 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		defer rec.watchDone.Done()
 		e.watch(ctx, rec)
 	}()
+}
+
+// failedExitLocked is the terminated code and reason for a Failed pod.
+// A guest Exit notify wins, including 0. The runtime's code is used when
+// the guest sent none. Otherwise the code is 1 and the reason is the
+// host's (VMStopped, VMFailed, Failed).
+func failedExitLocked(rec *podRecord, vmStatus types.VMStatus) (int32, string) {
+	reason := rec.reason
+	if rec.guestExit != nil {
+		code := *rec.guestExit
+		if rec.guestExitReason != "" {
+			reason = rec.guestExitReason
+		}
+		return code, reason
+	}
+	if vmStatus.ExitCode != nil {
+		return *vmStatus.ExitCode, reason
+	}
+	return 1, reason
+}
+
+// watchGuestExit records Exit notifies from this client on the pod. A
+// restart bumps the generation, which drops a late frame from the client
+// that just stopped and clears the code so the new container does not
+// inherit it.
+func (e *Engine) watchGuestExit(rec *podRecord, cli *guest.Client) {
+	if e == nil || rec == nil || cli == nil {
+		return
+	}
+	rec.mu.Lock()
+	rec.agentGen++
+	gen := rec.agentGen
+	rec.guestExit = nil
+	rec.guestExitReason = ""
+	rec.mu.Unlock()
+	cli.OnExit(func(rep guest.ExitReport) {
+		if !rep.Reported() {
+			return
+		}
+		code := *rep.ExitCode
+		reason := guest.NormalizeExitReason(rep.Reason)
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		if rec.agentGen != gen {
+			return
+		}
+		rec.guestExit = &code
+		rec.guestExitReason = reason
+	})
 }
 
 func (e *Engine) fail(rec *podRecord, err error) {
@@ -1162,11 +1220,8 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	case corev1.PodPending:
 		cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: rec.reason, Message: rec.message}
 	case corev1.PodFailed:
-		code := int32(1)
-		if vmStatus.ExitCode != nil {
-			code = *vmStatus.ExitCode
-		}
-		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: code, Reason: rec.reason, Message: rec.message}
+		code, termReason := failedExitLocked(rec, vmStatus)
+		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: code, Reason: termReason, Message: rec.message}
 	case corev1.PodSucceeded:
 		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 0, Reason: rec.reason, Message: rec.message}
 	default:
@@ -1753,15 +1808,26 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	places := append([]volume.Placement(nil), rec.places...)
 	oldAgent := rec.agent
 	rec.agent = nil
+	// The previous generation's exit notice does not belong to the new
+	// container. Bump the generation so a late frame from the old agent
+	// cannot write it back.
+	rec.agentGen++
+	rec.guestExit = nil
+	rec.guestExitReason = ""
 	// The restarted container has not passed its startup probe. Clear it
 	// before the new agent is stored so status cannot observe Started.
+	// A readiness probe starts not-ready again even when there is no
+	// startup probe.
 	if pod != nil && len(pod.Spec.Containers) > 0 && hasStartupProbe(pod.Spec.Containers[0]) {
 		rec.startupDone = false
-		rec.startupFails = 0
 		rec.ready = false
 		rec.reason = "StartupProbe"
 		rec.message = "container restarted"
 		rec.startupSince = e.now()
+	} else if pod != nil && len(pod.Spec.Containers) > 0 && hasReadinessProbe(pod.Spec.Containers[0]) {
+		rec.ready = false
+		rec.reason = "ReadinessProbe"
+		rec.message = "container restarted"
 	}
 	rec.mu.Unlock()
 	if machine == nil {
@@ -1796,6 +1862,7 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	rec.agent = cli
 	rec.agentOK = true
 	rec.mu.Unlock()
+	e.watchGuestExit(rec, cli)
 
 	if netinfo, err := cli.NetInfo(ctx); err == nil && netinfo.PrimaryIP != "" {
 		rec.mu.Lock()

@@ -40,7 +40,7 @@ func contractEngine(t *testing.T) (*Engine, *capacity.Slots, *fake.Runtime, conf
 }
 
 func TestEmptyDirSizeLimitFailsPodAndFreesSlot(t *testing.T) {
-	e, slots, _, cfg := contractEngine(t)
+	e, _, rt, cfg := contractEngine(t)
 	limit := resource.MustParse("4")
 	pod := samplePod("ed", "uid-ed")
 	pod.Spec.Volumes = []corev1.Volume{{
@@ -68,9 +68,10 @@ func TestEmptyDirSizeLimitFailsPodAndFreesSlot(t *testing.T) {
 	if !strings.Contains(failed.Status.Message, "sizeLimit") {
 		t.Fatalf("message %q", failed.Status.Message)
 	}
-	if slots.Used() != 0 {
-		t.Fatalf("slot not released: %d", slots.Used())
-	}
+	// Failed is published before teardown finishes Stop and releases the
+	// slot. The watch can still be inside that teardown when waitPhase
+	// returns.
+	waitSlotReleased(t, e, rt)
 	if err := e.Create(context.Background(), samplePod("next", "uid-next"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestEmptyDirSizeLimitFailsPodAndFreesSlot(t *testing.T) {
 }
 
 func TestEmptyDirSymlinkEscapeFailsPod(t *testing.T) {
-	e, slots, _, cfg := contractEngine(t)
+	e, _, rt, cfg := contractEngine(t)
 	limit := resource.MustParse("1Mi")
 	pod := samplePod("link", "uid-link")
 	pod.Spec.Volumes = []corev1.Volume{{
@@ -103,13 +104,11 @@ func TestEmptyDirSymlinkEscapeFailsPod(t *testing.T) {
 	if !strings.Contains(failed.Status.Message, "escape") && !strings.Contains(failed.Status.Message, "symlink") {
 		t.Fatalf("message %q", failed.Status.Message)
 	}
-	if slots.Used() != 0 {
-		t.Fatalf("slot not released: %d", slots.Used())
-	}
+	waitSlotReleased(t, e, rt)
 }
 
 func TestProjectedTokenMissingFailsClosed(t *testing.T) {
-	e, slots, _, cfg := contractEngine(t)
+	e, _, rt, cfg := contractEngine(t)
 	pod := samplePod("tok", "uid-tok")
 	pod.Spec.ServiceAccountName = "builder"
 	pod.Spec.Volumes = []corev1.Volume{{
@@ -131,9 +130,7 @@ func TestProjectedTokenMissingFailsClosed(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cfg.CacheDir, "pods", "uid-tok", "volumes", "proj", "token")); !os.IsNotExist(err) {
 		t.Fatal("empty token file must not be written")
 	}
-	if slots.Used() != 0 {
-		t.Fatalf("slot not released: %d", slots.Used())
-	}
+	waitSlotReleased(t, e, rt)
 }
 
 func TestProjectedTokenRefreshRewritesAndRematerializes(t *testing.T) {
@@ -205,7 +202,7 @@ func TestNextTokenRefreshAtHalfRemainingLifetime(t *testing.T) {
 }
 
 func TestProjectedTokenRefreshFailureAfterExpiryFailsPod(t *testing.T) {
-	e, slots, _, cfg := contractEngine(t)
+	e, _, rt, cfg := contractEngine(t)
 	tokenPath := filepath.Join(cfg.CacheDir, "pods", "uid-exp", "volumes", "proj", "token")
 	var saw string
 	e.SetTokenMinter(func(context.Context, *corev1.Pod) ([]volume.ProjectedToken, error) {
@@ -237,7 +234,5 @@ func TestProjectedTokenRefreshFailureAfterExpiryFailsPod(t *testing.T) {
 	if saw != "first" {
 		t.Fatalf("refresh must not blank the last good token, saw %q", saw)
 	}
-	if slots.Used() != 0 {
-		t.Fatalf("slot not released: %d", slots.Used())
-	}
+	waitSlotReleased(t, e, rt)
 }

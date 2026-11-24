@@ -125,6 +125,23 @@ func (m *machine) ConsoleGuestEnd() io.ReadWriteCloser {
 
 func (m *machine) ID() types.MachineID { return m.id }
 
+// ReportExit asks the in-process guest to send an Exit notify. Tests use it
+// for the same frame a real guest writes on vsock before it halts.
+func (m *machine) ReportExit(rep guest.ExitReport) {
+	m.mu.Lock()
+	h := m.handler
+	m.mu.Unlock()
+	h.ReportExit(rep)
+}
+
+// ReportExit sends an Exit notify from the guest of the most recently
+// created machine.
+func (r *Runtime) ReportExit(rep guest.ExitReport) {
+	if m := r.last.Load(); m != nil {
+		m.ReportExit(rep)
+	}
+}
+
 func (m *machine) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -188,6 +205,7 @@ func (m *machine) Start(ctx context.Context) error {
 			return pf(ctx, req)
 		}
 	}
+	h.Init()
 	m.sctx = sctx
 	m.handler = h
 	go func() { _ = guest.Serve(sctx, a, h) }()

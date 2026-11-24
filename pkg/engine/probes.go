@@ -109,6 +109,14 @@ type vmProbeSched struct {
 	ready   time.Time
 }
 
+// vmProbeState is the VM container's three probe streaks. It lives on the
+// watch, and a liveness restart zeroes it with the schedule.
+type vmProbeState struct {
+	startup probeStreak
+	live    probeStreak
+	ready   probeStreak
+}
+
 // probeDue reports whether a probe should run at now, and the next time it
 // should be considered. The first sample after anchor+initial is immediate.
 // Later samples wait period.
@@ -207,7 +215,7 @@ func (e *Engine) nextProbeDelay(rec *podRecord, sched *vmProbeSched, interval ti
 				lastStart = ps.last
 				lastLive = ps.liveLast
 				lastReady = ps.readyLast
-				startDone = ps.done || startDone
+				startDone = ps.startup.passed || startDone
 			}
 			if hasStartupProbe(c) && !startDone {
 				initial, period, _ := probeTiming(c.StartupProbe)
@@ -235,13 +243,19 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	var liveFails int32
+	var probes vmProbeState
 	var sched vmProbeSched
+	// Sidecar probe I/O runs off this goroutine. The watch still applies
+	// the results, so a slow sidecar sample cannot hold a VM probe.
+	flights := newSideFlights()
+	defer flights.stop()
 	// The first pass runs immediately and checks the pod context before
 	// Create or Start. A call that has already entered Create or Start
 	// does not observe cancellation. Delete waits for this goroutine, then
 	// removes whatever that call started. Later passes wait on the probe
 	// clock, not on a single ticker, so each probe keeps its own period.
+	// A finished sidecar probe wakes the loop so its result is applied
+	// without waiting out the next period.
 	step := func() bool {
 		if ctx.Err() != nil {
 			return false
@@ -250,7 +264,14 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 			return false
 		}
 		e.refreshSidecarStatus(ctx, rec)
-		return e.noteSidecarExit(rec) && e.restartExitedSidecars(ctx, rec) && e.tickSidecarStartup(ctx, rec) && e.tickSidecarLiveness(ctx, rec) && e.tickSidecarReadiness(ctx, rec) && e.tickProbes(ctx, rec, &sched, &liveFails)
+		if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
+			return false
+		}
+		if !e.settleSidecarProbes(ctx, rec, flights) {
+			return false
+		}
+		e.launchSidecarProbes(ctx, rec, flights)
+		return e.tickProbes(ctx, rec, &sched, &probes)
 	}
 	if !step() {
 		return
@@ -262,13 +283,31 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		timer := e.newProbeTimer(e.nextProbeDelay(rec, &sched, interval))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
+			stopProbeTimer(timer)
 			return
-		case <-timer.C():
-			timer.Stop()
+		case <-flights.wake:
+			stopProbeTimer(timer)
 			if !step() {
 				return
 			}
+		case <-timer.C():
+			if !step() {
+				return
+			}
+		}
+	}
+}
+
+// stopProbeTimer releases a wait. A timer that already fired is drained so
+// the value does not sit on the channel.
+func stopProbeTimer(timer probeTimer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C():
+		default:
 		}
 	}
 }
@@ -298,7 +337,7 @@ func (e *Engine) noteVMDeath(rec *podRecord) bool {
 	}
 }
 
-func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeSched, liveFails *int32) bool {
+func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeSched, probes *vmProbeState) bool {
 	if !e.noteVMDeath(rec) {
 		return false
 	}
@@ -314,7 +353,7 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 	}
 	startupDone := rec.startupDone
 	rec.mu.Unlock()
-	if cli == nil || phase != corev1.PodRunning {
+	if cli == nil || phase != corev1.PodRunning || probes == nil {
 		return true
 	}
 	c0 := pod.Spec.Containers[0]
@@ -337,17 +376,22 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 				return true
 			}
 			sched.startup = now
-			res, err := cli.Probe(ctx, req)
-			if err != nil || !res.OK {
+			sctx, cancel := probeContext(ctx, req.Timeout)
+			res, err := cli.Probe(sctx, req)
+			cancel()
+			// Parent cancel is Delete or Close, not a failed probe.
+			if ctx.Err() != nil || !podActive(rec) {
+				return false
+			}
+			passed, failed := probes.startup.observe(err == nil && res.OK, probeMsg(res, err), probeSuccessThreshold(c0.StartupProbe), failTh)
+			if !passed {
 				rec.mu.Lock()
-				rec.startupFails++
-				fails := rec.startupFails
 				rec.ready = false
 				rec.reason = "StartupProbe"
-				rec.message = probeMsg(res, err)
+				rec.message = probes.startup.msg
 				rec.mu.Unlock()
-				if fails >= failTh {
-					e.fail(rec, fmt.Errorf("startup probe failed: %s", probeMsg(res, err)))
+				if failed {
+					e.fail(rec, fmt.Errorf("startup probe failed: %s", probes.startup.msg))
 					return false
 				}
 				return true
@@ -355,7 +399,6 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 		}
 		rec.mu.Lock()
 		rec.startupDone = true
-		rec.startupFails = 0
 		if _, hasReady := k8sProbe(c0.ReadinessProbe); !hasReady {
 			rec.ready = true
 			if rec.reason == "StartupProbe" {
@@ -369,7 +412,8 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 	var wg sync.WaitGroup
 
 	if req, ok := k8sProbe(c0.ReadinessProbe); ok {
-		initial, period, _ := probeTiming(c0.ReadinessProbe)
+		initial, period, failTh := probeTiming(c0.ReadinessProbe)
+		successTh := probeSuccessThreshold(c0.ReadinessProbe)
 		if due, _ := probeDue(now, started, sched.ready, initial, period); due {
 			sched.ready = now
 			req := req
@@ -379,18 +423,31 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 				rctx, cancel := probeContext(ctx, req.Timeout)
 				defer cancel()
 				res, err := cli.Probe(rctx, req)
-				ok := err == nil && res.OK
+				// Parent cancel is Delete or Close, not a failed probe.
+				if ctx.Err() != nil {
+					return
+				}
+				passed, _ := probes.ready.observe(err == nil && res.OK, probeMsg(res, err), successTh, failTh)
 				rec.mu.Lock()
-				rec.ready = ok
-				if !ok {
+				rec.ready = passed
+				if passed {
+					if rec.reason == "ReadinessProbe" {
+						rec.reason = ""
+						rec.message = ""
+					}
+				} else if probes.ready.fails > 0 {
 					rec.reason = "ReadinessProbe"
-					rec.message = probeMsg(res, err)
-				} else {
-					rec.reason = ""
-					rec.message = ""
+					rec.message = probes.ready.msg
 				}
 				rec.mu.Unlock()
 			}()
+		} else if initial > 0 && !started.IsZero() && now.Before(started.Add(initial)) {
+			rec.mu.Lock()
+			if !rec.ready {
+				rec.reason = "ReadinessProbe"
+				rec.message = "initial delay"
+			}
+			rec.mu.Unlock()
 		}
 	}
 
@@ -418,47 +475,47 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 	if !liveRan {
 		return true
 	}
-	res, err := liveRes, liveErr
-	if err != nil || !res.OK {
-		// Cancellation is Delete or Close, not a failed probe. Starting the
-		// VM here races the slot release.
-		if ctx.Err() != nil || !podActive(rec) {
-			return false
-		}
-		e.events.Warn(ctx, event.ReasonProbeFailed, probeMsg(res, err))
-		*liveFails++
-		if *liveFails < liveFailTh {
-			return true
-		}
-		*liveFails = 0
-		policy := pod.Spec.RestartPolicy
-		if policy == "" {
-			policy = corev1.RestartPolicyAlways
-		}
-		if policy == corev1.RestartPolicyAlways || policy == corev1.RestartPolicyOnFailure {
-			rec.mu.Lock()
-			rec.restartCount++
-			n := rec.restartCount
-			rec.mu.Unlock()
-			if n > 5 {
-				e.fail(rec, fmt.Errorf("liveness probe failed (restarts=%d): %s", n, probeMsg(res, err)))
-				return false
-			}
-			if rerr := e.restartVM(ctx, rec); rerr != nil {
-				if ctx.Err() != nil || !podActive(rec) {
-					return false
-				}
-				e.fail(rec, fmt.Errorf("liveness restart: %w", rerr))
-				return false
-			}
-			*sched = vmProbeSched{}
-			return true
-		}
-		e.fail(rec, fmt.Errorf("liveness probe failed: %s", probeMsg(res, err)))
+	// Cancellation is Delete or Close, not a failed probe. Starting the
+	// VM here races the slot release.
+	if ctx.Err() != nil || !podActive(rec) {
 		return false
 	}
-	*liveFails = 0
-	return true
+	res, err := liveRes, liveErr
+	okProbe := err == nil && res.OK
+	if !okProbe {
+		e.events.Warn(ctx, event.ReasonProbeFailed, probeMsg(res, err))
+	}
+	// Liveness successThreshold is 1. One success clears the streak.
+	_, failed := probes.live.observe(okProbe, probeMsg(res, err), 1, liveFailTh)
+	if !failed {
+		return true
+	}
+	policy := pod.Spec.RestartPolicy
+	if policy == "" {
+		policy = corev1.RestartPolicyAlways
+	}
+	if policy == corev1.RestartPolicyAlways || policy == corev1.RestartPolicyOnFailure {
+		rec.mu.Lock()
+		rec.restartCount++
+		n := rec.restartCount
+		rec.mu.Unlock()
+		if n > 5 {
+			e.fail(rec, fmt.Errorf("liveness probe failed (restarts=%d): %s", n, probeMsg(res, err)))
+			return false
+		}
+		if rerr := e.restartVM(ctx, rec); rerr != nil {
+			if ctx.Err() != nil || !podActive(rec) {
+				return false
+			}
+			e.fail(rec, fmt.Errorf("liveness restart: %w", rerr))
+			return false
+		}
+		*probes = vmProbeState{}
+		*sched = vmProbeSched{}
+		return true
+	}
+	e.fail(rec, fmt.Errorf("liveness probe failed: %s", probeMsg(res, err)))
+	return false
 }
 
 func hasStartupProbe(c corev1.Container) bool {

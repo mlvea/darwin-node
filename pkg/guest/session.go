@@ -24,23 +24,39 @@ const (
 
 // Session is a multiplexed framed connection used by both client and tests.
 type Session struct {
-	conn    *FrameConn
-	nextID  atomic.Uint64
-	mu      sync.Mutex
-	pending map[string]chan Envelope
-	closed  chan struct{}
-	err     error
+	conn     *FrameConn
+	nextID   atomic.Uint64
+	mu       sync.Mutex
+	pending  map[string]chan Envelope
+	closed   chan struct{}
+	err      error
+	onNotify func(Envelope)
 }
 
-// NewSession starts a reader loop on rw.
-func NewSession(rw io.ReadWriteCloser) *Session {
-	s := &Session{
+func newSession(rw io.ReadWriteCloser) *Session {
+	return &Session{
 		conn:    NewFrameConn(rw),
 		pending: make(map[string]chan Envelope),
 		closed:  make(chan struct{}),
 	}
+}
+
+// NewSession starts a reader loop on rw.
+func NewSession(rw io.ReadWriteCloser) *Session {
+	s := newSession(rw)
 	go s.readLoop()
 	return s
+}
+
+// SetNotify receives guest→host frames that are not replies to a call.
+// The callback runs on the read loop and must not block.
+func (s *Session) SetNotify(fn func(Envelope)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onNotify = fn
+	s.mu.Unlock()
 }
 
 func (s *Session) readLoop() {
@@ -76,7 +92,11 @@ func (s *Session) dispatch(env Envelope) {
 	s.mu.Lock()
 	ch, ok := s.pending[env.ID]
 	if !ok {
+		fn := s.onNotify
 		s.mu.Unlock()
+		if fn != nil && env.Kind == KindNotify {
+			fn(env)
+		}
 		return
 	}
 	select {
