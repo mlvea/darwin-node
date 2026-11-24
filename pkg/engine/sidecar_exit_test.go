@@ -217,7 +217,12 @@ func TestHybridSidecarExitClearsPodReady(t *testing.T) {
 				if err == nil && p.Status.Phase == corev1.PodFailed {
 					t.Fatalf("policy %s exit %d failed the pod: %s", tc.policy, tc.code, p.Status.Message)
 				}
-				if err == nil && p.Status.Phase == corev1.PodRunning && execs.Load() > 0 {
+				// execs increments when the probe starts, before the VM
+				// container is Ready. SidecarNotRunning is published only
+				// once that container is Ready, so an earlier sample is
+				// still the default NotReady.
+				main := containerStatus(p, "macos")
+				if err == nil && p.Status.Phase == corev1.PodRunning && execs.Load() > 0 && main != nil && main.Ready {
 					if podReady(p) {
 						t.Fatal("exited sidecar left PodReady true after the VM readiness probe passed")
 					}
