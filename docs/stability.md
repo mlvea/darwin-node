@@ -62,7 +62,22 @@ HARDWARE GATE: PASS
 ```
 
 Without IMAGE set it prints SKIP and exits zero, so CI can invoke it
-unconditionally; pass `--strict` to fail instead.
+unconditionally; pass `--strict` to fail instead. A boot of about 48s
+fits in the default `--agent-ready-timeout` of 2m. A dial that still
+fails is retried; the pod stays Pending until it succeeds or the error
+is permanent.
+
+Also check fallback_test unused time import - still used.
+
+And inject_test comment about 45s - optional update.
+
+Run gofmt and tests.
+
+Also check if fallback still needs time import - yes AgentReadyTimeout = 400 * time.Millisecond.
+
+Look at unused import in fallback if time is only used there. Still used.
+
+gofmt the packages.
 
 ## Running the soak
 

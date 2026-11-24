@@ -213,6 +213,26 @@ func TestEnableSSHFallbackEnv(t *testing.T) {
 	}
 }
 
+func TestAgentReadyTimeoutEnv(t *testing.T) {
+	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
+	t.Setenv("VZ_SSH_PASSWORD", "")
+	t.Setenv("DARWIN_NODE_AGENT_READY_TIMEOUT", "90s")
+	c := Default()
+	if c.AgentReadyTimeout != 2*time.Minute {
+		t.Fatalf("default %s", c.AgentReadyTimeout)
+	}
+	if err := c.ApplyEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if c.AgentReadyTimeout != 90*time.Second {
+		t.Fatalf("%s", c.AgentReadyTimeout)
+	}
+	c.AgentReadyTimeout = -time.Second
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative agent ready timeout accepted")
+	}
+}
+
 func TestDefaultImagePullLimits(t *testing.T) {
 	c := Default()
 	if c.MaxImageBytes != image.DefaultMaxImageBytes || c.MaxImageCompressedBytes != image.DefaultMaxCompressedBytes {

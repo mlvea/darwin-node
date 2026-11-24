@@ -120,7 +120,11 @@ func Apply(ctx context.Context, n *corev1.Node, inv Inventory) error {
 	}
 	n.Status.Capacity = capList
 	n.Status.Allocatable = alloc
-	n.Status.Conditions = Conditions(inv)
+	// Heartbeat moves on every publish. LastTransitionTime stays until the
+	// condition status itself changes, including when this node object is
+	// the one we published last time.
+	prev := append([]corev1.NodeCondition(nil), n.Status.Conditions...)
+	n.Status.Conditions = preserveTransitions(prev, Conditions(inv))
 	if n.Labels == nil {
 		n.Labels = map[string]string{}
 	}
@@ -277,6 +281,27 @@ func Conditions(inv Inventory) []corev1.NodeCondition {
 		cond(corev1.NodeConditionType("MetalReady"), metal, now, metalReason, "paravirtualized Metal device"),
 		cond(corev1.NodeConditionType("GuestRuntime"), guest, now, guestReason, guestMsg),
 	}
+}
+
+// preserveTransitions copies LastTransitionTime from prev when the status
+// did not change. Reason and message may change without moving it.
+// LastHeartbeatTime is left as Conditions set it.
+func preserveTransitions(prev, next []corev1.NodeCondition) []corev1.NodeCondition {
+	if len(prev) == 0 || len(next) == 0 {
+		return next
+	}
+	byType := make(map[corev1.NodeConditionType]corev1.NodeCondition, len(prev))
+	for _, c := range prev {
+		byType[c.Type] = c
+	}
+	for i := range next {
+		old, ok := byType[next[i].Type]
+		if !ok || old.Status != next[i].Status || old.LastTransitionTime.IsZero() {
+			continue
+		}
+		next[i].LastTransitionTime = old.LastTransitionTime
+	}
+	return next
 }
 
 func cond(t corev1.NodeConditionType, st corev1.ConditionStatus, now metav1.Time, reason, msg string) corev1.NodeCondition {

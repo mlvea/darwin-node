@@ -25,14 +25,14 @@ var (
 
 // dialAgent is the vsock dial plus the TCP fallback used on the first
 // connect and on a later redial. A parent context with no deadline gets
-// agentDialTimeout. When DialAgent fails and the pod context is still
-// live, the fallback gets its own timeout. A fallback failure returns the
-// original DialAgent error.
+// AgentReadyTimeout (same budget as dialGuest). When DialAgent fails and
+// the pod context is still live, the fallback gets its own timeout. A
+// fallback failure returns the original DialAgent error.
 func (e *Engine) dialAgent(ctx context.Context, machine runtime.Machine, token string) (*guest.Client, error) {
 	dialCtx := ctx
 	cancelDial := func() {}
 	if _, ok := ctx.Deadline(); !ok {
-		dialCtx, cancelDial = context.WithTimeout(ctx, agentDialTimeout)
+		dialCtx, cancelDial = context.WithTimeout(ctx, e.agentDialBudget())
 	}
 	defer cancelDial()
 	cli, err := machine.DialAgent(dialCtx)

@@ -113,11 +113,24 @@ type Engine struct {
 
 	mu   sync.RWMutex
 	pods map[string]*podRecord
+
+	// interrupted lists pod UIDs whose disks were on disk when this process
+	// started. restartCredit is the restartCount to publish when one of
+	// those pods is booted again.
+	interrupted   map[string]struct{}
+	restartCredit map[string]int32
 }
 
 // defaultCloseTimeout bounds Close when Create, Start, Stop, or RemovePod
 // does not return. The slot stays held until that call finishes.
 const defaultCloseTimeout = 30 * time.Second
+
+// condTransition is the last time a pod condition's status changed.
+// LastTransitionTime stays at `at` until `status` changes.
+type condTransition struct {
+	status corev1.ConditionStatus
+	at     metav1.Time
+}
 
 type podRecord struct {
 	mu sync.Mutex
@@ -147,6 +160,7 @@ type podRecord struct {
 	failedErr       error
 	cancel          context.CancelFunc
 	restartCount    int32
+	transitions     map[corev1.PodConditionType]condTransition
 	initialized     bool
 	sidecarStatuses []sidecar.Status
 	sidecarRestarts map[string]int32
@@ -359,6 +373,14 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		e.mu.Unlock()
 		return nil
 	}
+	if settled, why, msg := e.settleInterruptedLocked(pod); settled {
+		e.mu.Unlock()
+		if why != "" {
+			e.events.Warn(ctx, why, msg)
+		}
+		return nil
+	}
+	credit := e.takeRestartCreditLocked(uid)
 	if e.draining.Load() {
 		e.mu.Unlock()
 		e.events.Warn(ctx, event.ReasonDraining, "pod create rejected: node is draining")
@@ -392,11 +414,12 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 	}
 	pctx, cancel := context.WithCancel(context.Background())
 	rec := &podRecord{
-		pod:    pod.DeepCopy(),
-		phase:  corev1.PodPending,
-		reason: "Starting",
-		cancel: cancel,
-		adopt:  adopt,
+		pod:          pod.DeepCopy(),
+		phase:        corev1.PodPending,
+		reason:       "Starting",
+		cancel:       cancel,
+		adopt:        adopt,
+		restartCount: credit,
 	}
 	// Count the goroutine before the pod is visible. Delete waits on
 	// startDone before it drops the slot; a Wait that returns because the
@@ -538,9 +561,16 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 	}
 
 	if e.rt.Name() == types.RuntimeVZ {
-		disk, aux, hw, err := e.resolveImage(ctx, pod.Spec.Containers[0].Image, string(pod.UID), pod.Spec.Containers[0].ImagePullPolicy, creds)
+		var disk, aux, hw string
+		err := e.retryTransient(ctx, rec, "image pull", func() error {
+			var perr error
+			disk, aux, hw, perr = e.resolveImage(ctx, pod.Spec.Containers[0].Image, string(pod.UID), pod.Spec.Containers[0].ImagePullPolicy, creds)
+			return perr
+		})
 		if err != nil {
-			e.fail(rec, err)
+			if ctx.Err() == nil {
+				e.fail(rec, err)
+			}
 			return
 		}
 		spec.DiskPath = disk
@@ -548,16 +578,28 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 		spec.HardwareModelData = hw
 	}
 
-	machine, err := e.rt.Create(ctx, spec)
-	if err != nil {
-		e.fail(rec, err)
-		return
-	}
-	rec.mu.Lock()
-	rec.machine = machine
-	rec.mu.Unlock()
-	if err := machine.Start(ctx); err != nil {
-		e.fail(rec, err)
+	var machine runtime.Machine
+	if err := e.retryTransient(ctx, rec, "VM boot", func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		e.stopMachineKeepSlot(rec)
+		m, cerr := e.rt.Create(ctx, spec)
+		if cerr != nil {
+			return cerr
+		}
+		rec.mu.Lock()
+		rec.machine = m
+		rec.mu.Unlock()
+		if serr := m.Start(ctx); serr != nil {
+			return serr
+		}
+		machine = m
+		return nil
+	}); err != nil {
+		if ctx.Err() == nil {
+			e.fail(rec, err)
+		}
 		return
 	}
 	e.serveConsole(rec)
@@ -778,19 +820,14 @@ func (h *consoleHub) close() {
 func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.Pod, creds Credentials, machine runtime.Machine, token string, places []volume.Placement) {
 	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
 	e.events.Normal(ctx, event.ReasonVMDialing, "dialing guest agent")
-	cli, err := e.dialAgent(ctx, machine, token)
+	// vsock Accept consumes the whole dial budget on a slow guest. TCP
+	// fallback runs inside dialGuest with its own timeout, and a refused
+	// dial is retried. The budget is AgentReadyTimeout, not a fixed 45s.
+	cli, err := e.dialGuest(ctx, rec, machine, token)
 	if err != nil {
-		e.fail(rec, fmt.Errorf("guest agent: %w", err))
-		return
-	}
-	readyCtx, cancel := context.WithTimeout(ctx, e.cfg.AgentReadyTimeout)
-	defer cancel()
-	ready, err := cli.Ready(readyCtx)
-	if err != nil || !ready.Ready {
-		// rec.agent is still nil, so teardown will not close this session.
-		// The vsock (or the pipe, in tests) stays open until the process exits.
-		_ = cli.Close()
-		e.fail(rec, fmt.Errorf("guest agent not ready: %v %w", ready, err))
+		if ctx.Err() == nil {
+			e.fail(rec, err)
+		}
 		return
 	}
 	if len(places) > 0 {
@@ -1393,7 +1430,7 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	}
 	_ = vmState
 
-	now := metav1.Now()
+	now := metav1.NewTime(e.now())
 	startTime := rec.startedAt
 	statuses := []corev1.ContainerStatus{cs}
 	if rec.pod != nil && len(rec.pod.Spec.Containers) > 1 {
@@ -1440,7 +1477,7 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 		ContainerStatuses:     statuses,
 		InitContainerStatuses: copyContainerStatuses(rec.initStatuses),
 		Conditions: []corev1.PodCondition{
-			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: stampTransition(rec, corev1.PodScheduled, corev1.ConditionTrue, now)},
 			boolCond(corev1.PodInitialized, rec.initialized || len(rec.pod.Spec.InitContainers) == 0, now, rec),
 			containersReady,
 			podReady,
@@ -1473,7 +1510,27 @@ func boolCond(t corev1.PodConditionType, ok bool, now metav1.Time, rec *podRecor
 	} else if reason == "" {
 		reason = "NotReady"
 	}
-	return corev1.PodCondition{Type: t, Status: st, LastTransitionTime: now, Reason: reason, Message: msg}
+	return corev1.PodCondition{Type: t, Status: st, LastTransitionTime: stampTransition(rec, t, st, now), Reason: reason, Message: msg}
+}
+
+// stampTransition keeps LastTransitionTime until the condition status
+// changes. A Deployment reads PodReady's transition time for
+// minReadySeconds; rewriting it on every status read stalls the rollout.
+func stampTransition(rec *podRecord, typ corev1.PodConditionType, st corev1.ConditionStatus, now metav1.Time) metav1.Time {
+	if rec == nil {
+		return now
+	}
+	if rec.transitions == nil {
+		rec.transitions = map[corev1.PodConditionType]condTransition{}
+	}
+	if prev, ok := rec.transitions[typ]; ok && prev.status == st && !prev.at.IsZero() {
+		return prev.at
+	}
+	if now.IsZero() {
+		now = metav1.Now()
+	}
+	rec.transitions[typ] = condTransition{status: st, at: now}
+	return now
 }
 
 // ExecInVM runs a command in container[0] via the guest agent.
@@ -1664,12 +1721,9 @@ func (e *Engine) dialFallback(ctx context.Context, token string, machine runtime
 	return guest.Dial(ctx, conn, token, "darwin-node")
 }
 
-// agentDialTimeout and tcpFallbackTimeout are vars so tests can shorten
-// the vsock budget without waiting out a 45s NAT dial.
-var (
-	agentDialTimeout   = 45 * time.Second
-	tcpFallbackTimeout = 5 * time.Second
-)
+// tcpFallbackTimeout is the budget for the TCP dial after vsock has used
+// its own budget (AgentReadyTimeout). It is a var so tests can shorten it.
+var tcpFallbackTimeout = 5 * time.Second
 
 func podMACDir(cacheDir, uid string) string {
 	return filepath.Join(cacheDir, "pods", uid)

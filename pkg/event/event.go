@@ -66,6 +66,7 @@ const (
 	ReasonCacheRestored       = "CacheRestored"
 	ReasonCacheSaved          = "CacheSnapshotSaved"
 	ReasonDraining            = "NodeDraining"
+	ReasonNodeRestarted       = "NodeRestarted"
 	ReasonEmptyDirExceeded    = "EmptyDirSizeExceeded"
 	ReasonTokenRefreshFailed  = "TokenRefreshFailed"
 	ReasonTokenRefreshed      = "ServiceAccountTokenRefreshed"

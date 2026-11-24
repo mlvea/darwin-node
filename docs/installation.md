@@ -102,7 +102,34 @@ A second signal cancels the rest of the drain and still force-stops
 every remaining pod VM (`Engine.Close`: cache snapshot, slot release)
 before exiting 130. It does not wait out `--shutdown-grace-period`.
 A crash skips that stop. The next process reclaims leftover pod
-directories at startup.
+directories at startup. Drain the node before each upgrade so that
+restart is not how a running pod is stopped. See [Upgrades](#upgrades).
+
+## Upgrades
+
+Drain the node before each upgrade. A process restart, a crash, or a
+host reboot stops every pod VM. The next process deletes the leftover
+pod disks and does not boot those pods from a clean image:
+
+- `restartPolicy: Never` is marked `Failed` with reason `NodeRestarted`
+  and is not started again. Its restart count is left as it was.
+- `restartPolicy: Always` and `OnFailure`, and an empty policy, are
+  started again. The container restart count increases by one.
+- A pod that had already `Succeeded` or `Failed` keeps that phase and
+  is not started again.
+
+Draining first lets the pods shut down through the normal path, so a
+Job is not failed by the upgrade and an Always pod is not killed mid-run.
+
+Image pull, VM boot, and the guest-agent dial are retried until they
+succeed, the error is permanent, or the pod is deleted. The wait starts
+at 1s, doubles, and is capped at 30s, with jitter. The VM slot stays
+held and the pod stays `Pending` with reason `BackOff`, so a ReplicaSet
+does not create a replacement and a second VM is not admitted into that
+slot. Auth denied, an invalid image, a size or cycle limit, and a delta
+whose base is itself a delta fail the pod and release the slot. A pull
+deadline or a registry read stall is retried. Each dial attempt uses
+`--agent-ready-timeout` (default 2m), which covers a boot of about 48s.
 
 ## Configuration
 
@@ -121,6 +148,7 @@ Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
 | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Images + overlays |
 | `DARWIN_NODE_GRAPHICS` | `1920x1200@80` | `none` disables Metal |
 | `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM |
+| `DARWIN_NODE_AGENT_READY_TIMEOUT` | `2m` | Budget for each guest-agent dial and ready check |
 | `DARWIN_NODE_SERIAL_CONSOLE` | `false` | Attach break-glass serial ports |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables traces |
 
