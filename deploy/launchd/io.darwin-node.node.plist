@@ -11,6 +11,13 @@
 		<string>CHANGE_ME</string>
 		<string>--log-level</string>
 		<string>info</string>
+		<!--
+			Loopback is the safe bind. kubectl logs/exec from a remote API
+			server needs the address that server dials (the node InternalIP).
+			0.0.0.0 listens on every interface, including untrusted ones.
+		-->
+		<string>--listen-address</string>
+		<string>127.0.0.1</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
@@ -20,6 +27,8 @@
 		<string>/var/lib/darwin-node/tls.crt</string>
 		<key>APISERVER_KEY_LOCATION</key>
 		<string>/var/lib/darwin-node/tls.key</string>
+		<key>APISERVER_CA_CERT_LOCATION</key>
+		<string>/var/lib/darwin-node/ca.crt</string>
 		<key>DARWIN_NODE_MAX_VMS</key>
 		<string>2</string>
 		<key>DARWIN_NODE_NETWORK_MODE</key>

@@ -24,6 +24,16 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
+func TestClusterStartupRefusesMissingClientCA(t *testing.T) {
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "RequireKubeletClientCA(") {
+		t.Fatal("cluster mode starts without a client CA; exec and logs stay anonymous after TLS")
+	}
+}
+
 func TestSelectKubeletAuth(t *testing.T) {
 	if got := selectKubeletAuth(""); got != kubeletAuthNoAuth {
 		t.Fatalf("empty CA: %q", got)

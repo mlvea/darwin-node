@@ -130,14 +130,16 @@ No cluster (engine plus fake runtime):
 # capacity pods=2 vm=2 ...
 ```
 
-Join a cluster (TLS required; the kubelet HTTP server refuses plaintext):
+Join a cluster (TLS cert, key, and client CA are required; the listen
+address defaults to `127.0.0.1`):
 
 ```bash
 export APISERVER_CERT_LOCATION=$HOME/.kube/tls.crt
 export APISERVER_KEY_LOCATION=$HOME/.kube/tls.key
-# optional: APISERVER_CA_CERT_LOCATION for mTLS client auth
+export APISERVER_CA_CERT_LOCATION=$HOME/.kube/ca.crt
 
-./bin/darwin-node --nodename="$(hostname | tr '[:upper:]' '[:lower:]')" --allow-nat-workloads
+./bin/darwin-node --nodename="$(hostname | tr '[:upper:]' '[:lower:]')" \
+  --listen-address="$(ipconfig getifaddr en0)" --allow-nat-workloads
 kubectl get node
 # Capacity: pods=2, darwin.node/vm=2, darwin.node/metal=2
 ```

@@ -75,7 +75,7 @@ func main() {
 	f.StringSliceVar(&cfg.AllowedHostPaths, "allowed-host-paths", cfg.AllowedHostPaths, "hostPath prefixes permitted in guests (empty denies all hostPath)")
 	f.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "debug|info|warn|error")
 	f.StringVar(&cfg.KubeConfig, "kubeconfig", cfg.KubeConfig, "kubeconfig path")
-	f.StringVar(&cfg.ListenAddress, "listen-address", cfg.ListenAddress, "kubelet HTTP bind address (empty = all interfaces)")
+	f.StringVar(&cfg.ListenAddress, "listen-address", cfg.ListenAddress, "kubelet HTTP bind address (default 127.0.0.1; 0.0.0.0 binds every interface)")
 	f.BoolVar(&standalone, "standalone", false, "run engine without joining a cluster (dev)")
 	f.DurationVar(&cfg.StartupTimeout, "startup-timeout", cfg.StartupTimeout, "wait for node Ready")
 	f.DurationVar(&cfg.InitTimeout, "init-timeout", cfg.InitTimeout, "max time to wait for each init container")
@@ -108,6 +108,9 @@ func main() {
 
 func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdownGate) error {
 	if err := dnconfig.RequireKubeletTLS(standalone, cfg); err != nil {
+		return err
+	}
+	if err := dnconfig.RequireKubeletClientCA(standalone, cfg.ClientCA); err != nil {
 		return err
 	}
 	slots, err := capacity.New(cfg.MaxVMs)
@@ -217,13 +220,19 @@ func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
 }
 
 func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p *provider.Provider) error {
+	if err := dnconfig.RequireKubeletClientCA(false, cfg.ClientCA); err != nil {
+		return err
+	}
 	bundle, err := loadClientCA(cfg.ClientCA)
 	if err != nil {
 		return fmt.Errorf("kubelet client CA: %w", err)
 	}
-	if bundle != nil {
-		go bundle.Run(ctx)
+	if bundle == nil {
+		// loadClientCA treats an empty path as NoAuth. Cluster startup must
+		// not install that handler, even if the string check above was skipped.
+		return fmt.Errorf("kubelet client CA: refusing to install anonymous kubelet auth")
 	}
+	go bundle.Run(ctx)
 	// Server certificate only. The client CA, when set, is the live bundle
 	// above so a rotated file is picked up without pinning ClientCAs here.
 	tlsCfg, err := dnconfig.TLSConfig(cfg.CertPath, cfg.KeyPath, "")
@@ -258,9 +267,8 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 			}
 			return nil
 		},
-		// WebhookAuth only when ClientCA is set. Without a CA it would 401
-		// the API server's mTLS kubelet client; empty CA is NoAuth instead.
-		// The bundle is the same one InstallTLS reads at handshake time.
+		// WebhookAuth with the live client CA. runVK refuses a nil bundle:
+		// that path is nodeutil.NoAuth (anonymous after TLS).
 		kubeletAuth(cfg.NodeName, bundle),
 		nodeutil.WithTLSConfig(func(c *tls.Config) error {
 			applyKubeletTLS(c, tlsCfg, bundle)

@@ -20,6 +20,20 @@ func RequireKubeletTLS(standalone bool, cfg Config) error {
 	return nil
 }
 
+// RequireKubeletClientCA refuses cluster mode when no client CA is configured.
+// Without that CA the kubelet handler is anonymous after TLS, so anyone who
+// can reach the listen port can exec into a VM. --standalone does not serve
+// that API. Whitespace is unset.
+func RequireKubeletClientCA(standalone bool, clientCA string) error {
+	if standalone {
+		return nil
+	}
+	if strings.TrimSpace(clientCA) == "" {
+		return fmt.Errorf("cluster mode refuses to start without a kubelet client CA (set APISERVER_CA_CERT_LOCATION). Without that CA the exec/logs API is anonymous after TLS. --standalone does not serve that API")
+	}
+	return nil
+}
+
 // TLSConfig loads the kubelet HTTP server certificate and, when clientCA is
 // set, a client CA pool. Presented client certificates are verified
 // (tls.VerifyClientCertIfGiven). A connection that presents no certificate

@@ -1,0 +1,19 @@
+darwin-node identity: {{ .Values.rbac.identity }}
+
+Preferred: a client certificate (or other credential) whose username is
+system:node:<nodename> and whose group is system:nodes. <nodename> is the
+value of --nodename. The API server's Node authorizer and NodeRestriction
+admission plugin (both on by default) then limit this process to its own
+Node, pods bound to it, Secrets and ConfigMaps those pods reference, and
+serviceaccounts/token creates for those pods' service accounts.
+
+{{ if eq .Values.rbac.identity "serviceaccount" }}
+This release binds ServiceAccount {{ .Values.serviceAccount.name }} in {{ .Release.Namespace }}.
+Secret, ConfigMap, pod delete, pod status, and serviceaccounts/token rules
+exist only in: {{ join ", " .Values.rbac.namespaces }}.
+A pod outside that list cannot mount a Secret or receive a projected
+service account token from this node.
+{{ else }}
+This release does not bind a ServiceAccount. Do not point the Mac's
+kubeconfig at a ServiceAccount token. Use the system:node credential above.
+{{ end }}
