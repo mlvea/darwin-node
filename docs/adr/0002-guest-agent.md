@@ -102,15 +102,18 @@ not a report, and the container stays at exit code 1 with the host reason
 it is 1–128 characters, starts with a letter, and continues with letters
 or digits. Anything else is dropped and the host reason stays. The last
 report that has a code wins. A later frame with no code does not clear it.
-The pod phase stays `Failed` even when the code is 0. The pod message
-stays the host's ("macOS VM Stopped unexpectedly"). Only
-`containerStatuses[].state.terminated.exitCode` and, when the reason is
-accepted, `terminated.reason` change.
+Exit 0 with `RestartPolicy` `Never` or `OnFailure` sets phase `Succeeded`
+and reason `Completed` (or the accepted guest reason). `Always`, including
+an empty policy, restarts the VM. A non-zero code restarts under `Always`
+and `OnFailure`, and stays `Failed` under `Never`. A stop with no code
+stays `Failed` with the host message ("macOS VM Stopped unexpectedly").
 
 `ProtocolVersion` stays 1. An older host drops an unknown id, so this
-frame is additive. A graceful `Delete` still publishes `Succeeded` and
-exit 0 before the VM is torn down. A liveness restart clears the code so
-the new container does not inherit it.
+frame is additive. Delete, drain, and eviction of a pod whose workload
+has not exited publish `Failed` with exit 137 when the grace period is 0
+and 143 otherwise, reason `Error`. A workload that already exited 0 stays
+`Succeeded`. A liveness restart clears the code so the new container does
+not inherit it.
 
 `Handler.ReportExit` is the in-process call that writes the frame.
 `darwin-guest-agent` with no workload serves the connection and does not
