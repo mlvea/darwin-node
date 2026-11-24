@@ -44,15 +44,18 @@ type Config struct {
 	CacheDir         string
 	AllowedHostPaths []string // empty denies all hostPath
 	KubeConfig       string
-	CertPath         string
-	KeyPath          string
-	ClientCA         string
-	ListenAddress    string // empty binds all interfaces
-	ListenPort       int32
-	LogLevel         string
-	StartupTimeout   time.Duration
-	Resync           time.Duration
-	Workers          int
+	// Cluster is set when the process joins a cluster. Host directory
+	// image paths are rejected. --standalone leaves it false.
+	Cluster        bool
+	CertPath       string
+	KeyPath        string
+	ClientCA       string
+	ListenAddress  string // empty binds all interfaces
+	ListenPort     int32
+	LogLevel       string
+	StartupTimeout time.Duration
+	Resync         time.Duration
+	Workers        int
 
 	AgentReadyTimeout time.Duration
 	IPTimeout         time.Duration

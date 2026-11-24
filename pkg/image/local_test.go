@@ -3,18 +3,33 @@ package image
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/darwin-node/darwin-node/internal/digest"
 )
 
-func TestCacheKeyDoesNotSplitHostPort(t *testing.T) {
-	got := CacheKey("127.0.0.1:5000/macos:latest")
-	if got != "127.0.0.1--5000_macos--latest" {
-		t.Fatalf("got %q", got)
+func TestCacheKeySeparatesSlashFromUnderscore(t *testing.T) {
+	a := CacheKey("team/macos:15")
+	b := CacheKey("team_macos:15")
+	if a == b {
+		t.Fatalf("team/macos:15 and team_macos:15 share cache key %q", a)
 	}
-	if CacheKey("ghcr.io/org/macos:15") != "ghcr.io_org_macos--15" {
-		t.Fatalf("ghcr key %s", CacheKey("ghcr.io/org/macos:15"))
+	if strings.ContainsAny(a, "/:") {
+		t.Fatalf("cache key %q is not one path segment", a)
+	}
+}
+
+func TestCacheKeyDoesNotSplitHostPort(t *testing.T) {
+	a := CacheKey("127.0.0.1:5000/macos:latest")
+	if a == CacheKey("127.0.0.1:5001/macos:latest") {
+		t.Fatal("host port was dropped from the cache key")
+	}
+	if CacheKey("ghcr.io/org/macos:15") == CacheKey("ghcr.io/org/macos:16") {
+		t.Fatal("tag was dropped from the cache key")
+	}
+	if len(a) != 64 || strings.ContainsAny(a, "/:_") {
+		t.Fatalf("key %q is not one hex path segment", a)
 	}
 }
 
@@ -140,6 +155,25 @@ func TestVerifyOptionalTamperFailsAgainstProvenance(t *testing.T) {
 	}
 	if err := img.VerifyOptional(); err == nil {
 		t.Fatal("tampered disk with regenerated sidecar must fail against provenance")
+	}
+}
+
+func TestLoadDirRejectsSymlinkToAnotherDisk(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "disk.img"), []byte("OTHER-POD"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestImage(t, dir, "OWN", "AUX")
+	if err := os.Remove(filepath.Join(dir, "disk.img")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(other, "disk.img"), filepath.Join(dir, "disk.img")); err != nil {
+		t.Fatal(err)
+	}
+	img, err := LoadDir(dir)
+	if err == nil {
+		t.Fatalf("symlinked disk was loaded from %s", img.DiskPath)
 	}
 }
 

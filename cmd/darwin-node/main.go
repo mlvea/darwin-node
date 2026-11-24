@@ -148,6 +148,9 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	if err := engine.SweepConsoleSockets(os.TempDir()); err != nil {
 		slog.Warn("stale console sockets", "err", err)
 	}
+	if !standalone {
+		cfg.Cluster = true
+	}
 	eng := engine.New(cfg, slots, rt, sc, event.Slog{}, host.InternalIP)
 	gate.bind(eng)
 	defer eng.Close()

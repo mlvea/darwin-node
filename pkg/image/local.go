@@ -1,6 +1,8 @@
 package image
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +15,9 @@ import (
 
 // LoadDir loads a baked image directory (config.json + disk.img + aux.img).
 func LoadDir(dir string) (LocalImage, error) {
+	if err := rejectImageSymlinks(dir); err != nil {
+		return LocalImage{}, err
+	}
 	cfgPath := filepath.Join(dir, "config.json")
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -59,15 +64,59 @@ func LoadDir(dir string) (LocalImage, error) {
 	return img, nil
 }
 
-// CacheKey turns an image reference into a single path segment.
-// Unlike Agoda's convertToPath (which splits on every ':'), a registry
-// host:port stays one directory: "127.0.0.1:5000/macos:latest"
-// → "127.0.0.1--5000_macos--latest".
+// CacheKey is the hex sha256 of the full reference, one path segment.
+// Replacing ":" and "/" collided "team/macos:15" with "team_macos:15",
+// so the first pull decided what the other reference booted. Old
+// directories are not renamed onto the new key: that would keep the
+// collision. Recover deletes keys that are not this hash.
 func CacheKey(ref string) string {
-	ref = strings.TrimSpace(ref)
-	ref = strings.ReplaceAll(ref, ":", "--")
-	ref = strings.ReplaceAll(ref, "/", "_")
-	return ref
+	sum := sha256.Sum256([]byte(strings.TrimSpace(ref)))
+	return hex.EncodeToString(sum[:])
+}
+
+// validCacheKey reports a directory name produced by CacheKey.
+func validCacheKey(name string) bool {
+	if len(name) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// rejectImageSymlinks refuses a symlink directory and any symlink inside
+// it. os.Stat and clonefile follow those links, so a disk.img link to
+// another pod's overlay would be cloned into this pod.
+func rejectImageSymlinks(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("image directory is a symlink")
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("image path is not a directory")
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, ent := range ents {
+		info, err := ent.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("image file %q is a symlink", ent.Name())
+		}
+	}
+	return nil
 }
 
 // CacheDir is cacheRoot/images/<CacheKey(ref)>.

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"golang.org/x/sys/unix"
 )
 
 // File copies src to dst using clonefile on Darwin/APFS, else a regular copy.
@@ -65,7 +67,8 @@ func Dir(src, dst string) error {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	// O_NOFOLLOW: a disk.img symlink must not be copied from another pod.
+	in, err := os.OpenFile(src, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return fmt.Errorf("open src: %w", err)
 	}
