@@ -23,7 +23,7 @@
 2. **IPSW restore** is a CLI stub pointing at `VZMacOSInstaller` (30-60m,
    hardware only).
 3. **ORAS pull** copies via `oras.Copy` into a file store then sparsely
-   decompresses gzip. Needs a live registry test; CAS/GC still absent.
+   decompresses gzip. Needs a live registry test. Image and cache-store GC exists; a content-addressed store still does not.
 4. **SSH fallback** exec-only; host keys still ignored (documented).
 5. **CRDs / CSI / token rotation / APFS quotas**, Phase 6.
 6. **Codesign/notarization CI** and Homebrew publish.

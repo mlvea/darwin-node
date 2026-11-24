@@ -85,6 +85,10 @@ func main() {
 	f.Int64Var(&cfg.ImageDiskHeadroom, "image-disk-headroom", cfg.ImageDiskHeadroom, "free bytes that must remain on the cache filesystem after an image write (default 10GiB)")
 	f.DurationVar(&cfg.ImagePullTimeout, "image-pull-timeout", cfg.ImagePullTimeout, "deadline for one image pull; the pull is cancelled when no pod is still waiting")
 	f.DurationVar(&cfg.ImageReadStall, "image-read-stall", cfg.ImageReadStall, "fail an image pull when a registry read makes no progress for this long")
+	f.BoolVar(&cfg.ImageGC, "image-gc", cfg.ImageGC, "delete unused images and cache stores when the cache disk is above the high threshold")
+	f.IntVar(&cfg.ImageGCHigh, "image-gc-high-threshold", cfg.ImageGCHigh, "percent used at which image GC starts (kubelet default 85)")
+	f.IntVar(&cfg.ImageGCLow, "image-gc-low-threshold", cfg.ImageGCLow, "percent used at which image GC stops (kubelet default 80)")
+	f.DurationVar(&cfg.ImageGCInterval, "image-gc-interval", cfg.ImageGCInterval, "how often to evaluate image and cache-store GC")
 
 	cmd.AddCommand(cmdDebugDump(&cfg))
 	cmd.AddCommand(cmdConsole(&cfg))
@@ -167,6 +171,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	metrics := observability.NewMetrics()
 	metrics.Observe(func() (float64, float64) { return float64(slots.Used()), float64(len(eng.List())) })
 	go func() { _ = observability.ServeMetrics("127.0.0.1:9100", metrics.Handler()) }()
+	eng.StartDiskGC(ctx)
 
 	if standalone {
 		fmt.Printf("darwin-node standalone runtime=%s maxVMs=%d node=%s\n", cfg.Runtime, cfg.MaxVMs, cfg.NodeName)

@@ -38,6 +38,17 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<!--
+		ExitTimeOut is how long launchd waits after SIGTERM before SIGKILL.
+		It must stay above the shutdown grace period (default 60s, flag
+		shutdown-grace-period, or DARWIN_NODE_SHUTDOWN_GRACE) plus the
+		30s Engine.Close deadline and the 5s final reap. Those finish
+		the cache-volume snapshot. 120s covers the defaults. Raise this
+		integer when the grace period is raised, or launchd kills the
+		process and the snapshot does not run.
+	-->
+	<key>ExitTimeOut</key>
+	<integer>120</integer>
 	<key>StandardOutPath</key>
 	<string>/var/log/darwin-node/stdout.log</string>
 	<key>StandardErrorPath</key>

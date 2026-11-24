@@ -246,6 +246,38 @@ func TestImagePullLimitEnv(t *testing.T) {
 	}
 }
 
+func TestImageGCDefaults(t *testing.T) {
+	c := Default()
+	if !c.ImageGC || c.ImageGCHigh != DefaultImageGCHigh || c.ImageGCLow != DefaultImageGCLow || c.ImageGCInterval != DefaultImageGCInterval {
+		t.Fatalf("gc %+v", c)
+	}
+	c.ImageGCLow = c.ImageGCHigh
+	if err := c.Validate(); err == nil {
+		t.Fatal("low threshold equal to high was accepted")
+	}
+}
+
+func TestImageGCEnv(t *testing.T) {
+	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
+	t.Setenv("VZ_SSH_PASSWORD", "")
+	t.Setenv("DARWIN_NODE_IMAGE_GC", "false")
+	t.Setenv("DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD", "90")
+	t.Setenv("DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD", "70")
+	t.Setenv("DARWIN_NODE_IMAGE_GC_INTERVAL", "1m")
+	c := Default()
+	if err := c.ApplyEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if c.ImageGC || c.ImageGCHigh != 90 || c.ImageGCLow != 70 || c.ImageGCInterval != time.Minute {
+		t.Fatalf("gc %+v", c)
+	}
+	t.Setenv("DARWIN_NODE_IMAGE_GC", "maybe")
+	c = Default()
+	if err := c.ApplyEnv(); err == nil {
+		t.Fatal("bad DARWIN_NODE_IMAGE_GC accepted")
+	}
+}
+
 func TestImagePullLimitsRejectNegative(t *testing.T) {
 	c := Default()
 	c.MaxImageBytes = -1

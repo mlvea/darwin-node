@@ -104,6 +104,16 @@ before exiting 130. It does not wait out `--shutdown-grace-period`.
 A crash skips that stop. The next process reclaims leftover pod
 directories at startup.
 
+`Stop` polls the VM and returns when it has halted. It does not sit
+out the rest of `terminationGracePeriodSeconds` after the guest is
+already stopped. launchd's `ExitTimeOut` is the SIGTERM-to-SIGKILL
+gap and has to be longer than `--shutdown-grace-period` (default 60s,
+`DARWIN_NODE_SHUTDOWN_GRACE`) plus the 30s close and the 5s final
+reap. Those finish the cache-volume snapshot. The supplied plist sets
+`ExitTimeOut` to 120, which covers the defaults. Raise that integer
+when you raise the grace period, or launchd kills the process and the
+snapshot does not run.
+
 ## Configuration
 
 Precedence: `ApplyEnv` runs after flag parsing, so a set environment variable overrides the matching flag. Defaults apply when neither is set.
@@ -120,8 +130,12 @@ Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
 | `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | Host keep-away |
 | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Images + overlays |
 | `DARWIN_NODE_GRAPHICS` | `1920x1200@80` | `none` disables Metal |
-| `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM |
+| `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM. launchd `ExitTimeOut` must be larger; see Shutdown behavior |
 | `DARWIN_NODE_SERIAL_CONSOLE` | `false` | Attach break-glass serial ports |
+| `DARWIN_NODE_IMAGE_GC` | `true` | Delete unused images and cache stores under disk pressure from the thresholds below |
+| `DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD` | `85` | Percent used at which GC starts |
+| `DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD` | `80` | Percent used at which GC stops. Must be below the high threshold |
+| `DARWIN_NODE_IMAGE_GC_INTERVAL` | `5m` | How often GC evaluates the cache filesystem |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables traces |
 
 Kubernetes connection (same as Virtual Kubelet):

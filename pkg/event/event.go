@@ -70,4 +70,6 @@ const (
 	ReasonTokenRefreshFailed  = "TokenRefreshFailed"
 	ReasonTokenRefreshed      = "ServiceAccountTokenRefreshed"
 	ReasonTokenExpired        = "ServiceAccountTokenExpired"
+	ReasonImageEvicted        = "ImageEvicted"
+	ReasonCacheEvicted        = "CacheEvicted"
 )
