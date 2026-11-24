@@ -64,9 +64,23 @@ func exitNotifyEnvelope(rep ExitReport) (Envelope, error) {
 	}, nil
 }
 
-func offerExit(ch chan ExitReport, rep ExitReport) {
+// exitNote is one Exit report plus the sequence a waiter matches.
+// seq is 0 when nobody is waiting for this write.
+type exitNote struct {
+	rep ExitReport
+	seq uint64
+}
+
+// exitSink is one live agent connection. close unblocks a write that a
+// dead host will never read, so the halt after a workload exit can proceed.
+type exitSink struct {
+	ch    chan exitNote
+	close func()
+}
+
+func offerNote(ch chan exitNote, note exitNote) {
 	select {
-	case ch <- rep:
+	case ch <- note:
 		return
 	default:
 	}
@@ -75,58 +89,128 @@ func offerExit(ch chan ExitReport, rep ExitReport) {
 	default:
 	}
 	select {
-	case ch <- rep:
+	case ch <- note:
 	default:
 	}
 }
 
 func (l *handlerLive) publishExit(rep ExitReport) {
+	l.publish(rep, false)
+}
+
+// publishExitWait stores rep and returns a channel that is closed after a
+// connection writes it or the write fails. No connection yet leaves the
+// channel open until one accepts and writes the replayed report.
+func (l *handlerLive) publishExitWait(rep ExitReport) <-chan struct{} {
+	return l.publish(rep, true)
+}
+
+func (l *handlerLive) publish(rep ExitReport, wait bool) <-chan struct{} {
 	if l == nil || !rep.Reported() {
-		return
+		if !wait {
+			return nil
+		}
+		ch := make(chan struct{})
+		close(ch)
+		return ch
 	}
 	code := *rep.ExitCode
 	stored := ExitReport{ExitCode: &code, Reason: rep.Reason}
+	var done chan struct{}
 	l.mu.Lock()
 	l.pendingExit = &stored
-	sinks := append([]chan ExitReport(nil), l.exits...)
-	l.mu.Unlock()
-	for _, ch := range sinks {
-		offerExit(ch, stored)
+	l.exitSeq++
+	noteSeq := uint64(0)
+	if wait {
+		if l.exitWait != nil {
+			close(l.exitWait)
+			l.exitWait = nil
+		}
+		done = make(chan struct{})
+		l.exitWait = done
+		l.waitSeq = l.exitSeq
+		l.pendingSeq = l.exitSeq
+		noteSeq = l.exitSeq
+	} else {
+		l.pendingSeq = 0
 	}
+	sinks := append([]exitSink(nil), l.exits...)
+	l.mu.Unlock()
+	note := exitNote{rep: stored, seq: noteSeq}
+	for _, s := range sinks {
+		offerNote(s.ch, note)
+	}
+	return done
 }
 
-func (l *handlerLive) addExitSink(ch chan ExitReport) func() {
+// finishExitWait closes the waiter for seq. A different report's write
+// does not release it.
+func (l *handlerLive) finishExitWait(seq uint64) {
+	if l == nil || seq == 0 {
+		return
+	}
+	l.mu.Lock()
+	if l.exitWait == nil || seq != l.waitSeq {
+		l.mu.Unlock()
+		return
+	}
+	ch := l.exitWait
+	l.exitWait = nil
+	l.mu.Unlock()
+	close(ch)
+}
+
+// closeExitConns closes every agent connection so a blocked Exit write
+// returns. The count is how many connections were closed.
+func (l *handlerLive) closeExitConns() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	closers := make([]func(), 0, len(l.exits))
+	for _, s := range l.exits {
+		if s.close != nil {
+			closers = append(closers, s.close)
+		}
+	}
+	l.mu.Unlock()
+	for _, c := range closers {
+		c()
+	}
+	return len(closers)
+}
+
+func (l *handlerLive) addExitSink(ch chan exitNote, closeFn func()) func() {
 	if l == nil {
 		return func() {}
 	}
 	l.mu.Lock()
-	l.exits = append(l.exits, ch)
-	var pending *ExitReport
-	if l.pendingExit != nil {
+	l.exits = append(l.exits, exitSink{ch: ch, close: closeFn})
+	var note *exitNote
+	if l.pendingExit != nil && l.pendingExit.ExitCode != nil {
 		cp := *l.pendingExit
-		if cp.ExitCode != nil {
-			code := *cp.ExitCode
-			cp.ExitCode = &code
-		}
-		pending = &cp
+		code := *cp.ExitCode
+		cp.ExitCode = &code
+		n := exitNote{rep: cp, seq: l.pendingSeq}
+		note = &n
 	}
 	l.mu.Unlock()
-	if pending != nil {
-		offerExit(ch, *pending)
+	if note != nil {
+		offerNote(ch, *note)
 	}
 	return func() { l.removeExitSink(ch) }
 }
 
-func (l *handlerLive) removeExitSink(ch chan ExitReport) {
+func (l *handlerLive) removeExitSink(ch chan exitNote) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := make([]chan ExitReport, 0, len(l.exits))
-	for _, c := range l.exits {
-		if c != ch {
-			out = append(out, c)
+	out := make([]exitSink, 0, len(l.exits))
+	for _, s := range l.exits {
+		if s.ch != ch {
+			out = append(out, s)
 		}
 	}
 	l.exits = out

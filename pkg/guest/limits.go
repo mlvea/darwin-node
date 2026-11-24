@@ -113,8 +113,15 @@ type handlerLive struct {
 	nonces *nonceSet
 	// exits receives ReportExit for each live connection. pendingExit is
 	// the last report, replayed onto a connection that comes up after it.
-	exits       []chan ExitReport
+	// pendingSeq matches waitSeq when that report is the one a caller is
+	// waiting to see written. exitWait is closed after that write, or
+	// after it fails.
+	exits       []exitSink
 	pendingExit *ExitReport
+	pendingSeq  uint64
+	exitSeq     uint64
+	exitWait    chan struct{}
+	waitSeq     uint64
 }
 
 func newHandlerLive(token string, lim *Limiter) *handlerLive {

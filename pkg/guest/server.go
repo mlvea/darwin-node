@@ -172,8 +172,9 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	writerDone := make(chan struct{})
 	startExitWriter := func() {
 		exitOnce.Do(func() {
-			ch := make(chan ExitReport, 1)
-			exitStop = h.live.addExitSink(ch)
+			ch := make(chan exitNote, 1)
+			// Closing the connection unblocks Write when the host is gone.
+			exitStop = h.live.addExitSink(ch, func() { _ = rw.Close() })
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -183,12 +184,14 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 						return
 					case <-writerDone:
 						return
-					case rep := <-ch:
-						env, err := exitNotifyEnvelope(rep)
-						if err != nil {
-							continue
+					case note := <-ch:
+						env, err := exitNotifyEnvelope(note.rep)
+						var werr error
+						if err == nil {
+							werr = fc.Write(env)
 						}
-						if err := fc.Write(env); err != nil {
+						h.live.finishExitWait(note.seq)
+						if err != nil || werr != nil {
 							return
 						}
 					}
