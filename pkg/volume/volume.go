@@ -4,6 +4,7 @@ package volume
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -188,21 +189,38 @@ func materializeOne(req Request, mount corev1.VolumeMount, src *corev1.VolumeSou
 }
 
 func writeConfigMap(dir string, cm *corev1.ConfigMap, items []corev1.KeyToPath, def os.FileMode) error {
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
+	files, err := configMapFiles(cm, items, def)
+	if err != nil {
 		return err
+	}
+	return publishVolume(dir, files)
+}
+
+func configMapFiles(cm *corev1.ConfigMap, items []corev1.KeyToPath, def os.FileMode) (map[string]volFile, error) {
+	if cm == nil {
+		return nil, fmt.Errorf("nil configmap")
+	}
+	out := map[string]volFile{}
+	add := func(rel string, data []byte, mode os.FileMode) error {
+		c, err := cleanVolumeRel(rel)
+		if err != nil {
+			return err
+		}
+		out[c] = volFile{data: append([]byte(nil), data...), mode: mode}
+		return nil
 	}
 	if len(items) == 0 {
 		for k, v := range cm.Data {
-			if err := writeVolumeFile(dir, k, []byte(v), def); err != nil {
-				return err
+			if err := add(k, []byte(v), def); err != nil {
+				return nil, err
 			}
 		}
 		for k, v := range cm.BinaryData {
-			if err := writeVolumeFile(dir, k, v, def); err != nil {
-				return err
+			if err := add(k, v, def); err != nil {
+				return nil, err
 			}
 		}
-		return nil
+		return out, nil
 	}
 	for _, it := range items {
 		mode := def
@@ -210,33 +228,50 @@ func writeConfigMap(dir string, cm *corev1.ConfigMap, items []corev1.KeyToPath, 
 			mode = modeOr(it.Mode, def)
 		}
 		if v, ok := cm.Data[it.Key]; ok {
-			if err := writeVolumeFile(dir, it.Path, []byte(v), mode); err != nil {
-				return err
+			if err := add(it.Path, []byte(v), mode); err != nil {
+				return nil, err
 			}
 			continue
 		}
 		if v, ok := cm.BinaryData[it.Key]; ok {
-			if err := writeVolumeFile(dir, it.Path, v, mode); err != nil {
-				return err
+			if err := add(it.Path, v, mode); err != nil {
+				return nil, err
 			}
 			continue
 		}
-		return fmt.Errorf("configmap key %q missing", it.Key)
+		return nil, fmt.Errorf("configmap key %q missing", it.Key)
 	}
-	return nil
+	return out, nil
 }
 
 func writeSecret(dir string, sec *corev1.Secret, items []corev1.KeyToPath, def os.FileMode) error {
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
+	files, err := secretFiles(sec, items, def)
+	if err != nil {
 		return err
+	}
+	return publishVolume(dir, files)
+}
+
+func secretFiles(sec *corev1.Secret, items []corev1.KeyToPath, def os.FileMode) (map[string]volFile, error) {
+	if sec == nil {
+		return nil, fmt.Errorf("nil secret")
+	}
+	out := map[string]volFile{}
+	add := func(rel string, data []byte, mode os.FileMode) error {
+		c, err := cleanVolumeRel(rel)
+		if err != nil {
+			return err
+		}
+		out[c] = volFile{data: append([]byte(nil), data...), mode: mode}
+		return nil
 	}
 	if len(items) == 0 {
 		for k, v := range sec.Data {
-			if err := writeVolumeFile(dir, k, v, def); err != nil {
-				return err
+			if err := add(k, v, def); err != nil {
+				return nil, err
 			}
 		}
-		return nil
+		return out, nil
 	}
 	for _, it := range items {
 		mode := def
@@ -245,33 +280,30 @@ func writeSecret(dir string, sec *corev1.Secret, items []corev1.KeyToPath, def o
 		}
 		v, ok := sec.Data[it.Key]
 		if !ok {
-			return fmt.Errorf("secret key %q missing", it.Key)
+			return nil, fmt.Errorf("secret key %q missing", it.Key)
 		}
-		if err := writeVolumeFile(dir, it.Path, v, mode); err != nil {
-			return err
+		if err := add(it.Path, v, mode); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return out, nil
 }
 
 func writeProjected(req Request, volumeName, dir string, proj *corev1.ProjectedVolumeSource) error {
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
-		return err
+	if proj == nil {
+		return fmt.Errorf("nil projected volume")
 	}
+	all := map[string]volFile{}
 	for _, s := range proj.Sources {
+		var files map[string]volFile
+		var err error
 		switch {
 		case s.ServiceAccountToken != nil:
 			path := s.ServiceAccountToken.Path
 			if path == "" {
 				path = "token"
 			}
-			tok, ok := projectedToken(req, volumeName, path, proj)
-			if !ok || strings.TrimSpace(tok) == "" {
-				return fmt.Errorf("projected service account token %q: refusing to write an empty token", path)
-			}
-			if err := writeVolumeFile(dir, path, []byte(tok), secretPerm); err != nil {
-				return err
-			}
+			files, err = projectedTokenFile(req, volumeName, path, proj)
 		case s.ConfigMap != nil:
 			cm := req.ConfigMaps[s.ConfigMap.Name]
 			if cm == nil {
@@ -281,9 +313,7 @@ func writeProjected(req Request, volumeName, dir string, proj *corev1.ProjectedV
 			if proj.DefaultMode != nil {
 				def = modeOr(proj.DefaultMode, filePerm)
 			}
-			if err := writeConfigMap(dir, cm, s.ConfigMap.Items, def); err != nil {
-				return err
-			}
+			files, err = configMapFiles(cm, s.ConfigMap.Items, def)
 		case s.Secret != nil:
 			sec := req.Secrets[s.Secret.Name]
 			if sec == nil {
@@ -293,16 +323,30 @@ func writeProjected(req Request, volumeName, dir string, proj *corev1.ProjectedV
 			if proj.DefaultMode != nil {
 				def = modeOr(proj.DefaultMode, secretPerm)
 			}
-			if err := writeSecret(dir, sec, s.Secret.Items, def); err != nil {
-				return err
-			}
+			files, err = secretFiles(sec, s.Secret.Items, def)
 		case s.DownwardAPI != nil:
-			if err := writeDownward(req.Pod, req.Container.Name, dir, s.DownwardAPI.Items); err != nil {
-				return err
-			}
+			files, err = downwardFiles(req.Pod, req.Container.Name, s.DownwardAPI.Items)
+		}
+		if err != nil {
+			return err
+		}
+		for k, v := range files {
+			all[k] = v
 		}
 	}
-	return nil
+	return publishVolume(dir, all)
+}
+
+func projectedTokenFile(req Request, volumeName, path string, proj *corev1.ProjectedVolumeSource) (map[string]volFile, error) {
+	tok, ok := projectedToken(req, volumeName, path, proj)
+	if !ok || strings.TrimSpace(tok) == "" {
+		return nil, fmt.Errorf("projected service account token %q: refusing to write an empty token", path)
+	}
+	rel, err := cleanVolumeRel(path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]volFile{rel: {data: []byte(tok), mode: secretPerm}}, nil
 }
 
 func projectedToken(req Request, volume, path string, proj *corev1.ProjectedVolumeSource) (string, bool) {
@@ -337,8 +381,10 @@ func serviceAccountProjectionCount(proj *corev1.ProjectedVolumeSource) int {
 }
 
 // WriteProjectedTokens rewrites token files under root/<volume>/<path>.
-// It does not create an empty file, and it does not touch other volume contents.
+// It does not create an empty file. Other regular files already in the
+// volume are kept. Symlinks are not opened or followed.
 func WriteProjectedTokens(root string, tokens []ProjectedToken) error {
+	grouped := map[string][]ProjectedToken{}
 	for _, t := range tokens {
 		if err := safeVolumeName(t.Volume); err != nil {
 			return err
@@ -346,11 +392,26 @@ func WriteProjectedTokens(root string, tokens []ProjectedToken) error {
 		if strings.TrimSpace(t.Token) == "" {
 			return fmt.Errorf("projected service account token %s/%s: refusing to write an empty token", t.Volume, t.Path)
 		}
-		path := t.Path
-		if path == "" {
-			path = "token"
+		grouped[t.Volume] = append(grouped[t.Volume], t)
+	}
+	for volume, list := range grouped {
+		dir := filepath.Join(root, volume)
+		files, err := readPublished(dir)
+		if err != nil {
+			return err
 		}
-		if err := writeVolumeFile(filepath.Join(root, t.Volume), path, []byte(t.Token), secretPerm); err != nil {
+		for _, t := range list {
+			path := t.Path
+			if path == "" {
+				path = "token"
+			}
+			rel, err := cleanVolumeRel(path)
+			if err != nil {
+				return err
+			}
+			files[rel] = volFile{data: []byte(t.Token), mode: secretPerm}
+		}
+		if err := publishVolume(dir, files); err != nil {
 			return err
 		}
 	}
@@ -415,63 +476,68 @@ func volumeMounted(pod *corev1.Pod, name string) bool {
 }
 
 // DirUsage is the sum of regular-file sizes under root. Directory metadata
-// is not counted. A symlink whose target leaves root is an error: the walk
-// cannot account for bytes written through it, so the caller fails closed.
+// and symlinks are not counted. Guest symlinks are not followed: an absolute
+// link is a path in the guest, and a dangling link is not payload. A relative
+// link that lexically leaves root still fails closed, and the error does not
+// include the host path. A missing file during the walk (ENOENT) is ignored.
 // A missing root is zero bytes.
 func DirUsage(root string) (int64, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return 0, err
+		return 0, errUsage(err)
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
-		return 0, err
+		return 0, errUsage(err)
 	}
-	// Resolve ancestor symlinks (macOS /var -> /private/var) before comparing
-	// a symlink target. EvalSymlinks on the target does the same, so both
-	// sides must be canonical or an in-volume link looks like an escape.
+	// Resolve ancestor symlinks (macOS /var -> /private/var) so the volume
+	// root is canonical. Guest symlinks under that root are not resolved.
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return 0, err
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, errUsage(err)
 	}
 	root = resolved
 	if !info.IsDir() {
 		info, err = os.Lstat(root)
 		if err != nil {
-			return 0, err
+			if os.IsNotExist(err) {
+				return 0, nil
+			}
+			return 0, errUsage(err)
 		}
 	}
 	if !info.IsDir() {
-		return 0, fmt.Errorf("emptyDir %s is not a directory", root)
+		return 0, fmt.Errorf("emptyDir is not a directory")
 	}
 	var n int64
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return errUsage(err)
 		}
-		if path == root {
+		if d == nil || path == root {
 			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return judgeSymlink(root, path)
 		}
 		st, err := d.Info()
 		if err != nil {
-			return err
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return errUsage(err)
 		}
 		if st.Mode()&os.ModeSymlink != 0 {
-			target, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				return fmt.Errorf("emptyDir symlink %s: %w", path, err)
-			}
-			target, err = filepath.Abs(target)
-			if err != nil {
-				return err
-			}
-			if !pathWithin(root, target) {
-				return fmt.Errorf("emptyDir symlink %s escapes the volume", path)
-			}
-			return nil
+			return judgeSymlink(root, path)
 		}
 		if !st.Mode().IsRegular() {
 			return nil
@@ -488,10 +554,51 @@ func DirUsage(root string) (int64, error) {
 	return n, nil
 }
 
+// judgeSymlink does not stat or EvalSymlinks the target. Absolute targets
+// belong to the guest. Relative targets are checked lexically so ".."
+// outside this directory still fails closed.
+func judgeSymlink(root, path string) error {
+	target, err := os.Readlink(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("emptyDir symlink")
+	}
+	if filepath.IsAbs(target) {
+		return nil
+	}
+	cleaned := filepath.Clean(filepath.Join(filepath.Dir(path), target))
+	if cleaned != root && !pathWithin(root, cleaned) {
+		return fmt.Errorf("emptyDir symlink escapes the volume")
+	}
+	return nil
+}
+
+func errUsage(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pe *os.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		return fmt.Errorf("emptyDir: %s", pe.Err.Error())
+	}
+	if strings.ContainsAny(err.Error(), `/\`) {
+		return fmt.Errorf("emptyDir check failed")
+	}
+	return err
+}
+
 func writeDownward(pod *corev1.Pod, containerName, dir string, items []corev1.DownwardAPIVolumeFile) error {
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
+	files, err := downwardFiles(pod, containerName, items)
+	if err != nil {
 		return err
 	}
+	return publishVolume(dir, files)
+}
+
+func downwardFiles(pod *corev1.Pod, containerName string, items []corev1.DownwardAPIVolumeFile) (map[string]volFile, error) {
+	out := map[string]volFile{}
 	for _, it := range items {
 		var val string
 		var err error
@@ -504,17 +611,19 @@ func writeDownward(pod *corev1.Pod, containerName, dir string, items []corev1.Do
 			err = fmt.Errorf("downwardAPI item %q has no fieldRef or resourceFieldRef", it.Path)
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		mode := filePerm
 		if it.Mode != nil {
 			mode = modeOr(it.Mode, filePerm)
 		}
-		if err := writeVolumeFile(dir, it.Path, []byte(val), mode); err != nil {
-			return err
+		rel, err := cleanVolumeRel(it.Path)
+		if err != nil {
+			return nil, err
 		}
+		out[rel] = volFile{data: []byte(val), mode: mode}
 	}
-	return nil
+	return out, nil
 }
 
 func resourceFileValue(pod *corev1.Pod, fallback string, ref *corev1.ResourceFieldSelector) (string, error) {
@@ -593,38 +702,6 @@ func modeOr(ptr *int32, def os.FileMode) os.FileMode {
 		return def
 	}
 	return os.FileMode(*ptr) & os.ModePerm
-}
-
-func writeVolumeFile(dir, name string, data []byte, mode os.FileMode) error {
-	full, err := safeVolumePath(dir, name)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(full), dirPerm); err != nil {
-		return err
-	}
-	return os.WriteFile(full, data, mode)
-}
-
-// safeVolumePath joins name under dir and rejects absolute paths and "..".
-// ConfigMap keys and KeyToPath paths are otherwise written with filepath.Join,
-// which would let "../../etc/cron.d/x" land outside the pod volume directory.
-func safeVolumePath(dir, name string) (string, error) {
-	if name == "" || strings.ContainsRune(name, 0) {
-		return "", fmt.Errorf("empty volume file path")
-	}
-	if filepath.IsAbs(name) {
-		return "", fmt.Errorf("volume file path %q must be relative", name)
-	}
-	rel := filepath.Clean(name)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("volume file path %q escapes the volume directory", name)
-	}
-	full := filepath.Join(dir, rel)
-	if !pathWithin(dir, full) {
-		return "", fmt.Errorf("volume file path %q escapes the volume directory", name)
-	}
-	return full, nil
 }
 
 func cleanMountPath(p string) (string, error) {

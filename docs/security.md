@@ -155,8 +155,16 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
 
 - Materialized on the host under `cache/pods/<uid>/volumes/<name>` with
   0700 directories, 0600 secret files.
+- Docker binds of ConfigMap, Secret, projected, and downwardAPI volumes are
+  read-only, including when the pod's volumeMount is not. emptyDir and
+  hostPath still follow the mount's readOnly flag.
+- Each rewrite writes the bytes with `O_NOFOLLOW` into a new directory and
+  publishes them by renaming a `..data` symlink, the same shape as kubelet's
+  AtomicWriter. A symlink or hard link left at the visible name is replaced,
+  not opened. `..` names are reserved for that directory.
 - Copied into the guest by the agent (`mode=copy`) so the automount folder
-  is not the long-term home of secret bytes.
+  is not the long-term home of secret bytes. The copy skips `..` names and
+  follows the visible symlinks, so the guest gets regular files.
 - Deleted recursively on pod teardown *after* `machine.Stop` returns, so
   the guest cannot write through virtio-fs while backing files are removed.
 - Crash recovery (`Engine.Recover`, run from `engine.New`) deletes
@@ -182,18 +190,20 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
 - `TokenRequest` errors and empty tokens fail pod admission. The node
   does not create the token file in that case.
 - While the pod is running, the watch loop refreshes at half the
-  remaining lifetime, rewrites the host file (mode 0600), and asks the
-  guest agent to copy it again.
+  remaining lifetime, republishes the host file (mode 0600) through the
+  same atomic write, and asks the guest agent to copy it again.
 - A failed refresh leaves the previous file in place. Once the recorded
   expiration has passed, the pod fails and its VM slot is released.
 
 ## emptyDir size
 
-`sizeLimit` is enforced by walking the host directory on the probe
-interval. Usage over the limit fails the pod. A symlink whose target
-leaves that directory fails the pod, because the walk cannot account
-for bytes written through it. This is a host-side check between ticks,
-not an APFS quota.
+`sizeLimit` is the sum of regular-file sizes under the host directory,
+checked on the probe interval. The walk does not follow symlinks. An
+absolute symlink is a guest path and is not an error. A dangling symlink
+is not an error. A file that disappears during the walk is not an error.
+A relative symlink that lexically leaves the directory fails the pod, and
+the pod message does not include the host cache path. Usage over the limit
+fails the pod. This is a host-side check between ticks, not an APFS quota.
 
 ## SSH fallback
 

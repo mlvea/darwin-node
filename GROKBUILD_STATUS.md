@@ -28,6 +28,38 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
   - A pod that puts a secret in `env` or `envFrom` does not receive those bytes. A projected token and a secret volume do.
   - ServiceAccount mode can still list every pod and every service, and can delete any pod in the configured namespaces, not only pods bound to this node. NodeRestriction does not apply to that ServiceAccount.
 
+### 2026-11-24 (Asia/Singapore) — S-1 and B-10 fixed: content volumes no longer follow symlinks
+
+- **HEAD:** based on `main` at `bdc82b1` (merge of PR #25 and PR #26). This branch is `cursor/volume-symlink-writes-1add`. `main` was not moved. No Mac worker is online. `pkg/runtime/vz/vz.go` was not edited. The 2-VM cap and the CLI flags are unchanged.
+- **S-1 (Critical, fixed, confirmed on Linux):** a ConfigMap, Secret, projected, or downwardAPI volume was bound read-write into Docker sidecars and init containers, and the next materialize or token refresh wrote with `os.WriteFile`, which follows the last path component. The install guide runs the node as root. These tests failed on unmodified code before the fix:
+  - `TestMaterializeDoesNotFollowReplacedKeySymlink`: `rewrite followed the key symlink and wrote "pwned" to the host file`
+  - `TestMaterializeDoesNotFollowIntermediateDirSymlink`: `rewrite followed nest symlink and wrote "pwned"`
+  - `TestMaterializeDoesNotTruncateHardLinkedHostFile`: `rewrite truncated a hard-linked host file: "pwned"`
+  - `TestTokenRefreshDoesNotFollowSymlinkAndKeepsSibling`: `token refresh followed symlink and wrote "second"`
+  - `TestVolumeDirectorySymlinkIsNotFollowed`: `rewrite followed the volume directory symlink and wrote "pwned"` (first fix attempt then failed with `volume "cfg": volume write: not a directory`, because Linux `renameat` of a directory onto a symlink returns `ENOTDIR` and leaves the symlink)
+  - `TestMaterializeDropsRemovedConfigMapKey`: `removed configmap key still present`
+  - `TestContentVolumesBindReadOnly`: `mount /etc/cfg mode :ro missing in [/vol/cfg:/etc/cfg:rw /vol/sec:/etc/sec:rw /vol/proj:...:rw /vol/down:...:rw /vol/scratch:/scratch:rw /host/ci:/host:rw]`
+  - `TestHostPathFileOrCreateDoesNotFollowDanglingSymlink`: `FileOrCreate followed a dangling symlink and created the host file`
+  - `TestCopyPathSkipsAtomicWriterMetadata`: `..data copied into the guest`
+- **B-10 (Medium, fixed, confirmed on Linux):** `DirUsage` followed guest symlinks with `EvalSymlinks` and failed the pod. The error included the host cache path, and `failWith` copied that text into the pod message. These tests failed on unmodified code:
+  - relative escape: `host path leaked in emptyDir error: emptyDir symlink /tmp/.../escape escapes the volume`
+  - dangling: `emptyDir symlink /tmp/.../dangling: lstat /tmp/.../missing: no such file or directory`
+  - absolute guest symlink: `emptyDir symlink /tmp/.../abs escapes the volume` (the pod went `Failed` with that host path in the message)
+  - not a directory: `emptyDir /tmp/.../notdir is not a directory`
+  - file deleted during the walk: `readdirent /tmp/.../d/s0: no such file or directory` (hit on the first attempt)
+  - `TestEmptyDirSymlinkEscapeFailsPod`: `pod message contains a host path`
+- **Disproved as a write-through:** `DirectoryOrCreate` on a dangling final component returns `EEXIST` and does not create the target. `volumeSubPath` already refuses a symlink that leaves the volume and only `Mkdir`s when `Lstat` says the name is missing. The memory sidecar does not bind host directories. An in-volume relative symlink is still not counted twice (`usage 6`). Ancestor symlink resolution of the volume root (`/var` → `/private/var`) stays.
+- **Fix:** ConfigMap, Secret, projected, and downwardAPI Docker binds are read-only even when the pod mount is not. emptyDir and hostPath still follow the mount flag. Each rewrite writes the bytes with `O_NOFOLLOW|O_CREAT|O_EXCL` into a new timestamp directory inside the volume directory (the inode stays, so the virtio-fs share stays valid) and publishes by renaming a relative `..data` symlink, the same shape as kubelet's AtomicWriter. Visible names are relative symlinks `..data/<name>`. `rename` replaces a symlink or hard link and does not open it. A volume directory that is itself a symlink is replaced from the parent: if `renameat` of the new directory fails and the name is still a symlink, that symlink is unlinked (not followed) and the rename is retried. The guest copy skips `..` names and follows the visible symlinks, so the guest gets regular files. Token refresh reads the published regular files without following `..data` if it is not a timestamp name, overlays the new token, and publishes again. `FileOrCreate` uses `Lstat` and `O_NOFOLLOW|O_EXCL`. `DirUsage` does not follow guest symlinks, ignores `ENOENT`, and checks a relative target lexically. An absolute target is a guest path and is not an error. A relative target that lexically leaves the directory still fails the pod, and the message is `emptyDir symlink escapes the volume` with no host path. The engine also scrubs the volume's host path out of any error before `failWith`.
+- **Verification (Linux, this run):** `go vet ./...` PASS. `go test ./... -short -race -count=1 -timeout 600s` PASS (`pkg/engine` 86.134s, `pkg/guest` 6.228s, `pkg/provider` 13.322s, `cmd/darwin-node` 3.977s, `pkg/image` 2.425s, `pkg/volume` 1.064s, `pkg/sidecar` 1.134s, `pkg/runtime/vz` 1.066s on the Linux stub). `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go test -c` succeeded for `pkg/volume`, `pkg/engine`, `pkg/guest`, and `pkg/sidecar`. `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build` of `cmd/guest-agent` succeeded. `pkg/runtime/vz` does not cross-compile here (`github.com/Code-Hex/vz/v3` needs the Darwin Virtualization headers). macOS CI is the compile-and-test check for `vz.go`.
+- **Left alone:** a relative symlink that lexically leaves an emptyDir still fails the pod. `DirectoryOrCreate` and `volumeSubPath` were not rewritten. `vz.go` was not edited. The 2-VM cap and the CLI flags are unchanged.
+- **Open risks:**
+  - Hardware gate `make test-hardware IMAGE=...` and the 24h `make soak IMAGE=...` are still unrun. Both need Madushan's Mac Mini. The virtio-fs share of a volume that now contains `..data` and timestamp directories was not boot-tested. Linux tests check the host files and the guest copy.
+  - A crash after unlinking a symlinked volume directory and before the new directory is renamed drops that directory. The next materialize creates it again. The symlink target is not written.
+  - `e2e (self-hosted)` stays skipped.
+- **Next priority:**
+  1. Hardware gate `make test-hardware IMAGE=...` and the 24h vz soak on Madushan's Mac Mini.
+  2. On that Mac, boot a pod whose sidecar bind of a ConfigMap is read-only and whose guest sees the key as a regular file after a token refresh.
+
 ### 2026-11-24 (Asia/Singapore) — Workload exit codes and sidecar probes off the watch
 
 - **HEAD:** stacked on `cursor/vm-probe-exit-e3a0` at `16d9ed8` (open PR #25, CI green, not merged). This branch is `cursor/guest-exit-sidecar-probes-aec2`. That branch and `main` were not moved. No Mac worker is online. `pkg/runtime/vz/vz.go` was not edited. The 2-VM cap and the CLI flags are unchanged.

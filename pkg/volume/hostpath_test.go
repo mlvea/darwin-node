@@ -213,6 +213,23 @@ func TestHostPathTypes(t *testing.T) {
 	}
 }
 
+func TestHostPathFileOrCreateDoesNotFollowDanglingSymlink(t *testing.T) {
+	allowed := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	link := filepath.Join(allowed, "link")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	err := materializeHP(t, link, hpType(corev1.HostPathFileOrCreate), []string{allowed})
+	if _, statErr := os.Lstat(victim); statErr == nil {
+		t.Fatal("FileOrCreate followed a dangling symlink and created the host file")
+	}
+	if err == nil {
+		t.Fatal("a symlink is not a file to create through")
+	}
+}
+
 func TestAllowHostPathEmptyAndRoot(t *testing.T) {
 	if err := AllowHostPath("/var/tmp", nil); err == nil {
 		t.Fatal("empty allowlist")
