@@ -9,6 +9,10 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — client Close stops the host heartbeat
+
+- The macOS `-race` push run of `c7ce7e5` failed `TestHybridSidecarStaysReadyWhileRunning` with one `(*Client).heartbeatLoop` goroutine still parked after the test. The pull_request run of the same SHA passed. `Close` only closed the connection, so the loop waited on `Session.closed`, which the read loop closes after `Read` returns. `Close` now cancels the loop itself and waits for it to leave. `TestClientCloseStopsHeartbeat` fails if the loop is still on the stack when `Close` returns.
+
 ### 2026-11-25 (Asia/Singapore) — log follow keeps the line written as the snapshot is taken
 
 - **HEAD:** `cursor/ops-sprint-batch-i-da4b` after merging `origin/main` at `5dc9bf8` (PR #34) into `48c0862`. `main` was not pushed. No rebase, no force-push.

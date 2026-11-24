@@ -94,6 +94,38 @@ func TestExecInteractiveEchoesStdin(t *testing.T) {
 	}
 }
 
+func TestClientCloseStopsHeartbeat(t *testing.T) {
+	leakcheck.Check(t)
+	h := Handler{Token: "tok"}
+	h.LogBuffer = NewLogBuffer(8)
+	cli, _ := serveTestHandler(t, h)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && heartbeatLoops() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if heartbeatLoops() == 0 {
+		t.Fatal("heartbeat did not start")
+	}
+	if err := cli.Close(); err != nil && err != io.EOF && err != io.ErrClosedPipe {
+		t.Fatal(err)
+	}
+	// Close waits until the loop has returned. The goroutine can still be
+	// unwinding when that wait ends, so give the scheduler a moment.
+	deadline = time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && heartbeatLoops() != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := heartbeatLoops(); n != 0 {
+		t.Fatalf("heartbeat still running after Close: %d", n)
+	}
+}
+
+func heartbeatLoops() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "(*Client).heartbeatLoop")
+}
+
 func TestLogsFollowStreamsAppends(t *testing.T) {
 	lb := NewLogBuffer(256)
 	lb.Write([]byte("first\n"))
