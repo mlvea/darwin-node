@@ -260,8 +260,13 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 		if ctx.Err() != nil {
 			return false
 		}
-		if !e.noteVMDeath(rec) || !e.enforceVolumeContract(ctx, rec) {
+		restarted, keep := e.noteVMDeath(ctx, rec)
+		if !keep || !e.enforceVolumeContract(ctx, rec) {
 			return false
+		}
+		if restarted {
+			probes = vmProbeState{}
+			sched = vmProbeSched{}
 		}
 		e.refreshSidecarStatus(ctx, rec)
 		if !e.noteSidecarExit(rec) || !e.restartExitedSidecars(ctx, rec) {
@@ -312,34 +317,101 @@ func stopProbeTimer(timer probeTimer) {
 	}
 }
 
-// noteVMDeath fails a Running pod whose machine has stopped or entered the
-// runtime's error state. The watch goroutine is the only caller, including
-// around restartVM, so a liveness restart's brief Stopped state is not
-// observed. Delete sets Succeeded before it stops the machine; failWith
-// leaves that phase alone.
-func (e *Engine) noteVMDeath(rec *podRecord) bool {
+// noteVMDeath handles a Running pod whose machine has stopped or entered
+// the runtime's error state. The watch goroutine is the only caller,
+// including around restartVM, so a liveness restart's brief Stopped state
+// is not observed. A guest exit code selects the phase: 0 with Never or
+// OnFailure is Succeeded, and Always or a non-zero OnFailure starts the VM
+// again. A stop with no guest code is still an unexpected death.
+// restarted tells the caller to clear its probe streaks. keep is false when
+// the watch should stop. Delete sets a terminal phase before it stops the
+// machine, and failWith leaves that phase alone.
+func (e *Engine) noteVMDeath(ctx context.Context, rec *podRecord) (restarted, keep bool) {
 	rec.mu.Lock()
 	phase := rec.phase
 	var st types.VMState
 	if rec.machine != nil {
 		st = rec.machine.Status().State
 	}
+	var code int32
+	reported := rec.guestExit != nil
+	if reported {
+		code = *rec.guestExit
+	}
+	policy := corev1.RestartPolicyAlways
+	if rec.pod != nil && rec.pod.Spec.RestartPolicy != "" {
+		policy = rec.pod.Spec.RestartPolicy
+	}
 	rec.mu.Unlock()
 	if phase != corev1.PodRunning {
-		return true
+		return false, true
 	}
 	switch st {
 	case types.VMStopped, types.VMFailed:
-		e.failWith(rec, "VM"+string(st), fmt.Errorf("macOS VM %s unexpectedly", st))
-		return false
 	default:
-		return true
+		return false, true
+	}
+	switch vmExitActionFor(policy, code, reported) {
+	case vmExitSucceed:
+		e.succeedWorkload(rec)
+		return false, false
+	case vmExitRestart:
+		if err := e.restartVM(ctx, rec); err != nil {
+			if ctx.Err() != nil || !podActive(rec) {
+				return false, false
+			}
+			e.fail(rec, fmt.Errorf("workload restart: %w", err))
+			return false, false
+		}
+		rec.mu.Lock()
+		rec.restartCount++
+		rec.mu.Unlock()
+		return true, true
+	default:
+		e.failWith(rec, "VM"+string(st), fmt.Errorf("macOS VM %s unexpectedly", st))
+		return false, false
+	}
+}
+
+type vmExitKind int
+
+const (
+	vmExitFail vmExitKind = iota
+	vmExitSucceed
+	vmExitRestart
+)
+
+// vmExitActionFor is the restart policy for a guest Exit. An empty policy
+// is Always, which is the Kubernetes default. A stop that carried no code
+// is not a workload result.
+func vmExitActionFor(policy corev1.RestartPolicy, code int32, reported bool) vmExitKind {
+	if !reported {
+		return vmExitFail
+	}
+	switch policy {
+	case "", corev1.RestartPolicyAlways:
+		return vmExitRestart
+	case corev1.RestartPolicyOnFailure:
+		if code == 0 {
+			return vmExitSucceed
+		}
+		return vmExitRestart
+	default:
+		if code == 0 {
+			return vmExitSucceed
+		}
+		return vmExitFail
 	}
 }
 
 func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeSched, probes *vmProbeState) bool {
-	if !e.noteVMDeath(rec) {
+	restarted, keep := e.noteVMDeath(ctx, rec)
+	if !keep {
 		return false
+	}
+	if restarted {
+		*probes = vmProbeState{}
+		*sched = vmProbeSched{}
 	}
 	rec.mu.Lock()
 	pod := rec.pod.DeepCopy()

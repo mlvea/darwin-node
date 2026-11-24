@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/flowcontrol"
 )
@@ -137,6 +139,10 @@ type podRecord struct {
 	// Nil means the guest sent none. A liveness restart clears it.
 	guestExit       *int32
 	guestExitReason string
+	// killedCode is set when Delete stops a pod whose workload has not
+	// exited. 137 is SIGKILL (grace 0) and 143 is SIGTERM (grace > 0).
+	// It wins over a later guest frame so the published code stays the kill.
+	killedCode      *int32
 	agentGen        uint64
 	failedErr       error
 	cancel          context.CancelFunc
@@ -869,10 +875,18 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 }
 
 // failedExitLocked is the terminated code and reason for a Failed pod.
-// A guest Exit notify wins, including 0. The runtime's code is used when
-// the guest sent none. Otherwise the code is 1 and the reason is the
-// host's (VMStopped, VMFailed, Failed).
+// A delete that stopped the workload before it exited publishes that kill
+// code (137 or 143). Otherwise a guest Exit notify wins, including 0. The
+// runtime's code is used when the guest sent none. Otherwise the code is 1
+// and the reason is the host's (VMStopped, VMFailed, Failed).
 func failedExitLocked(rec *podRecord, vmStatus types.VMStatus) (int32, string) {
+	if rec.killedCode != nil {
+		reason := rec.reason
+		if reason == "" {
+			reason = "Error"
+		}
+		return *rec.killedCode, reason
+	}
 	reason := rec.reason
 	if rec.guestExit != nil {
 		code := *rec.guestExit
@@ -923,8 +937,8 @@ func (e *Engine) fail(rec *podRecord, err error) {
 
 func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	rec.mu.Lock()
-	// Succeeded means Delete already owns the pod. A watch tick that observed
-	// Stopped must not flip that into Failed and tear the record down twice.
+	// Failed or Succeeded means Delete or a workload exit already owns the
+	// pod. A watch tick that observed Stopped must not tear it down twice.
 	if rec.phase == corev1.PodFailed || rec.phase == corev1.PodSucceeded {
 		rec.mu.Unlock()
 		return
@@ -950,6 +964,71 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 		_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 	}
 	e.events.Warn(context.Background(), event.ReasonFailed, err.Error())
+}
+
+// succeedWorkload marks a Running pod Succeeded after the guest reported
+// exit 0 and the restart policy will not start it again. The slot is
+// released. The pod directory stays until Delete so that delete can still
+// snapshot cache volumes.
+func (e *Engine) succeedWorkload(rec *podRecord) {
+	rec.mu.Lock()
+	if rec.phase != corev1.PodRunning && rec.phase != corev1.PodPending {
+		rec.mu.Unlock()
+		return
+	}
+	reason := "Completed"
+	if rec.guestExitReason != "" {
+		reason = rec.guestExitReason
+	}
+	rec.phase = corev1.PodSucceeded
+	rec.reason = reason
+	rec.message = "workload exited 0"
+	rec.ready = false
+	rec.mu.Unlock()
+	e.teardown(context.Background(), rec, 0, false)
+	e.events.Normal(context.Background(), event.ReasonCompleted, "workload exited 0")
+}
+
+// applyStopPhaseLocked records the phase Delete publishes while the pod is
+// still in the provider. A guest exit of 0 already finished the workload.
+// Anything else that has not reached a terminal phase was stopped first:
+// grace 0 is SIGKILL (137) and a positive grace is SIGTERM (143).
+func applyStopPhaseLocked(rec *podRecord, grace int64) {
+	if rec.phase == corev1.PodFailed || rec.phase == corev1.PodSucceeded {
+		return
+	}
+	if rec.guestExit != nil && *rec.guestExit == 0 {
+		rec.phase = corev1.PodSucceeded
+		if rec.guestExitReason != "" {
+			rec.reason = rec.guestExitReason
+		} else {
+			rec.reason = "Completed"
+		}
+		rec.message = "workload exited 0"
+		return
+	}
+	if rec.guestExit != nil {
+		rec.phase = corev1.PodFailed
+		if rec.guestExitReason != "" {
+			rec.reason = rec.guestExitReason
+		} else if rec.reason == "" {
+			rec.reason = "Error"
+		}
+		if rec.message == "" {
+			rec.message = fmt.Sprintf("workload exited %d", *rec.guestExit)
+		}
+		return
+	}
+	code := int32(143)
+	msg := "terminated with SIGTERM before the workload exited"
+	if grace <= 0 {
+		code = 137
+		msg = "killed with SIGKILL before the workload exited"
+	}
+	rec.killedCode = &code
+	rec.phase = corev1.PodFailed
+	rec.reason = "Error"
+	rec.message = msg
 }
 
 func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runHooks bool) {
@@ -1099,15 +1178,11 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 		return nil
 	}
 	rec.mu.Lock()
-	// Succeeded tells the death watch that this delete owns the pod, so
-	// stopping the VM cannot flip a graceful delete into Failed. A pod
-	// that is already Failed keeps that phase: rewriting it reported
-	// exit 0 to the API server for the whole teardown, including the
-	// cache snapshot.
-	if rec.phase != corev1.PodFailed {
-		rec.phase = corev1.PodSucceeded
-		rec.reason = "Killing"
-	}
+	// A terminal phase is kept. Rewriting Failed as Succeeded reported
+	// exit 0 for the whole teardown, and rewriting Succeeded as a kill
+	// counted a finished Job as a failure. A pod that is still running
+	// is Failed: the workload has not exited, so a Job must not count it.
+	applyStopPhaseLocked(rec, grace)
 	rec.ready = false
 	uid := string(rec.pod.UID)
 	// Cancel before waiting so a start blocked in Create, Start, or Dial
@@ -1160,6 +1235,72 @@ func (e *Engine) dropSidecarBackoff(pod *corev1.Pod) {
 	for _, c := range pod.Spec.Containers {
 		e.sidecarBackOff.DeleteEntry(uid + "/" + c.Name)
 	}
+}
+
+// UpdateMetadata stores a label or annotation change on a pod the engine
+// already has. Virtual-kubelet calls UpdatePod for those, and for a
+// container env slice whose order changed when it resolved the downward
+// API again. A spec change is refused. The VM is left running either way,
+// so a rejected update must not be mistaken for a failed pod by this process.
+func (e *Engine) UpdateMetadata(pod *corev1.Pod) error {
+	if pod == nil {
+		return errdefs.InvalidInput("nil pod")
+	}
+	e.mu.RLock()
+	rec := e.pods[Key(pod.Namespace, pod.Name)]
+	e.mu.RUnlock()
+	if rec == nil {
+		return errdefs.NotFound("pod not found")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.pod == nil {
+		return errdefs.NotFound("pod not found")
+	}
+	if pod.UID != "" && rec.pod.UID != pod.UID {
+		return errdefs.InvalidInput("pod updates are not supported; delete and recreate")
+	}
+	if !podSpecEqual(rec.pod.Spec, pod.Spec) {
+		return errdefs.InvalidInput("pod updates are not supported; delete and recreate")
+	}
+	rec.pod.Labels = maps.Clone(pod.Labels)
+	rec.pod.Annotations = maps.Clone(pod.Annotations)
+	return nil
+}
+
+// podSpecEqual reports whether two specs are the same workload. Container
+// env order is ignored: virtual-kubelet rebuilds that slice from a map on
+// every sync, so a label change arrives with the variables swapped.
+func podSpecEqual(a, b corev1.PodSpec) bool {
+	aa := a.DeepCopy()
+	bb := b.DeepCopy()
+	normalizeSpecEnv(aa)
+	normalizeSpecEnv(bb)
+	return equality.Semantic.DeepEqual(aa, bb)
+}
+
+func normalizeSpecEnv(spec *corev1.PodSpec) {
+	if spec == nil {
+		return
+	}
+	for i := range spec.Containers {
+		sortEnv(spec.Containers[i].Env)
+	}
+	for i := range spec.InitContainers {
+		sortEnv(spec.InitContainers[i].Env)
+	}
+	for i := range spec.EphemeralContainers {
+		sortEnv(spec.EphemeralContainers[i].Env)
+	}
+}
+
+func sortEnv(env []corev1.EnvVar) {
+	sort.Slice(env, func(i, j int) bool {
+		if env[i].Name != env[j].Name {
+			return env[i].Name < env[j].Name
+		}
+		return env[i].Value < env[j].Value
+	})
 }
 
 // Get returns a pod with status filled.
@@ -1898,7 +2039,7 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 			}
 		}
 	}
-	e.events.Normal(ctx, event.ReasonVMRestarted, "guest agent reconnected after liveness restart")
+	e.events.Normal(ctx, event.ReasonVMRestarted, "guest agent reconnected")
 	return nil
 }
 
