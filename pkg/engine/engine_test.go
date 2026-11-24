@@ -17,6 +17,7 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/config"
 	"github.com/darwin-node/darwin-node/pkg/event"
 	"github.com/darwin-node/darwin-node/pkg/guest"
+	"github.com/darwin-node/darwin-node/pkg/image"
 	"github.com/darwin-node/darwin-node/pkg/runtime/fake"
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
 	"github.com/darwin-node/darwin-node/pkg/types"
@@ -40,6 +41,37 @@ func testEngine(t *testing.T) *Engine {
 	cfg.AgentReadyTimeout = 5 * time.Second
 	cfg.AllowNATWorkloads = true
 	return New(cfg, slots, fake.New(), sidecar.None{}, event.Nop{}, "10.0.0.1")
+}
+
+func TestNewWiresImagePullLimits(t *testing.T) {
+	leakcheck.Check(t)
+	slots, err := capacity.New(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Runtime = "fake"
+	cfg.CacheDir = t.TempDir()
+	cfg.MaxImageBytes = 12345
+	cfg.MaxImageCompressedBytes = 23456
+	cfg.ImageDiskHeadroom = 34567
+	cfg.ImagePullTimeout = 7 * time.Second
+	cfg.ImageReadStall = 3 * time.Second
+	cfg.InsecureRegistries = []string{"registry.local"}
+	e := New(cfg, slots, fake.New(), sidecar.None{}, event.Nop{}, "10.0.0.1")
+	m, ok := e.puller.(*image.Manager)
+	if !ok {
+		t.Fatalf("puller %T", e.puller)
+	}
+	if m.MaxImageBytes != 12345 || m.MaxCompressedBytes != 23456 || m.DiskHeadroom != 34567 {
+		t.Fatalf("limits %+v", m)
+	}
+	if m.PullTimeout != 7*time.Second || m.ReadStall != 3*time.Second {
+		t.Fatalf("timeouts %s %s", m.PullTimeout, m.ReadStall)
+	}
+	if len(m.InsecureRegistries) != 1 || m.InsecureRegistries[0] != "registry.local" {
+		t.Fatalf("registries %v", m.InsecureRegistries)
+	}
 }
 
 func samplePod(name, uid string) *corev1.Pod {
