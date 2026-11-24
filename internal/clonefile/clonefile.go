@@ -12,13 +12,27 @@ import (
 )
 
 // File copies src to dst using clonefile on Darwin/APFS, else a regular copy.
+// A symlink is refused. clonefile(CLONE_NOFOLLOW) would copy the link
+// itself, and the next open would read the other pod's disk.
 func File(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to copy symlink %s", src)
+	}
 	_ = os.Remove(dst)
 	if runtime.GOOS == "darwin" {
 		if err := clonefile(src, dst); err == nil {
+			dstInfo, serr := os.Lstat(dst)
+			if serr == nil && dstInfo.Mode()&os.ModeSymlink != 0 {
+				_ = os.Remove(dst)
+				return fmt.Errorf("refusing to copy symlink %s", src)
+			}
 			return nil
 		}
 		// Fall through to copy on non-APFS (e.g. some CI volumes).

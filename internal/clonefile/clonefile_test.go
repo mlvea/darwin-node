@@ -18,6 +18,9 @@ func TestFileDoesNotCloneThroughSymlink(t *testing.T) {
 	}
 	dst := filepath.Join(dir, "overlay", "disk.img")
 	err := File(link, dst)
+	if fi, lerr := os.Lstat(dst); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("clone copied the symlink into the overlay")
+	}
 	if b, rerr := os.ReadFile(dst); rerr == nil && string(b) == "OTHER-POD" {
 		t.Fatal("clone followed a symlink and copied another pod's disk")
 	}
