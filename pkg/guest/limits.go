@@ -30,6 +30,12 @@ const (
 	// DefaultMaxSessionBytes is the unread stream payload one host session
 	// may hold across every call. Eight full call buffers.
 	DefaultMaxSessionBytes = 64 << 20
+
+	// DefaultStdinWindow is the unread stdin payload a new host may have
+	// in flight toward one exec. The guest grants those bytes back as the
+	// process reads them. Zero in the handshake means an older guest that
+	// does not grant credit.
+	DefaultStdinWindow = 1 << 20
 )
 
 const (
@@ -51,6 +57,11 @@ type HostConfig struct {
 	// MaxSessionBytes caps unread stream payload for the whole session.
 	// A frame that would pass it fails that call.
 	MaxSessionBytes int
+	// HeartbeatInterval overrides how often the host sends Health.
+	// Zero derives the interval from the guest's advertised idle timeout
+	// (one third of it, strictly inside the window). Negative turns the
+	// heartbeat off. There is no process flag.
+	HeartbeatInterval time.Duration
 }
 
 func (c HostConfig) writeTimeout() time.Duration {

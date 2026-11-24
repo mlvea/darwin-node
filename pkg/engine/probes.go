@@ -291,6 +291,11 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 			return
 		}
 		timer := e.newProbeTimer(e.nextProbeDelay(rec, &sched, interval))
+		sessionCli := e.agentSession(rec)
+		var session <-chan struct{}
+		if sessionCli != nil {
+			session = sessionCli.Done()
+		}
 		select {
 		case <-ctx.Done():
 			stopProbeTimer(timer)
@@ -304,6 +309,19 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 			if !step() {
 				return
 			}
+		case <-session:
+			stopProbeTimer(timer)
+			if !e.recoverAgent(ctx, rec, sessionCli) {
+				return
+			}
+			// recoverAgent returns without a new client when the VM is
+			// already down. Selecting the same closed session again would
+			// spin. The death path on the next tick owns the restart.
+			rec.mu.Lock()
+			if rec.agent == sessionCli {
+				rec.agent = nil
+			}
+			rec.mu.Unlock()
 		}
 	}
 }

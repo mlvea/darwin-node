@@ -778,23 +778,7 @@ func (h *consoleHub) close() {
 func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.Pod, creds Credentials, machine runtime.Machine, token string, places []volume.Placement) {
 	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
 	e.events.Normal(ctx, event.ReasonVMDialing, "dialing guest agent")
-	dialCtx := ctx
-	cancelDial := func() {}
-	if _, ok := ctx.Deadline(); !ok {
-		dialCtx, cancelDial = context.WithTimeout(ctx, agentDialTimeout)
-	}
-	cli, err := machine.DialAgent(dialCtx)
-	// vsock Accept consumes the whole dial budget on a slow guest. TCP
-	// fallback must get a fresh slice of the pod context or it never dials.
-	if err != nil && ctx.Err() == nil {
-		fbCtx, fbCancel := context.WithTimeout(ctx, tcpFallbackTimeout)
-		cli2, ferr := e.dialFallback(fbCtx, token, machine)
-		fbCancel()
-		if ferr == nil {
-			cli, err = cli2, nil
-		}
-	}
-	cancelDial()
+	cli, err := e.dialAgent(ctx, machine, token)
 	if err != nil {
 		e.fail(rec, fmt.Errorf("guest agent: %w", err))
 		return

@@ -29,6 +29,27 @@ type Session struct {
 	buffered        int
 	highWater       int
 	streams         int
+
+	// send is host→guest credit for stdin. A guest that does not advertise
+	// a window never has an entry, and the host does not wait.
+	send map[string]*sendCredit
+}
+
+// sendCredit is the host's remaining permission to write stdin for one id.
+type sendCredit struct {
+	mu     sync.Mutex
+	left   int
+	window int
+	notify chan struct{}
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (c *sendCredit) stop() {
+	if c == nil {
+		return
+	}
+	c.once.Do(func() { close(c.done) })
 }
 
 func newSession(rw io.ReadWriteCloser, cfg HostConfig) *Session {
@@ -124,6 +145,16 @@ func (s *Session) failPending(err error) {
 // payload that would pass the call or session byte cap fails that call
 // with a limit error. Other calls keep their frames.
 func (s *Session) dispatch(env Envelope) {
+	// Guest→host stdin credit. It is not an exec event. An older host
+	// that does not know this still accepts the frame and skips it,
+	// because the payload does not decode as output.
+	if env.Kind == KindWindow {
+		var up WindowUpdate
+		if err := json.Unmarshal(env.Payload, &up); err == nil {
+			s.addSendCredit(env.ID, up.Credit)
+		}
+		return
+	}
 	s.mu.Lock()
 	w, ok := s.pending[env.ID]
 	if !ok {
@@ -199,22 +230,24 @@ func (s *Session) finishWaiter(w *waiter) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.pending, w.id)
-	if w.finished {
-		return
+	if !w.finished {
+		w.finished = true
+		s.buffered -= w.queued + w.held
+		if s.buffered < 0 {
+			s.buffered = 0
+		}
+		w.queued = 0
+		w.held = 0
+		if w.flow && s.streams > 0 {
+			s.streams--
+		}
+		w.q.drop()
 	}
-	w.finished = true
-	s.buffered -= w.queued + w.held
-	if s.buffered < 0 {
-		s.buffered = 0
-	}
-	w.queued = 0
-	w.held = 0
-	if w.flow && s.streams > 0 {
-		s.streams--
-	}
-	w.q.drop()
+	s.mu.Unlock()
+	// Wake a stdin pump blocked on credit for this id. The stream is over,
+	// so the remaining bytes will not be read.
+	s.disarmSendCredit(w.id)
 }
 
 func (s *Session) pendingCount() int {
@@ -460,6 +493,113 @@ func (s *Session) WriteStream(id string, payload any) error {
 func (s *Session) writeStream(ctx context.Context, id string, payload any) error {
 	body, err := EncodePayload(payload)
 	if err != nil {
+		return err
+	}
+	return s.conn.WriteContext(ctx, Envelope{
+		V: ProtocolVersion, ID: id, Kind: KindStream, Payload: body,
+	})
+}
+
+// armSendCredit lets the host write up to window payload bytes of stdin
+// before the guest has read them. window <= 0 leaves the id unmetered.
+func (s *Session) armSendCredit(id string, window int) {
+	if s == nil || id == "" || window <= 0 {
+		return
+	}
+	cr := &sendCredit{
+		left:   window,
+		window: window,
+		notify: make(chan struct{}, 1),
+		done:   make(chan struct{}),
+	}
+	s.mu.Lock()
+	if s.send == nil {
+		s.send = map[string]*sendCredit{}
+	}
+	if old := s.send[id]; old != nil {
+		old.stop()
+	}
+	s.send[id] = cr
+	s.mu.Unlock()
+}
+
+func (s *Session) disarmSendCredit(id string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	cr := s.send[id]
+	delete(s.send, id)
+	s.mu.Unlock()
+	if cr != nil {
+		cr.stop()
+	}
+}
+
+func (s *Session) addSendCredit(id string, n int) {
+	if s == nil || id == "" || n <= 0 {
+		return
+	}
+	s.mu.Lock()
+	cr := s.send[id]
+	s.mu.Unlock()
+	if cr == nil {
+		return
+	}
+	cr.mu.Lock()
+	cr.left += n
+	cr.mu.Unlock()
+	select {
+	case cr.notify <- struct{}{}:
+	default:
+	}
+}
+
+// acquireSendCredit waits until the guest has room for n more payload
+// bytes. No armed window means the peer is not using flow control. A
+// single frame larger than the whole window is sent anyway so a huge
+// write cannot sit forever.
+func (s *Session) acquireSendCredit(ctx context.Context, id string, n int) error {
+	if s == nil || n <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	cr := s.send[id]
+	s.mu.Unlock()
+	if cr == nil || (cr.window > 0 && n > cr.window) {
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cr.mu.Lock()
+		if cr.left >= n {
+			cr.left -= n
+			cr.mu.Unlock()
+			return nil
+		}
+		cr.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.closed:
+			return s.getErr()
+		case <-cr.done:
+			return io.EOF
+		case <-cr.notify:
+		}
+	}
+}
+
+// writeUpstream sends one host→guest stream frame, waiting for stdin
+// credit when this id has a window.
+func (s *Session) writeUpstream(ctx context.Context, id string, payload any) error {
+	body, err := EncodePayload(payload)
+	if err != nil {
+		return err
+	}
+	if err := s.acquireSendCredit(ctx, id, len(body)); err != nil {
 		return err
 	}
 	return s.conn.WriteContext(ctx, Envelope{

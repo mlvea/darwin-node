@@ -222,7 +222,7 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 	defer func() { _ = rw.Close() }()
 
 	inflight := newSemaphore(DefaultMaxInflight)
-	conn := &connState{upstream: newUpstreamRouter()}
+	conn := &connState{upstream: newUpstreamRouter(), fc: fc}
 	// A handler blocked on stream credit must wake when the read loop
 	// ends. Otherwise Serve waits forever on that handler.
 	defer conn.cancelAll()
@@ -311,6 +311,10 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 		}
 		if interactiveReq {
 			conn.liveInteractive.Add(1)
+			// Register before the next read. Stdin frames follow this
+			// request on the same connection, and a queue created inside
+			// the handler goroutine would miss them.
+			conn.upstream.register(env.ID)
 		}
 		wg.Add(1)
 		go func(env Envelope, interactive bool) {
@@ -319,14 +323,6 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			_ = h.writeDispatch(ctx, fc, &handshook, env, conn, interactive)
 		}(env, interactiveReq)
 	}
-}
-
-// upstreamRouter delivers client→agent stream frames to the exec goroutine
-// that owns the envelope ID. Delivery is best-effort with a bounded buffer;
-// a slow consumer drops data rather than stalling the read loop.
-type upstreamRouter struct {
-	mu      sync.Mutex
-	streams map[string]chan Envelope
 }
 
 // idleWatchdog closes rw when the connection has seen no frames for the
@@ -363,6 +359,7 @@ func (h *Handler) idleWatchdog(ctx context.Context, rw io.ReadWriteCloser, conn 
 // connState carries per-connection state into dispatch goroutines.
 type connState struct {
 	upstream        *upstreamRouter
+	fc              *FrameConn
 	liveInteractive atomic.Int32
 
 	mu      sync.Mutex
@@ -486,46 +483,6 @@ func (c *connState) cancelAll() {
 	}
 }
 
-func newUpstreamRouter() *upstreamRouter {
-	return &upstreamRouter{streams: map[string]chan Envelope{}}
-}
-
-func (u *upstreamRouter) register(id string) <-chan Envelope {
-	ch := make(chan Envelope, 64)
-	u.mu.Lock()
-	u.streams[id] = ch
-	u.mu.Unlock()
-	return ch
-}
-
-func (u *upstreamRouter) unregister(id string) {
-	u.mu.Lock()
-	delete(u.streams, id)
-	u.mu.Unlock()
-}
-
-func (u *upstreamRouter) forward(env Envelope) {
-	u.mu.Lock()
-	ch, ok := u.streams[env.ID]
-	u.mu.Unlock()
-	if !ok {
-		return
-	}
-	select {
-	case ch <- env:
-	default:
-		select {
-		case ch <- Envelope{ID: env.ID, Kind: KindStream, Method: env.Method, Payload: mustJSON(ExecStdin{EOF: true})}:
-		default:
-		}
-	}
-}
-
-func mustJSON(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
-}
-
 func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *atomic.Bool, env Envelope, conn *connState, interactive bool) error {
 	// The read loop increments liveInteractive before this runs so the idle
 	// watchdog cannot close the socket during scheduling. Every return path,
@@ -565,6 +522,9 @@ func (h *Handler) writeDispatch(ctx context.Context, fc *FrameConn, handshook *a
 			}
 		}
 		return nil
+	}
+	if interactive && conn != nil {
+		conn.upstream.unregister(env.ID)
 	}
 	return fc.Write(res)
 }
@@ -629,6 +589,8 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			OSVersion:      runtime.GOOS + "/" + runtime.GOARCH,
 			Protocol:       ProtocolVersion,
 			MetalAvailable: metal,
+			IdleMS:         int(h.idleTimeout() / time.Millisecond),
+			StdinWindow:    DefaultStdinWindow,
 		}, nil), nil
 
 	case MethodHealth:
@@ -753,12 +715,18 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			return reply(nil, &CallError{Code: ErrCodeOverloaded, Message: "too many execs"}), nil
 		}
 		ch := make(chan Envelope, 16)
-		var upstreamCh <-chan Envelope
 		interactive := req.Stdin || req.TTY
+		var q *stdinQueue
 		if interactive && conn != nil {
-			upstreamCh = conn.upstream.register(env.ID)
+			q = conn.upstream.get(env.ID)
+			if q == nil {
+				q = conn.upstream.register(env.ID)
+			}
 		}
-		stdinR := newExecStdinReader(upstreamCh, interactive)
+		stdinR := newExecStdinReader(q, interactive)
+		if interactive && conn != nil {
+			stdinR.onGrant = newWindowSender(conn.fc, env.ID).add
+		}
 		go func() {
 			defer close(ch)
 			defer release()
@@ -778,87 +746,6 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 	}
 
 	return reply(nil, &CallError{Code: "unknown_method", Message: env.Method}), nil
-}
-
-// execStdinReader adapts upstream ExecStdin/TtyResize frames into an
-// io.Reader for the exec'd process. Resize frames are surfaced on the
-// optional resize channel and never enter the byte stream. Abort wakes any
-// blocked Read once the command is done, so nothing lingers per session.
-type execStdinReader struct {
-	ch          <-chan Envelope
-	resize      chan<- TtyResize
-	abort       chan struct{}
-	abortOnce   sync.Once
-	current     []byte
-	eof         bool
-	sawUpstream bool
-}
-
-func newExecStdinReader(ch <-chan Envelope, interactive bool) *execStdinReader {
-	return &execStdinReader{ch: ch, eof: !interactive, abort: make(chan struct{})}
-}
-
-func (r *execStdinReader) abortNow() { r.abortOnce.Do(func() { close(r.abort) }) }
-
-func (r *execStdinReader) pump() {
-	for {
-		var env Envelope
-		ok := false
-		select {
-		case env, ok = <-r.ch:
-		case <-r.abort:
-			r.eof = true
-			return
-		}
-		if !ok {
-			// Upstream channel closed without EOF (client vanished): end stdin.
-			r.eof = true
-			return
-		}
-		if ev, err := DecodePayload[TtyResize](env); err == nil && (ev.Cols > 0 || ev.Rows > 0) {
-			if r.resize != nil {
-				select {
-				case r.resize <- ev:
-				default:
-				}
-			}
-			continue
-		}
-		ev, err := DecodePayload[ExecStdin](env)
-		if err != nil {
-			continue
-		}
-		r.sawUpstream = true
-		if len(ev.Data) > 0 {
-			r.current = append(r.current, ev.Data...)
-		}
-		if ev.EOF {
-			r.eof = true
-			return
-		}
-		if len(r.current) > 0 {
-			return // yield buffered bytes before blocking again
-		}
-	}
-}
-
-func (r *execStdinReader) Read(p []byte) (int, error) {
-	if r.ch == nil {
-		return 0, io.EOF
-	}
-	for len(r.current) == 0 {
-		if r.eof {
-			return 0, io.EOF
-		}
-		// pump blocks until data, an EOF marker, upstream close, or abort.
-		r.pump()
-		if r.eof && len(r.current) == 0 {
-			return 0, io.EOF
-		}
-	}
-	n := copy(p, r.current)
-	r.current = r.current[n:]
-	return n, nil
 }
 
 func (h *Handler) runExec(ctx context.Context, req ExecReq, stdin io.Reader, emit func(ExecEvent)) (int, error) {
@@ -891,10 +778,10 @@ func (h *Handler) runExec(ctx context.Context, req ExecReq, stdin io.Reader, emi
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if stdin != nil {
-		cmd.Stdin = stdin
-	}
-	err := cmd.Run()
+	// Do not assign cmd.Stdin to the frame reader. cmd.Run waits for that
+	// copy, and the copy stays blocked in Read when the process has already
+	// exited and the client has not sent EOF. The exec slot would stay held.
+	err := startWithStdin(cmd, stdin)
 	if err == nil {
 		return 0, nil
 	}
@@ -902,6 +789,41 @@ func (h *Handler) runExec(ctx context.Context, req ExecReq, stdin io.Reader, emi
 		return ee.ExitCode(), nil
 	}
 	return 1, err
+}
+
+// startWithStdin runs cmd and copies stdin on the side. When the process
+// exits, the stdin reader is aborted so Wait is not stuck behind a client
+// that still has the stream open.
+func startWithStdin(cmd *exec.Cmd, stdin io.Reader) error {
+	if stdin == nil {
+		return cmd.Run()
+	}
+	sr, _ := stdin.(*execStdinReader)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = pr
+	if err := cmd.Start(); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return err
+	}
+	// The child has the read end. Closing the parent's copy is what lets
+	// the process observe EOF when the copy finishes.
+	_ = pr.Close()
+	copyDone := make(chan struct{})
+	go func() {
+		defer close(copyDone)
+		_, _ = io.Copy(pw, stdin)
+		_ = pw.Close()
+	}()
+	waitErr := cmd.Wait()
+	if sr != nil {
+		sr.abortNow()
+	}
+	<-copyDone
+	return waitErr
 }
 
 func (h *Handler) runProbe(ctx context.Context, req ProbeReq) ProbeRes {

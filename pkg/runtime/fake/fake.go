@@ -3,6 +3,7 @@ package fake
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -23,6 +24,10 @@ type Runtime struct {
 	ProbeFn       func(ctx context.Context, req guest.ProbeReq) guest.ProbeRes
 	MetricsFn     func() (guest.MetricsRes, error)
 	MaterializeFn func(req guest.MaterializeReq) guest.MaterializeRes
+	// FailDialAfter makes DialAgent fail once the machine has already
+	// dialed this many times. Zero never fails. Start does not count.
+	FailDialAfter int
+
 	// ExitCode is copied onto every machine status when non-nil. The vz
 	// runtime leaves this unset; PodFailed then keeps exit code 1.
 	ExitCode *int32
@@ -106,6 +111,8 @@ type machine struct {
 	handler   guest.Handler
 	client    *guest.Client
 	peer      net.Conn
+	agentConn net.Conn
+	dials     atomic.Int32
 }
 
 // Console exposes a break-glass serial stream. The guest side is available
@@ -274,10 +281,19 @@ func (m *machine) Status() types.VMStatus {
 }
 
 func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
+	n := m.dials.Add(1)
 	m.mu.Lock()
 	if m.state != types.VMRunning || m.sctx == nil {
 		m.mu.Unlock()
 		return nil, context.Canceled
+	}
+	failAfter := 0
+	if m.rt != nil {
+		failAfter = m.rt.FailDialAfter
+	}
+	if failAfter > 0 && int(n) > failAfter {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("agent down")
 	}
 	h := m.handler
 	sctx := m.sctx
@@ -286,8 +302,37 @@ func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	// A new pipe per dial. The guest agent serves one connection and then
 	// dials again; closing the previous client must not retire the VM.
 	a, b := net.Pipe()
+	m.mu.Lock()
+	m.agentConn = a
+	m.mu.Unlock()
 	go func() { _ = guest.Serve(sctx, a, h) }()
 	return guest.Dial(ctx, b, token, "fake-host")
+}
+
+// DropAgent closes the guest side of the latest DialAgent pipe. The VM
+// stays running. The host session ends and the engine redials.
+func (m *machine) DropAgent() {
+	m.mu.Lock()
+	c := m.agentConn
+	m.mu.Unlock()
+	if c != nil {
+		_ = c.Close()
+	}
+}
+
+// DropAgent closes the guest side of the most recently created machine.
+func (r *Runtime) DropAgent() {
+	if m := r.last.Load(); m != nil {
+		m.DropAgent()
+	}
+}
+
+// AgentDials is how many times the latest machine's DialAgent was called.
+func (r *Runtime) AgentDials() int {
+	if m := r.last.Load(); m != nil {
+		return int(m.dials.Load())
+	}
+	return 0
 }
 
 func (m *machine) Logs() io.ReadCloser {

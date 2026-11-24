@@ -19,6 +19,14 @@ type HandshakeRes struct {
 	OSVersion      string `json:"osVersion"`
 	Protocol       int    `json:"protocol"`
 	MetalAvailable bool   `json:"metalAvailable"`
+	// IdleMS is how long this agent waits with no frames before it closes
+	// a non-interactive session. Zero means an older agent that uses the
+	// 30s default and does not say so. The host heartbeats inside this window.
+	IdleMS int `json:"idleMs,omitempty"`
+	// StdinWindow is the initial host→guest stdin credit in payload bytes.
+	// Zero means this agent does not grant credit. A new host then sends
+	// stdin without waiting, which an older agent may drop when its queue fills.
+	StdinWindow int `json:"stdinWindow,omitempty"`
 }
 
 // HealthRes is agent liveness.
