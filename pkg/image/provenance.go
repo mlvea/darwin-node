@@ -1,6 +1,7 @@
 package image
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -118,6 +119,13 @@ func provenanceFromDescriptors(descs []ocispec.Descriptor) Provenance {
 // an existing sidecar) and checks recorded sizes. expected digests already
 // in p are verified against the files.
 func completeProvenance(dir string, p *Provenance) error {
+	return completeProvenanceCtx(context.Background(), dir, p)
+}
+
+func completeProvenanceCtx(ctx context.Context, dir string, p *Provenance) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if p.Files == nil {
 		p.Files = map[string]string{}
 	}
@@ -125,6 +133,9 @@ func completeProvenance(dir string, p *Provenance) error {
 		p.Sizes = map[string]int64{}
 	}
 	for _, name := range []string{"disk.img", "aux.img", "config.json"} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		path := filepath.Join(dir, name)
 		st, err := os.Stat(path)
 		if err != nil {
@@ -151,7 +162,7 @@ func completeProvenance(dir string, p *Provenance) error {
 		if got, err := digest.ReadSidecar(path); err == nil {
 			d = got
 		} else {
-			sum, err := digest.FileSHA256(path)
+			sum, err := hashFile(ctx, path)
 			if err != nil {
 				return err
 			}

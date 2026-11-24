@@ -3,7 +3,9 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/darwin-node/darwin-node/pkg/image"
 	"github.com/darwin-node/darwin-node/pkg/types"
 )
 
@@ -208,5 +210,56 @@ func TestEnableSSHFallbackEnv(t *testing.T) {
 	}
 	if c.SSHHostKey != "ssh-ed25519 AAAA" {
 		t.Fatalf("host key %q", c.SSHHostKey)
+	}
+}
+
+func TestDefaultImagePullLimits(t *testing.T) {
+	c := Default()
+	if c.MaxImageBytes != image.DefaultMaxImageBytes || c.MaxImageCompressedBytes != image.DefaultMaxCompressedBytes {
+		t.Fatalf("byte caps %d %d", c.MaxImageBytes, c.MaxImageCompressedBytes)
+	}
+	if c.ImageDiskHeadroom != image.DefaultDiskHeadroom {
+		t.Fatalf("headroom %d", c.ImageDiskHeadroom)
+	}
+	if c.ImagePullTimeout != image.DefaultPullTimeout || c.ImageReadStall != image.DefaultReadStall {
+		t.Fatalf("timeouts %s %s", c.ImagePullTimeout, c.ImageReadStall)
+	}
+}
+
+func TestImagePullLimitEnv(t *testing.T) {
+	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
+	t.Setenv("VZ_SSH_PASSWORD", "")
+	t.Setenv("DARWIN_NODE_MAX_IMAGE_BYTES", "32Mi")
+	t.Setenv("DARWIN_NODE_MAX_IMAGE_COMPRESSED_BYTES", "8Mi")
+	t.Setenv("DARWIN_NODE_IMAGE_DISK_HEADROOM", "1Gi")
+	t.Setenv("DARWIN_NODE_IMAGE_PULL_TIMEOUT", "45s")
+	t.Setenv("DARWIN_NODE_IMAGE_READ_STALL", "15s")
+	c := Default()
+	if err := c.ApplyEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxImageBytes != 32<<20 || c.MaxImageCompressedBytes != 8<<20 || c.ImageDiskHeadroom != 1<<30 {
+		t.Fatalf("bytes %d %d %d", c.MaxImageBytes, c.MaxImageCompressedBytes, c.ImageDiskHeadroom)
+	}
+	if c.ImagePullTimeout != 45*time.Second || c.ImageReadStall != 15*time.Second {
+		t.Fatalf("durations %s %s", c.ImagePullTimeout, c.ImageReadStall)
+	}
+}
+
+func TestImagePullLimitsRejectNegative(t *testing.T) {
+	c := Default()
+	c.MaxImageBytes = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative max image bytes accepted")
+	}
+	c = Default()
+	c.ImagePullTimeout = -time.Second
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative pull timeout accepted")
+	}
+	c = Default()
+	c.ImageReadStall = -time.Second
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative read stall accepted")
 	}
 }

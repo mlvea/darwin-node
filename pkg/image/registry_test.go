@@ -20,6 +20,9 @@ type casRegistry struct {
 	tags      map[string]string // "<repo>:<tag>" -> digest
 	mtypes    map[string]string // "<repo>@<digest>" -> Content-Type
 	srv       *httptest.Server
+	// onBlob, if set, runs at the start of a blob GET or HEAD. Tests use
+	// it to stall a pull. Set it only after pushes have finished.
+	onBlob func(*http.Request)
 }
 
 func newCASRegistry() *casRegistry {
@@ -69,6 +72,9 @@ func (c *casRegistry) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Docker-Content-Digest", "sha256:"+strings.TrimPrefix(digest, "sha256:"))
 		w.WriteHeader(http.StatusCreated)
 	case blobGetRe.MatchString(path):
+		if c.onBlob != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			c.onBlob(r)
+		}
 		parts := blobGetRe.FindStringSubmatch(path)
 		if b, ok := c.blobs[parts[2]]; ok {
 			w.Header().Set("Content-Type", "application/octet-stream")

@@ -80,6 +80,11 @@ func main() {
 	f.DurationVar(&cfg.StartupTimeout, "startup-timeout", cfg.StartupTimeout, "wait for node Ready")
 	f.DurationVar(&cfg.InitTimeout, "init-timeout", cfg.InitTimeout, "max time to wait for each init container")
 	f.StringSliceVar(&cfg.InsecureRegistries, "insecure-registry", cfg.InsecureRegistries, "registries allowed to use plaintext HTTP (loopback is always allowed)")
+	f.Int64Var(&cfg.MaxImageBytes, "max-image-bytes", cfg.MaxImageBytes, "max declared or decompressed image bytes (default 256GiB)")
+	f.Int64Var(&cfg.MaxImageCompressedBytes, "max-image-compressed-bytes", cfg.MaxImageCompressedBytes, "max compressed blob bytes accepted from a registry (default 256GiB)")
+	f.Int64Var(&cfg.ImageDiskHeadroom, "image-disk-headroom", cfg.ImageDiskHeadroom, "free bytes that must remain on the cache filesystem after an image write (default 10GiB)")
+	f.DurationVar(&cfg.ImagePullTimeout, "image-pull-timeout", cfg.ImagePullTimeout, "deadline for one image pull; the pull is cancelled when no pod is still waiting")
+	f.DurationVar(&cfg.ImageReadStall, "image-read-stall", cfg.ImageReadStall, "fail an image pull when a registry read makes no progress for this long")
 
 	cmd.AddCommand(cmdDebugDump(&cfg))
 	cmd.AddCommand(cmdConsole(&cfg))
