@@ -151,29 +151,54 @@ func assertFailedAndClean(t *testing.T, e *Engine, ns, name, uid string) {
 	_ = e.Delete(context.Background(), ns, name+"-next", 0)
 }
 
-func TestRuntimeCreateFailureFailsClosed(t *testing.T) {
+// One transient failure used to fail the pod. The start is retried, so the
+// pod reaches Running and keeps its slot.
+func waitRunningOrFail(t *testing.T, e *Engine, ns, name string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := e.Get(ns, name)
+		if err == nil && p.Status.Phase == corev1.PodFailed {
+			t.Fatalf("transient error failed pod %s: %s", name, p.Status.Message)
+		}
+		if err == nil && p.Status.Phase == corev1.PodRunning {
+			if e.slots.Used() != 1 {
+				t.Fatalf("running pod holds %d slots", e.slots.Used())
+			}
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	p, _ := e.Get(ns, name)
+	t.Fatalf("pod %s did not run: %+v", name, p.Status)
+}
+
+func TestRuntimeCreateFailureIsRetried(t *testing.T) {
 	e := injectEngine(t, failCreate)
 	if err := e.Create(context.Background(), samplePod("fc", "uid-fc"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	assertFailedAndClean(t, e, "default", "fc", "uid-fc")
+	waitRunningOrFail(t, e, "default", "fc")
+	_ = e.Delete(context.Background(), "default", "fc", 0)
 }
 
-func TestVMStartFailureFailsClosed(t *testing.T) {
+func TestVMStartFailureIsRetried(t *testing.T) {
 	e := injectEngine(t, failStart)
 	if err := e.Create(context.Background(), samplePod("fs", "uid-fs"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	assertFailedAndClean(t, e, "default", "fs", "uid-fs")
+	waitRunningOrFail(t, e, "default", "fs")
+	_ = e.Delete(context.Background(), "default", "fs", 0)
 }
 
-func TestAgentDialFailureFailsClosed(t *testing.T) {
+func TestAgentDialFailureIsRetried(t *testing.T) {
 	e := injectEngine(t, failDial)
 	pod := samplePod("fd", "uid-fd")
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	assertFailedAndClean(t, e, "default", "fd", "uid-fd")
+	waitRunningOrFail(t, e, "default", "fd")
+	_ = e.Delete(context.Background(), "default", "fd", 0)
 }
 
 // Warm boots share the same runtime; their failures must clean slots and

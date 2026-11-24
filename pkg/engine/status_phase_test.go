@@ -45,8 +45,15 @@ type stopGateMachine struct {
 	rt *stopGateRuntime
 }
 
+// permanentFailure is a boot error that must not be retried. A transient
+// Start error backs off instead of failing the pod, and this test needs
+// the one-shot failure path.
+type permanentFailure struct{ error }
+
+func (permanentFailure) Permanent() bool { return true }
+
 func (m *stopGateMachine) Start(context.Context) error {
-	return errors.New("injected start failure")
+	return permanentFailure{errors.New("injected start failure")}
 }
 
 func (m *stopGateMachine) Stop(ctx context.Context, grace time.Duration) error {

@@ -81,6 +81,10 @@ func (e *Engine) Recover() error {
 	if e == nil {
 		return nil
 	}
+	// Remember who owned these directories before the sweep deletes them.
+	// The pods are reconciled from that set when virtual-kubelet creates
+	// them again.
+	e.noteInterruptedPods()
 	errImages := image.Recover(e.cfg.CacheDir)
 	errStores := recoverCacheStores(e.cfg.CacheDir)
 	// Negative maxAge: no grace period. The process that owned these

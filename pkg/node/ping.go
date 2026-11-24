@@ -21,6 +21,10 @@ type StatusProvider struct {
 	Runtime func(context.Context) error
 	// CacheDir is checked for writability when non-empty.
 	CacheDir string
+	// conds is the last node status we published. NotifyNodeStatus builds
+	// a blank Node every period; without this, every publish looks like a
+	// transition.
+	conds []corev1.NodeCondition
 }
 
 // NotReady is nil when the last probe succeeded. Pod creates use it to
@@ -132,11 +136,8 @@ func (p *StatusProvider) NotifyNodeStatus(ctx context.Context, cb func(*corev1.N
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
 		send := func() {
-			p.mu.Lock()
-			inv := p.inv
-			p.mu.Unlock()
-			n := &corev1.Node{}
-			if err := Apply(context.Background(), n, inv); err != nil {
+			n := p.nodeSnapshot()
+			if n == nil {
 				return
 			}
 			cb(n)
@@ -152,6 +153,29 @@ func (p *StatusProvider) NotifyNodeStatus(ctx context.Context, cb func(*corev1.N
 			}
 		}
 	}()
+}
+
+// nodeSnapshot builds the node we would publish. The previous conditions
+// are seeded first so LastTransitionTime survives a blank Node.
+func (p *StatusProvider) nodeSnapshot() *corev1.Node {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	inv := p.inv
+	prev := append([]corev1.NodeCondition(nil), p.conds...)
+	p.mu.Unlock()
+	n := &corev1.Node{}
+	if len(prev) > 0 {
+		n.Status.Conditions = prev
+	}
+	if err := Apply(context.Background(), n, inv); err != nil {
+		return nil
+	}
+	p.mu.Lock()
+	p.conds = append([]corev1.NodeCondition(nil), n.Status.Conditions...)
+	p.mu.Unlock()
+	return n
 }
 
 func (p *StatusProvider) Inventory() Inventory {
