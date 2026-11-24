@@ -105,6 +105,33 @@ func TestValidatePasswordAuthRemoved(t *testing.T) {
 	}
 }
 
+func TestRequireKubeletClientCA(t *testing.T) {
+	if err := RequireKubeletClientCA(true, ""); err != nil {
+		t.Fatal(err)
+	}
+	err := RequireKubeletClientCA(false, "")
+	if err == nil || !strings.Contains(err.Error(), "client CA") {
+		t.Fatalf("cluster mode with no client CA: %v", err)
+	}
+	err = RequireKubeletClientCA(false, " \t\n")
+	if err == nil || !strings.Contains(err.Error(), "client CA") {
+		t.Fatalf("whitespace client CA: %v", err)
+	}
+	if err := RequireKubeletClientCA(false, "/var/lib/darwin-node/ca.crt"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDefaultListenAddressIsLoopback(t *testing.T) {
+	c := Default()
+	if c.ListenAddress != "127.0.0.1" {
+		t.Fatalf("default listen address %q, want 127.0.0.1", c.ListenAddress)
+	}
+	if got := c.HTTPListenAddr(); got != "127.0.0.1:10250" {
+		t.Fatalf("default listen %s", got)
+	}
+}
+
 func TestRequireKubeletTLS(t *testing.T) {
 	if err := RequireKubeletTLS(true, Config{}); err != nil {
 		t.Fatal(err)
@@ -144,19 +171,22 @@ func TestHTTPListenAddr(t *testing.T) {
 func TestListenAddressEnv(t *testing.T) {
 	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
 	t.Setenv("VZ_SSH_PASSWORD", "")
-	t.Setenv("DARWIN_NODE_LISTEN_ADDRESS", "127.0.0.1")
+	t.Setenv("DARWIN_NODE_LISTEN_ADDRESS", "10.1.2.3")
 	t.Setenv("KUBELET_PORT", "12345")
 	c := Default()
+	if c.ListenAddress != "127.0.0.1" {
+		t.Fatalf("default before env %q", c.ListenAddress)
+	}
 	if err := c.ApplyEnv(); err != nil {
 		t.Fatal(err)
 	}
-	if c.ListenAddress != "127.0.0.1" {
+	if c.ListenAddress != "10.1.2.3" {
 		t.Fatalf("%q", c.ListenAddress)
 	}
 	if c.ListenPort != 12345 {
 		t.Fatalf("%d", c.ListenPort)
 	}
-	if got := c.HTTPListenAddr(); got != "127.0.0.1:12345" {
+	if got := c.HTTPListenAddr(); got != "10.1.2.3:12345" {
 		t.Fatalf("%s", got)
 	}
 }

@@ -1,8 +1,22 @@
 # The node agent does not run in-cluster. This chart only installs RBAC
 # that a darwin-node kubeconfig user can bind to.
 serviceAccount:
-  create: true
+  # Created only when rbac.identity is serviceaccount.
   name: darwin-node
 
 clusterRole:
   name: darwin-node
+
+rbac:
+  # node: authenticate as system:node:<nodename> in group system:nodes.
+  # The Node authorizer and NodeRestriction then scope Secret, ConfigMap,
+  # pod, and serviceaccounts/token access to pods bound to that node.
+  # The chart grants none of those rules.
+  #
+  # serviceaccount: bind the ServiceAccount below. rbac.namespaces must
+  # list every namespace whose pods this Mac may run. Secret get, ConfigMap
+  # get, pod delete, pod status update, and serviceaccounts/token create
+  # are a Role in each of those namespaces. NodeRestriction does not apply
+  # to a ServiceAccount.
+  identity: node
+  namespaces: []

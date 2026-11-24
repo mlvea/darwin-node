@@ -50,7 +50,7 @@ type Config struct {
 	CertPath       string
 	KeyPath        string
 	ClientCA       string
-	ListenAddress  string // empty binds all interfaces
+	ListenAddress  string // default 127.0.0.1; empty binds all interfaces
 	ListenPort     int32
 	LogLevel       string
 	StartupTimeout time.Duration
@@ -102,6 +102,7 @@ func Default() Config {
 		Graphics:          types.DefaultGraphics(),
 		CacheDir:          cache,
 		KubeConfig:        filepath.Join(home, ".kube", "config"),
+		ListenAddress:     "127.0.0.1",
 		ListenPort:        10250,
 		LogLevel:          "info",
 		Resync:            time.Minute,
@@ -230,7 +231,8 @@ func (c *Config) ApplyEnv() error {
 }
 
 // HTTPListenAddr is host:port for the kubelet HTTP server.
-// An empty ListenAddress binds all interfaces (":10250").
+// The default ListenAddress is 127.0.0.1. An empty ListenAddress binds
+// all interfaces (":10250"); set that only when every interface is trusted.
 func (c Config) HTTPListenAddr() string {
 	return net.JoinHostPort(c.ListenAddress, strconv.Itoa(int(c.ListenPort)))
 }
