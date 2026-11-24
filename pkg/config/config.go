@@ -94,7 +94,24 @@ type Config struct {
 	// ShutdownGrace bounds the total drain budget on SIGTERM/SIGINT: pods
 	// are deleted with their termination grace periods until it runs out.
 	ShutdownGrace time.Duration
+
+	// ImageGC deletes unused images and cache stores when the cache
+	// filesystem is fuller than ImageGCHigh percent, until it is at or
+	// below ImageGCLow. The defaults match kubelet (85 and 80).
+	ImageGC         bool
+	ImageGCHigh     int
+	ImageGCLow      int
+	ImageGCInterval time.Duration
 }
+
+const (
+	// DefaultImageGCHigh is the kubelet image-gc-high-threshold.
+	DefaultImageGCHigh = 85
+	// DefaultImageGCLow is the kubelet image-gc-low-threshold.
+	DefaultImageGCLow = 80
+	// DefaultImageGCInterval is how often disk GC runs.
+	DefaultImageGCInterval = 5 * time.Minute
+)
 
 // Default returns production defaults.
 func Default() Config {
@@ -122,6 +139,10 @@ func Default() Config {
 		ProbeInterval:           10 * time.Second,
 		InitTimeout:             2 * time.Minute,
 		ShutdownGrace:           60 * time.Second,
+		ImageGC:                 true,
+		ImageGCHigh:             DefaultImageGCHigh,
+		ImageGCLow:              DefaultImageGCLow,
+		ImageGCInterval:         DefaultImageGCInterval,
 		MaxImageBytes:           256 << 30,
 		MaxImageCompressedBytes: 256 << 30,
 		ImageDiskHeadroom:       10 << 30,
@@ -284,6 +305,37 @@ func (c *Config) ApplyEnv() error {
 		}
 		c.ShutdownGrace = d
 	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_GC"); v != "" {
+		switch v {
+		case "true", "1":
+			c.ImageGC = true
+		case "false", "0":
+			c.ImageGC = false
+		default:
+			return fmt.Errorf("DARWIN_NODE_IMAGE_GC: want true or false, got %q", v)
+		}
+	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD: %w", err)
+		}
+		c.ImageGCHigh = n
+	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD: %w", err)
+		}
+		c.ImageGCLow = n
+	}
+	if v := os.Getenv("DARWIN_NODE_IMAGE_GC_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_IMAGE_GC_INTERVAL: %w", err)
+		}
+		c.ImageGCInterval = d
+	}
 	return c.Validate()
 }
 
@@ -344,6 +396,17 @@ func (c Config) Validate() error {
 	}
 	if c.ImagePullTimeout < 0 || c.ImageReadStall < 0 {
 		return fmt.Errorf("image pull timeouts must not be negative")
+	}
+	if c.ImageGC {
+		if c.ImageGCHigh < 1 || c.ImageGCHigh > 100 {
+			return fmt.Errorf("image GC high threshold must be 1-100, got %d", c.ImageGCHigh)
+		}
+		if c.ImageGCLow < 0 || c.ImageGCLow >= c.ImageGCHigh {
+			return fmt.Errorf("image GC low threshold must be below the high threshold %d, got %d", c.ImageGCHigh, c.ImageGCLow)
+		}
+	}
+	if c.ImageGCInterval < 0 {
+		return fmt.Errorf("image GC interval must not be negative, got %s", c.ImageGCInterval)
 	}
 	if c.AgentReadyTimeout < 0 {
 		return fmt.Errorf("agent ready timeout must not be negative")

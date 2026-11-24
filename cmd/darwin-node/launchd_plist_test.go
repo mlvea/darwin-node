@@ -6,8 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/darwin-node/darwin-node/pkg/config"
 )
 
 func TestLaunchdPlistPinsClientCAAndListenAddress(t *testing.T) {
@@ -20,7 +24,7 @@ func TestLaunchdPlistPinsClientCAAndListenAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args, env, err := parseLaunchdPlist(b)
+	args, env, _, err := parseLaunchdPlist(b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +41,37 @@ func TestLaunchdPlistPinsClientCAAndListenAddress(t *testing.T) {
 	}
 }
 
+// launchd sends SIGKILL when ExitTimeOut elapses after SIGTERM. The
+// drain budget is --shutdown-grace-period (default 60s). Close then
+// waits up to 30s, and process exit waits up to 5s more, before the
+// cache snapshot is finished. ExitTimeOut has to cover that whole
+// window or launchd kills the process and the snapshot does not run.
+func TestLaunchdPlistExitTimeOutExceedsShutdownGrace(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller")
+	}
+	path := filepath.Join(filepath.Dir(file), "..", "..", "deploy", "launchd", "io.darwin-node.node.plist")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, ints, err := parseLaunchdPlist(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const closeAndReap = 35 * time.Second // defaultCloseTimeout 30s + defaultReapTimeout 5s
+	grace := config.Default().ShutdownGrace
+	need := grace + closeAndReap
+	got := time.Duration(ints["ExitTimeOut"]) * time.Second
+	if got <= grace {
+		t.Fatalf("ExitTimeOut %s is not above --shutdown-grace-period %s; launchd SIGKILL arrives before the drain finishes and the cache snapshot does not run", got, grace)
+	}
+	if got <= need {
+		t.Fatalf("ExitTimeOut %s must exceed shutdown grace %s plus %s for Close and the final reap, or the cache snapshot is killed", got, grace, closeAndReap)
+	}
+}
+
 func flagValue(args []string, name string) string {
 	for i, a := range args {
 		if a == name && i+1 < len(args) {
@@ -46,9 +81,10 @@ func flagValue(args []string, name string) string {
 	return ""
 }
 
-func parseLaunchdPlist(b []byte) (args []string, env map[string]string, err error) {
+func parseLaunchdPlist(b []byte) (args []string, env map[string]string, ints map[string]int, err error) {
 	dec := xml.NewDecoder(strings.NewReader(string(b)))
 	env = map[string]string{}
+	ints = map[string]int{}
 	var stack []string
 	var lastKey string
 	var envDepth int
@@ -56,10 +92,10 @@ func parseLaunchdPlist(b []byte) (args []string, env map[string]string, err erro
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
-			return args, env, nil
+			return args, env, ints, nil
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -83,12 +119,20 @@ func parseLaunchdPlist(b []byte) (args []string, env map[string]string, err erro
 				lastKey = s
 				continue
 			}
-			if top != "string" {
-				continue
-			}
 			parent := ""
 			if len(stack) >= 2 {
 				parent = stack[len(stack)-2]
+			}
+			if top == "integer" && !inEnv && parent == "dict" {
+				n, nerr := strconv.Atoi(s)
+				if nerr != nil {
+					return nil, nil, nil, nerr
+				}
+				ints[lastKey] = n
+				continue
+			}
+			if top != "string" {
+				continue
 			}
 			if parent == "array" && lastKey == "ProgramArguments" {
 				args = append(args, s)

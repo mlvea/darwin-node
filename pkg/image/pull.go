@@ -212,6 +212,10 @@ func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds,
 		_ = os.RemoveAll(stage)
 		return LocalImage{}, err
 	}
+	if err := writeImageRef(stage, ref); err != nil {
+		_ = os.RemoveAll(stage)
+		return LocalImage{}, err
+	}
 	if err := commitCacheDir(stage, final, backup); err != nil {
 		_ = os.RemoveAll(stage)
 		return LocalImage{}, err

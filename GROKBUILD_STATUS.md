@@ -9,6 +9,24 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — log follow keeps the line written as the snapshot is taken
+
+- **HEAD:** `cursor/ops-sprint-batch-i-da4b` after merging `origin/main` at `5dc9bf8` (PR #34) into `48c0862`. `main` was not pushed. No rebase, no force-push.
+- **Failure:** the push CI run of that merge failed `TestLogsFollowStreamsAppends` with `follow did not deliver append: ""`. The pull_request run of the same SHA passed. `MethodLogs` copied the tail, sent it, and only then subscribed. A `Write` in that gap was in neither place, so follow dropped it. The same run also reported a `readLineNonblock` goroutine still blocked on that missed read.
+- **Fix:** `tailAndSubscribe` copies the tail and registers the subscriber under the buffer lock. A write is in the snapshot or on the follow channel. `TestTailAndSubscribeIsContiguous` writes 200 numbered lines across that call and requires each id once.
+
+### 2026-11-25 (Asia/Singapore) — T-6/B-6 graceful stop; T-10 image and cache GC
+
+- **HEAD:** based on `main` at `6f0b657` (merge of PR #31), which contains `bacac6c`. This branch is `cursor/ops-sprint-batch-i-da4b`. `main` was not pushed. No rebase, no force-push. Metrics, serving-certificate reload, and CI lint are the next stacked branch.
+- **T-6 (confirmed):** the supplied launchd plist had no `ExitTimeOut`. `TestLaunchdPlistExitTimeOutExceedsShutdownGrace` failed on unmodified code with `ExitTimeOut 0s is not above --shutdown-grace-period 1m0s; launchd SIGKILL arrives before the drain finishes and the cache snapshot does not run`. The plist now sets `ExitTimeOut` to 120. That is above the default 60s grace plus the 30s `Engine.Close` deadline and the 5s final reap. Raise the integer when the grace period is raised.
+- **B-6 (confirmed):** `machine.Stop` armed one timer for the whole grace period and did not look at the VM again until it fired, so a pod delete waited out `terminationGracePeriodSeconds` even after the guest had halted. `waitUntilStopped` polls every 50ms and returns on the first stopped observation. `TestWaitUntilStoppedReturnsWhenVMStops` fails if any step is longer than that poll. The clock is injectable, so the test runs on Linux. A VM that is already stopped does not wait. A cancelled context does not sleep. A grace of zero does not poll.
+- **T-10 (confirmed):** there was no image or cache-store GC. `DiskPressure` at 90% only sets a node condition. `collectGarbage` deletes the oldest unused image or cache store while usage is at or above the high threshold and stops at or below the low threshold. Pending and running pods, warm-pool VMs, the configured warm image while `--warm-slots` is non-zero, and a delta base named by an image that is still on disk are kept. A self-reference does not pin an image. A cycle of unused images is kept. Symlinks are not followed. `image-partial`, `image-replacing`, and cache names ending in `.tmp` or `.old` are not candidates. Each deletion emits `ImageEvicted` or `CacheEvicted`.
+- **emptyDir sizeLimit (already present):** `enforceVolumeContract` already compares directory usage with `sizeLimit`. This batch does not add a second check.
+- **Flags:** `--image-gc` / `DARWIN_NODE_IMAGE_GC` default `true`. `--image-gc-high-threshold` / `DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD` default `85`. `--image-gc-low-threshold` / `DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD` default `80`. `--image-gc-interval` / `DARWIN_NODE_IMAGE_GC_INTERVAL` default `5m`. `--shutdown-grace-period` stays `60s`.
+- **Left as they were:** `pkg/guest`, `cmd/guest-agent`, the engine start/retry path, `recover.go`, node conditions, hostPort, and `agentDispatch`. The metrics listener is still `127.0.0.1:9100` in this commit.
+- **Verification (Linux):** `go test ./pkg/runtime/vz ./pkg/config ./pkg/engine ./pkg/image ./cmd/darwin-node -short -count=1 -race -timeout 600s` PASS (`pkg/engine` 87.003s, `cmd/darwin-node` 3.988s, `pkg/image` 3.389s, `pkg/runtime/vz` 1.222s, `pkg/config` 1.152s). `go vet ./...` PASS on the combined tree before the split. `pkg/runtime/vz` on `GOOS=darwin GOARCH=arm64` still needs the Virtualization headers; macOS CI compiles `vz.go`.
+- **Open risks:** hardware stop was not timed. GC age is the pull mtime, not the last pod start. A delta cycle is never deleted. `e2e (self-hosted)` stays skipped.
+
 ### 2026-11-25 (Asia/Singapore) — Stability batch G: B-7, T-2, T-3, T-5
 
 - **HEAD:** branched from `origin/main` at `196f40cd` (PRs #27–#30 and #32). Merged `origin/main` at `bacac6c` (PR #33, pull deadlines, size limits, delta-cycle errors) with a merge commit, no rebase and no force-push. This branch is `cursor/stability-restart-retry-c0c8`. `main` was not pushed. The pull call in `resolveRegistryImage` was not rewritten; start retries wrap `resolveImage`. `probes.go`, the hostPort reserve block, `pkg/runtime/vz`, `pkg/image` pull internals, and `internal/disk` were not edited.
@@ -27,6 +45,7 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
   - A pull that fails for a reason other than auth, an invalid image, a size or cycle limit, or `is itself a delta` is retried with the slot held. That includes a cache filesystem that cannot satisfy the 10 GiB headroom (`need N bytes plus M headroom`). Space can come back. A permanently full disk holds the slot until the pod is deleted.
   - A malformed delta that is not a cycle, a self-delta, or a size limit (unsupported schema, a patch that does not apply) is retried the same way. It does not produce a stream of Failed pods. It does stay Pending.
   - Retries are not counted. The delay is capped at 30s. A pod that is never deleted keeps its slot until the step succeeds.
+
 ### 2026-11-25 (Asia/Singapore) — VM workload, shutdown, and logs: B-4, B-24, B-25
 
 - **HEAD:** stacked on `cursor/guest-session-stdin-64be` (heartbeat, stdin credit, session redial). This branch is `cursor/guest-workload-logs-64be`. `main` was not pushed. No rebase, no force-push. The base of the stack is `bacac6c` (merge of PR #33).

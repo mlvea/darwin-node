@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -309,6 +310,60 @@ func TestRunProbeTimeoutClamped(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("%+v", res)
 	}
+}
+
+func TestTailAndSubscribeIsContiguous(t *testing.T) {
+	const total = 200
+	b := NewLogBuffer(total + 8)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < total; i++ {
+			if _, err := b.Write([]byte(strconv.Itoa(i) + "\n")); err != nil {
+				t.Errorf("write %d: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	close(start)
+	entries, ch, cancel := b.tailAndSubscribe(0)
+	wg.Wait()
+
+	seen := map[int]struct{}{}
+	for _, e := range entries {
+		id, err := strconv.Atoi(strings.TrimSpace(string(e.data)))
+		if err != nil {
+			t.Fatalf("snapshot line %q: %v", e.data, err)
+		}
+		if _, ok := seen[id]; ok {
+			t.Fatalf("duplicate snapshot id %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < total {
+		select {
+		case rec, ok := <-ch:
+			if !ok {
+				t.Fatalf("subscription closed with %d of %d lines", len(seen), total)
+			}
+			id, err := strconv.Atoi(strings.TrimSpace(string(rec.data)))
+			if err != nil {
+				t.Fatalf("follow line %q: %v", rec.data, err)
+			}
+			if _, dup := seen[id]; dup {
+				t.Fatalf("id %d in both the snapshot and the follow stream", id)
+			}
+			seen[id] = struct{}{}
+		case <-deadline:
+			t.Fatalf("follow missed lines: have %d of %d", len(seen), total)
+		}
+	}
+	cancel()
 }
 
 func TestLogBufferCapsLineAndBudget(t *testing.T) {

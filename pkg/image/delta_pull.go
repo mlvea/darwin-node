@@ -187,6 +187,14 @@ func (m *Manager) pullDeltaArtifact(ctx context.Context, ref, destDir string, in
 	if err := WriteProvenance(destDir, prov); err != nil {
 		return LocalImage{}, err
 	}
+	// The applied tree is a full disk. delta.json records which cached
+	// image it was built from so GC can keep that base while this
+	// directory exists. The patch bytes themselves are not kept. A
+	// delta.json cloned in from the base would name the grandbase;
+	// this write replaces it with the immediate base.
+	if err := WriteDeltaManifest(destDir, DeltaManifest{BaseImage: info.baseRef}); err != nil {
+		return LocalImage{}, err
+	}
 	img, err := LoadDir(destDir)
 	if err != nil {
 		return LocalImage{}, fmt.Errorf("load applied delta: %w", err)

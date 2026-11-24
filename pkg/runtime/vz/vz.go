@@ -178,18 +178,18 @@ func (m *machine) armVsock(ln net.Listener) {
 }
 
 func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
-	_ = ctx
-	if graceful > 0 {
+	// RequestStop asks the guest to shut down. The old wait slept the
+	// whole grace period even after the VM had already stopped, so every
+	// pod delete took at least terminationGracePeriodSeconds and a hard
+	// Stop afterwards could add another wait.
+	if graceful > 0 && m.vm.State() != vz.VirtualMachineStateStopped {
 		_, _ = m.vm.RequestStop()
-		t := time.NewTimer(graceful)
-		defer t.Stop()
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-		}
 	}
+	stopped := waitUntilStopped(ctx, graceful, systemGraceClock{}, func() vmState {
+		return mapVZState(m.vm.State())
+	})
 	var stopErr error
-	if m.vm.State() != vz.VirtualMachineStateStopped {
+	if !stopped {
 		stopErr = m.vm.Stop()
 	}
 	// Drop the accept loop before finishStop closes the listener again.
@@ -213,6 +213,17 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 		m.finished = finished
 	}
 	return err
+}
+
+func mapVZState(s vz.VirtualMachineState) vmState {
+	switch s {
+	case vz.VirtualMachineStateStopped:
+		return vmStateStopped
+	case vz.VirtualMachineStateStopping:
+		return vmStateStopping
+	default:
+		return vmStateRunning
+	}
 }
 
 func (m *machine) Status() types.VMStatus {
