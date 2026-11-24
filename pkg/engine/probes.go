@@ -472,7 +472,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 			}
 			sched.startup = now
 			sctx, cancel := probeContext(ctx, req.Timeout)
+			probeStart := time.Now()
 			res, err := cli.Probe(sctx, req)
+			observeProbe("startup", probeStart, err)
 			cancel()
 			// Parent cancel is Delete or Close, not a failed probe.
 			if ctx.Err() != nil || !podActive(rec) {
@@ -517,7 +519,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 				defer wg.Done()
 				rctx, cancel := probeContext(ctx, req.Timeout)
 				defer cancel()
+				probeStart := time.Now()
 				res, err := cli.Probe(rctx, req)
+				observeProbe("readiness", probeStart, err)
 				// Parent cancel is Delete or Close, not a failed probe.
 				if ctx.Err() != nil {
 					return
@@ -562,7 +566,9 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 				defer wg.Done()
 				lctx, cancel := probeContext(ctx, req.Timeout)
 				defer cancel()
+				probeStart := time.Now()
 				liveRes, liveErr = cli.Probe(lctx, req)
+				observeProbe("liveness", probeStart, liveErr)
 			}()
 		}
 	}

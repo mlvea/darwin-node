@@ -17,6 +17,15 @@ make build
 make sign          # ad-hoc sign with Virtualization entitlement
 ```
 
+`make sign` is an ad-hoc signature. It is enough to boot a VM on the
+Mac that built it. A binary other people run needs a Developer ID
+Application signature and notarization. That is a release step, not a
+CI secret: sign with the Developer ID certificate, staple the
+notarization ticket, and only then point the Homebrew formula at the
+archive. This repository does not store the certificate or the
+notary key. The formula in `deploy/homebrew/darwin-node.rb` stays a
+sketch until those notarized archives exist.
+
 Binaries land in `./bin/`:
 
 - `darwin-node`, host agent
@@ -136,6 +145,7 @@ Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
 | `DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD` | `85` | Percent used at which GC starts |
 | `DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD` | `80` | Percent used at which GC stops. Must be below the high threshold |
 | `DARWIN_NODE_IMAGE_GC_INTERVAL` | `5m` | How often GC evaluates the cache filesystem |
+| `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus bind. `off`, `disabled`, `-`, or empty disables it. Not node_exporter's 9100 |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables traces |
 
 Kubernetes connection (same as Virtual Kubelet):

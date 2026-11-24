@@ -439,11 +439,23 @@ func (e *Engine) stopSidecarContainer(ctx context.Context, ns, name, container s
 	return stopper.StopContainer(ctx, ns, name, container)
 }
 
-func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe) (bool, string) {
-	req, ok := k8sProbe(p)
-	if !ok {
+func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe) (ok bool, msg string) {
+	req, supported := k8sProbe(p)
+	if !supported {
 		return true, ""
 	}
+	start := time.Now()
+	defer func() {
+		var err error
+		if !ok {
+			text := msg
+			if text == "" {
+				text = "probe failed"
+			}
+			err = fmt.Errorf("%s", text)
+		}
+		observeProbe("sidecar", start, err)
+	}()
 	pctx, cancel := probeContext(ctx, req.Timeout)
 	defer cancel()
 	switch req.Type {

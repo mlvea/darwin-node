@@ -159,6 +159,27 @@ func TestApplyKubeletTLSUsesLiveBundle(t *testing.T) {
 		t.Fatalf("min version %d", withCA.MinVersion)
 	}
 
+	var loads int
+	live := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			loads++
+			return &tls.Certificate{}, nil
+		},
+		Certificates: []tls.Certificate{{}},
+	}
+	rotated := &tls.Config{}
+	applyKubeletTLS(rotated, live, nil)
+	if rotated.GetCertificate == nil {
+		t.Fatal("GetCertificate was dropped; the serving cert stays the one copied at start")
+	}
+	if len(rotated.Certificates) != 0 {
+		t.Fatal("Certificates was copied alongside GetCertificate")
+	}
+	if _, err := rotated.GetCertificate(nil); err != nil || loads != 1 {
+		t.Fatalf("reload hook loads=%d err=%v", loads, err)
+	}
+
 	noCA := &tls.Config{ClientAuth: tls.RequestClientCert, ClientCAs: x509.NewCertPool()}
 	applyKubeletTLS(noCA, &tls.Config{}, nil)
 	if noCA.ClientAuth != tls.NoClientCert || noCA.ClientCAs != nil || noCA.GetConfigForClient != nil {

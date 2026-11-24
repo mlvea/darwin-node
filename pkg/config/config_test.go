@@ -246,30 +246,49 @@ func TestImagePullLimitEnv(t *testing.T) {
 	}
 }
 
-func TestImageGCDefaults(t *testing.T) {
+func TestImageGCAndMetricsDefaults(t *testing.T) {
 	c := Default()
 	if !c.ImageGC || c.ImageGCHigh != DefaultImageGCHigh || c.ImageGCLow != DefaultImageGCLow || c.ImageGCInterval != DefaultImageGCInterval {
 		t.Fatalf("gc %+v", c)
+	}
+	if c.MetricsAddress != DefaultMetricsAddress || c.MetricsAddress == "127.0.0.1:9100" {
+		t.Fatalf("metrics address %q", c.MetricsAddress)
 	}
 	c.ImageGCLow = c.ImageGCHigh
 	if err := c.Validate(); err == nil {
 		t.Fatal("low threshold equal to high was accepted")
 	}
+	c = Default()
+	c.MetricsAddress = "not-a-port"
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid metrics address accepted")
+	}
+	c.MetricsAddress = "off"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !MetricsDisabled("") || !MetricsDisabled("disabled") || !MetricsDisabled("-") || MetricsDisabled(DefaultMetricsAddress) {
+		t.Fatal("metrics disable set")
+	}
 }
 
-func TestImageGCEnv(t *testing.T) {
+func TestImageGCAndMetricsEnv(t *testing.T) {
 	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
 	t.Setenv("VZ_SSH_PASSWORD", "")
 	t.Setenv("DARWIN_NODE_IMAGE_GC", "false")
 	t.Setenv("DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD", "90")
 	t.Setenv("DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD", "70")
 	t.Setenv("DARWIN_NODE_IMAGE_GC_INTERVAL", "1m")
+	t.Setenv("DARWIN_NODE_METRICS_ADDRESS", "127.0.0.1:19102")
 	c := Default()
 	if err := c.ApplyEnv(); err != nil {
 		t.Fatal(err)
 	}
 	if c.ImageGC || c.ImageGCHigh != 90 || c.ImageGCLow != 70 || c.ImageGCInterval != time.Minute {
 		t.Fatalf("gc %+v", c)
+	}
+	if c.MetricsAddress != "127.0.0.1:19102" {
+		t.Fatalf("metrics %q", c.MetricsAddress)
 	}
 	t.Setenv("DARWIN_NODE_IMAGE_GC", "maybe")
 	c = Default()

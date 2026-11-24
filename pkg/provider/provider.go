@@ -42,6 +42,10 @@ type Provider struct {
 
 	healthMu sync.RWMutex
 	health   nodeHealth
+
+	cpuMu      sync.Mutex
+	cpuAcc     map[string]cpuSample
+	metricsNow func() time.Time
 }
 
 // nodeHealth is the node status probe. CreatePod rejects work while it
@@ -281,7 +285,7 @@ func (p *Provider) GetStatsSummary(ctx context.Context) (*statsv1alpha1.Summary,
 func uint64Ptr(v uint64) *uint64 { return &v }
 
 func (p *Provider) GetMetricsResource(ctx context.Context) ([]*dto.MetricFamily, error) {
-	return []*dto.MetricFamily{}, nil
+	return p.metricsResource(ctx), nil
 }
 
 func (p *Provider) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {

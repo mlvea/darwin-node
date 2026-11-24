@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -476,7 +475,7 @@ func TestFailedRefreshKeepsCommittedCache(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if _, err := m.Pull(ctx, ref, RegistryCreds{}, true); err == nil {
-		t.Fatal(fmt.Sprintf("refresh of %s succeeded", ref))
+		t.Fatalf("refresh of %s succeeded", ref)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "disk.img"))
 	if err != nil || string(got) != "GOOD-DISK" {

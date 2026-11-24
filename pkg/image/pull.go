@@ -99,7 +99,9 @@ func (m *Manager) pull(ctx context.Context, ref string, creds RegistryCreds, ign
 	m.mu.Unlock()
 
 	go func() {
+		start := time.Now()
 		img, err := m.pullOnce(pullCtx, ref, creds, stack)
+		notePull(time.Since(start), err)
 		m.mu.Lock()
 		w.img, w.err = img, err
 		delete(m.inflight, flight)

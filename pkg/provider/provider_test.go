@@ -19,6 +19,7 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/sidecar"
 	"github.com/darwin-node/darwin-node/pkg/types"
 
+	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -490,4 +491,157 @@ func TestLaterImagePullSecretMatchesItsRegistry(t *testing.T) {
 	if creds.Pull.For("aaa.example/x:1").Username != "attacker" {
 		t.Fatal("first secret's registry was dropped")
 	}
+}
+
+func TestGetMetricsResourceReportsPodCPUAndMemory(t *testing.T) {
+	slots, _ := capacity.New(2)
+	cfg := config.Default()
+	cfg.CacheDir = t.TempDir()
+	cfg.Runtime = types.RuntimeFake
+	cfg.AgentReadyTimeout = 5 * time.Second
+	rt := rtfake.New()
+	rt.MetricsFn = func() (guest.MetricsRes, error) {
+		return guest.MetricsRes{CPUNanoCores: 500_000_000, MemoryWorkingSet: 4096}, nil
+	}
+	eng := engine.New(cfg, slots, rt, sidecar.None{}, event.Nop{}, "10.0.0.8")
+	p := New(cfg, eng, node.Inventory{
+		Host: node.Host{LogicalCPUs: 8, MemoryBytes: 16 << 30, DiskBytes: 100 << 30, MemoryUsedFrac: 0.25},
+		Cfg:  cfg,
+	}, event.Nop{})
+	p.setHostUsage(node.Host{LogicalCPUs: 8, MemoryBytes: 16 << 30, MemoryUsedFrac: 0.25}, 12.5)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "macos", Namespace: "default", UID: k8stypes.UID("u-res")},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "macos", Image: "local/macos:test"}}},
+	}
+	if err := p.CreatePod(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	waitPodRunning(t, p, "default", "macos")
+
+	now := time.Unix(1_700_000_000, 0)
+	p.metricsNow = func() time.Time { return now }
+	first, err := p.GetMetricsResource(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := metricValue(t, first, "container_memory_working_set_bytes", map[string]string{
+		"namespace": "default", "pod": "macos", "container": "macos",
+	})
+	if mem != 4096 {
+		t.Fatalf("container memory %v, want the guest working set 4096", mem)
+	}
+	cpu := metricValue(t, first, "container_cpu_usage_seconds_total", map[string]string{
+		"namespace": "default", "pod": "macos", "container": "macos",
+	})
+	if cpu != 0 {
+		t.Fatalf("first cpu sample %v, a counter starts at 0", cpu)
+	}
+	p.metricsNow = func() time.Time { return now.Add(2 * time.Second) }
+	second, err := p.GetMetricsResource(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpu = metricValue(t, second, "container_cpu_usage_seconds_total", map[string]string{
+		"namespace": "default", "pod": "macos", "container": "macos",
+	})
+	if cpu < 0.9 || cpu > 1.1 {
+		t.Fatalf("cpu counter %v, want about 1 core-second from 0.5 cores over 2s", cpu)
+	}
+	podMem := metricValue(t, second, "pod_memory_working_set_bytes", map[string]string{
+		"namespace": "default", "pod": "macos",
+	})
+	if podMem != 4096 {
+		t.Fatalf("pod memory %v", podMem)
+	}
+}
+
+func TestGetMetricsResourceUsesAllocationWhenGuestIsSilent(t *testing.T) {
+	slots, _ := capacity.New(2)
+	cfg := config.Default()
+	cfg.CacheDir = t.TempDir()
+	cfg.Runtime = types.RuntimeFake
+	cfg.AgentReadyTimeout = 5 * time.Second
+	rt := rtfake.New()
+	rt.MetricsFn = func() (guest.MetricsRes, error) {
+		return guest.MetricsRes{}, errors.New("no metrics")
+	}
+	eng := engine.New(cfg, slots, rt, sidecar.None{}, event.Nop{}, "10.0.0.8")
+	p := New(cfg, eng, node.Inventory{
+		Host: node.Host{LogicalCPUs: 8, MemoryBytes: 16 << 30, MemoryUsedFrac: 0.5},
+		Cfg:  cfg,
+	}, event.Nop{})
+	p.setHostUsage(node.Host{LogicalCPUs: 8, MemoryBytes: 16 << 30, MemoryUsedFrac: 0.5}, 0)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "macos", Namespace: "default", UID: k8stypes.UID("u-alloc")},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  "macos",
+			Image: "local/macos:test",
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("3"),
+				corev1.ResourceMemory: resource.MustParse("6Gi"),
+			}},
+		}}},
+	}
+	if err := p.CreatePod(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	waitPodRunning(t, p, "default", "macos")
+	now := time.Unix(1_700_000_000, 0)
+	p.metricsNow = func() time.Time { return now }
+	fams, err := p.GetMetricsResource(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := metricValue(t, fams, "container_memory_working_set_bytes", map[string]string{
+		"namespace": "default", "pod": "macos", "container": "macos", "source": "allocation",
+	})
+	if mem != float64(6<<30) {
+		t.Fatalf("memory %v, want the configured 6Gi allocation", mem)
+	}
+	p.metricsNow = func() time.Time { return now.Add(time.Second) }
+	fams, err = p.GetMetricsResource(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpu := metricValue(t, fams, "container_cpu_usage_seconds_total", map[string]string{
+		"namespace": "default", "pod": "macos", "container": "macos", "source": "allocation",
+	})
+	if cpu < 2.9 || cpu > 3.1 {
+		t.Fatalf("cpu %v, want about 3 core-seconds (the configured vCPUs, not a measured sample)", cpu)
+	}
+}
+
+func metricValue(t *testing.T, fams []*dto.MetricFamily, name string, want map[string]string) float64 {
+	t.Helper()
+	for _, f := range fams {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			if !labelsMatch(m, want) {
+				continue
+			}
+			if g := m.GetGauge(); g != nil && m.Gauge != nil {
+				return g.GetValue()
+			}
+			if c := m.GetCounter(); c != nil && m.Counter != nil {
+				return c.GetValue()
+			}
+		}
+	}
+	t.Fatalf("metric %s with %v not found in %d families", name, want, len(fams))
+	return 0
+}
+
+func labelsMatch(m *dto.Metric, want map[string]string) bool {
+	got := map[string]string{}
+	for _, l := range m.GetLabel() {
+		got[l.GetName()] = l.GetValue()
+	}
+	for k, v := range want {
+		if got[k] != v {
+			return false
+		}
+	}
+	return true
 }

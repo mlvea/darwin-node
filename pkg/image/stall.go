@@ -51,7 +51,7 @@ type stallConn struct {
 
 func (c *stallConn) Read(p []byte) (int, error) {
 	if c.stall > 0 {
-		_ = c.Conn.SetReadDeadline(time.Now().Add(c.stall))
+		_ = c.SetReadDeadline(time.Now().Add(c.stall))
 	}
 	n, err := c.Conn.Read(p)
 	if err != nil {
