@@ -88,8 +88,10 @@ func volumeBinds(pod *corev1.Pod, c corev1.Container, volRoot string) []string {
 	var binds []string
 	for _, m := range c.VolumeMounts {
 		host := ""
+		ro := m.ReadOnly
 		if pod != nil {
-			for _, v := range pod.Spec.Volumes {
+			for i := range pod.Spec.Volumes {
+				v := &pod.Spec.Volumes[i]
 				if v.Name != m.Name {
 					continue
 				}
@@ -98,18 +100,27 @@ func volumeBinds(pod *corev1.Pod, c corev1.Container, volRoot string) []string {
 				} else if volRoot != "" {
 					host = filepath.Join(volRoot, m.Name)
 				}
+				// The node rewrites these directories. A read-write bind lets
+				// the container replace a key with a symlink first.
+				if projectedContent(&v.VolumeSource) {
+					ro = true
+				}
 			}
 		}
 		if host == "" {
 			continue
 		}
 		mode := "rw"
-		if m.ReadOnly {
+		if ro {
 			mode = "ro"
 		}
 		binds = append(binds, host+":"+m.MountPath+":"+mode)
 	}
 	return binds
+}
+
+func projectedContent(src *corev1.VolumeSource) bool {
+	return src.ConfigMap != nil || src.Secret != nil || src.Projected != nil || src.DownwardAPI != nil
 }
 
 func dockerResources(c corev1.Container) container.Resources {

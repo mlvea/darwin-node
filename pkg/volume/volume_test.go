@@ -3,7 +3,9 @@ package volume
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -263,11 +265,25 @@ func TestEmptyDirUsageCountsFilesAndRejectsEscape(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("nope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+	// A relative link is a path in this directory. Lexical ".." leaves the
+	// volume, so the walk still fails closed, and the pod-facing error must
+	// not include the host path.
+	rel, err := filepath.Rel(root, filepath.Join(outside, "secret"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DirUsage(root); err == nil {
-		t.Fatal("symlink that leaves the volume must fail closed")
+	if filepath.IsAbs(rel) {
+		t.Fatal("fixture relative escape is absolute")
+	}
+	if err := os.Symlink(rel, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = DirUsage(root)
+	if err == nil {
+		t.Fatal("relative symlink that leaves the volume must fail closed")
+	}
+	if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), outside) {
+		t.Fatalf("host path leaked in emptyDir error: %v", err)
 	}
 }
 
@@ -422,5 +438,385 @@ func TestSubPathExprRejected(t *testing.T) {
 	}
 	if _, _, err := Materialize(Request{Pod: pod, Container: pod.Spec.Containers[0], RootDir: t.TempDir()}); err == nil {
 		t.Fatal("subPathExpr must fail closed")
+	}
+}
+
+func TestDirUsageIgnoresDanglingAndAbsoluteSymlinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("abcd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", filepath.Join(root, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	big := filepath.Join(outside, "big")
+	if err := os.WriteFile(big, []byte(strings.Repeat("x", 1000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Absolute targets are guest paths. Resolving them on the host either
+	// fails the pod or accounts for host bytes that are not in the volume.
+	if err := os.Symlink(big, filepath.Join(root, "guest-abs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/no/such/guest/path", filepath.Join(root, "guest-missing")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DirUsage(root)
+	if err != nil {
+		t.Fatalf("dangling and absolute symlinks must not fail the walk: %v", err)
+	}
+	if got != 4 {
+		t.Fatalf("usage %d, want 4 (symlink targets are not host payload)", got)
+	}
+}
+
+func TestDirUsageNotDirectoryOmitsHostPath(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "notdir")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := DirUsage(file)
+	if err == nil {
+		t.Fatal("expected a non-directory error")
+	}
+	if strings.Contains(err.Error(), file) || strings.Contains(err.Error(), filepath.Dir(file)) {
+		t.Fatalf("host path leaked: %v", err)
+	}
+}
+
+func TestDirUsageIgnoresFileRemovedDuringWalk(t *testing.T) {
+	root := t.TempDir()
+	const n = 300
+	for i := 0; i < n; i++ {
+		dir := filepath.Join(root, "d", "s"+strconv.Itoa(i%30))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "f"+strconv.Itoa(i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			dir := filepath.Join(root, "d", "s"+strconv.Itoa(i%30))
+			_ = os.Remove(filepath.Join(dir, "f"+strconv.Itoa(i%n)))
+			if i%7 == 0 {
+				_ = os.RemoveAll(dir)
+			}
+			i++
+		}
+	}()
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
+	var last error
+	for attempt := 0; attempt < 40; attempt++ {
+		_, err := DirUsage(root)
+		if err != nil {
+			last = err
+			break
+		}
+	}
+	if last != nil {
+		t.Fatalf("file removed during the walk failed the size check: %v", last)
+	}
+}
+
+func TestMaterializeDoesNotFollowReplacedKeySymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write := func(data string) error {
+		_, _, err := Materialize(configMapRequest(root, data))
+		return err
+	}
+	if err := write("first"); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(root, "cfg", "app")
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := write("pwned"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("rewrite followed the key symlink and wrote %q to the host file", got)
+	}
+	body, err := os.ReadFile(key)
+	if err != nil || string(body) != "pwned" {
+		t.Fatalf("volume key %q err %v", body, err)
+	}
+}
+
+func TestMaterializeDoesNotFollowIntermediateDirSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "app")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "uid"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "cm"},
+				Items:                []corev1.KeyToPath{{Key: "app", Path: "nest/app"}},
+			}}}},
+			Containers: []corev1.Container{{
+				Name:         "macos",
+				VolumeMounts: []corev1.VolumeMount{{Name: "cfg", MountPath: "/etc/cfg"}},
+			}},
+		},
+	}
+	req := func(data string) Request {
+		return Request{
+			Pod: pod, Container: pod.Spec.Containers[0], RootDir: root,
+			ConfigMaps: map[string]*corev1.ConfigMap{"cm": {Data: map[string]string{"app": data}}},
+		}
+	}
+	if _, _, err := Materialize(req("first")); err != nil {
+		t.Fatal(err)
+	}
+	nest := filepath.Join(root, "cfg", "nest")
+	if err := os.RemoveAll(nest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, nest); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(req("pwned")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("rewrite followed nest symlink and wrote %q", got)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "cfg", "nest", "app"))
+	if err != nil || string(body) != "pwned" {
+		t.Fatalf("nested key %q err %v", body, err)
+	}
+}
+
+func TestMaterializeDoesNotTruncateHardLinkedHostFile(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(configMapRequest(root, "first")); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(root, "cfg", "app")
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(configMapRequest(root, "pwned")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("rewrite truncated a hard-linked host file: %q", got)
+	}
+	body, err := os.ReadFile(key)
+	if err != nil || string(body) != "pwned" {
+		t.Fatalf("volume key %q err %v", body, err)
+	}
+}
+
+func TestMaterializeDropsRemovedConfigMapKey(t *testing.T) {
+	root := t.TempDir()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "uid"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm"}}}}},
+			Containers: []corev1.Container{{
+				Name:         "macos",
+				VolumeMounts: []corev1.VolumeMount{{Name: "cfg", MountPath: "/etc/cfg"}},
+			}},
+		},
+	}
+	req := func(data map[string]string) Request {
+		return Request{
+			Pod: pod, Container: pod.Spec.Containers[0], RootDir: root,
+			ConfigMaps: map[string]*corev1.ConfigMap{"cm": {Data: data}},
+		}
+	}
+	if _, _, err := Materialize(req(map[string]string{"keep": "a", "drop": "b"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(req(map[string]string{"keep": "a2"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "cfg", "drop")); !os.IsNotExist(err) {
+		t.Fatalf("removed configmap key still present: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "cfg", "keep"))
+	if err != nil || string(body) != "a2" {
+		t.Fatalf("keep %q err %v", body, err)
+	}
+}
+
+func TestTokenRefreshDoesNotFollowSymlinkAndKeepsSibling(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "uid", Labels: map[string]string{"app": "x"}},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "proj", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+				{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "token"}},
+				{DownwardAPI: &corev1.DownwardAPIProjection{Items: []corev1.DownwardAPIVolumeFile{
+					{Path: "namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}},
+				}}},
+			}}}}},
+			Containers: []corev1.Container{{
+				Name:         "macos",
+				VolumeMounts: []corev1.VolumeMount{{Name: "proj", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount"}},
+			}},
+		},
+	}
+	if _, _, err := Materialize(Request{
+		Pod: pod, Container: pod.Spec.Containers[0], RootDir: root,
+		Tokens: []ProjectedToken{{Volume: "proj", Path: "token", Token: "first"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := filepath.Join(root, "proj", "token")
+	if err := os.Remove(token); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectedTokens(root, []ProjectedToken{{Volume: "proj", Path: "token", Token: "second"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("token refresh followed symlink and wrote %q", got)
+	}
+	body, err := os.ReadFile(token)
+	if err != nil || string(body) != "second" {
+		t.Fatalf("token %q err %v", body, err)
+	}
+	ns, err := os.ReadFile(filepath.Join(root, "proj", "namespace"))
+	if err != nil || string(ns) != "ns" {
+		t.Fatalf("sibling file %q err %v", ns, err)
+	}
+}
+
+func TestVolumeDirectorySymlinkIsNotFollowed(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "app")
+	if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(configMapRequest(root, "first")); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "cfg")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(configMapRequest(root, "pwned")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("rewrite followed the volume directory symlink and wrote %q", got)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "cfg", "app"))
+	if err != nil || string(body) != "pwned" {
+		t.Fatalf("volume file %q err %v", body, err)
+	}
+}
+
+func TestPublishReplacesLegacyDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "cfg")
+	if err := os.MkdirAll(filepath.Join(dir, "nest"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nest", "app"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plain"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Materialize(configMapRequest(root, "new")); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "app"))
+	if err != nil || string(body) != "new" {
+		t.Fatalf("app %q %v", body, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "plain")); !os.IsNotExist(err) {
+		t.Fatalf("legacy file still present: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "nest", "app")); !os.IsNotExist(err) {
+		t.Fatalf("legacy nested file still present: %v", err)
+	}
+}
+
+func configMapRequest(root, data string) Request {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "uid"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm"}}}}},
+			Containers: []corev1.Container{{
+				Name:         "macos",
+				VolumeMounts: []corev1.VolumeMount{{Name: "cfg", MountPath: "/etc/cfg"}},
+			}},
+		},
+	}
+	return Request{
+		Pod: pod, Container: pod.Spec.Containers[0], RootDir: root,
+		ConfigMaps: map[string]*corev1.ConfigMap{"cm": {Data: map[string]string{"app": data}}},
 	}
 }

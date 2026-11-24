@@ -27,7 +27,7 @@ func (e *Engine) enforceVolumeContract(ctx context.Context, rec *podRecord) bool
 	for _, lim := range limits {
 		n, err := volume.DirUsage(lim.Path)
 		if err != nil {
-			e.failWith(rec, event.ReasonEmptyDirExceeded, err)
+			e.failWith(rec, event.ReasonEmptyDirExceeded, scrubHostPath(err, lim.Path))
 			return false
 		}
 		if n > lim.Bytes {
@@ -36,6 +36,20 @@ func (e *Engine) enforceVolumeContract(ctx context.Context, rec *podRecord) bool
 		}
 	}
 	return e.refreshProjectedTokens(ctx, rec)
+}
+
+func scrubHostPath(err error, hostPath string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if hostPath != "" {
+		msg = strings.ReplaceAll(msg, hostPath, "volume")
+		if cleaned := filepath.Clean(hostPath); cleaned != hostPath {
+			msg = strings.ReplaceAll(msg, cleaned, "volume")
+		}
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 func (e *Engine) refreshProjectedTokens(ctx context.Context, rec *podRecord) bool {

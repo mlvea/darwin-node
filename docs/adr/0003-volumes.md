@@ -30,11 +30,11 @@ Two-stage mount:
 
 | Volume | Host action |
 |---|---|
-| `emptyDir` | Directory under `cache/pods/<uid>/volumes/<name>`. `sizeLimit` is the sum of regular-file sizes, checked on the engine watch interval. Over the limit, or a symlink that resolves outside the directory, the pod fails and the slot is released. A guest can overshoot between checks. Hard APFS quotas are later. `medium: Memory` is a normal directory; documented limitation. |
+| `emptyDir` | Directory under `cache/pods/<uid>/volumes/<name>`. `sizeLimit` is the sum of regular-file sizes, checked on the engine watch interval. The walk does not follow symlinks. Over the limit, or a relative symlink that lexically leaves the directory, the pod fails and the slot is released. Absolute and dangling symlinks do not. A guest can overshoot between checks. Hard APFS quotas are later. `medium: Memory` is a normal directory; documented limitation. |
 | `hostPath` | Use the path as-is. Create only if `type` requests it. Never `MkdirAll` a hostPath that the user did not ask to create. |
 | `configMap` | Write each key as a file, honor `items`, `defaultMode`, optional. |
 | `secret` | Same as configMap, mode 0600 default, directory 0700. |
-| `projected` | Union of the above + serviceAccountToken + downwardAPI. Each service-account projection is a separate TokenRequest. Mint failure fails admission. The watch loop refreshes at half the remaining lifetime, rewrites the host file, and re-copies into the guest. After the recorded expiry, a failed refresh fails the pod. |
+| `projected` | Union of the above + serviceAccountToken + downwardAPI. Each service-account projection is a separate TokenRequest. Mint failure fails admission. The watch loop refreshes at half the remaining lifetime, republishes the host file without following a symlink, and re-copies into the guest. After the recorded expiry, a failed refresh fails the pod. |
 | `downwardAPI` | Support `metadata.{name,namespace,uid,labels,annotations}` and resource requests/limits of container[0]. |
 | PVC / CSI | Not in Phase 1-5. Extension: extra virtio-blk + local CSI using APFS clonefile/snapshots (Phase 6+). |
 
