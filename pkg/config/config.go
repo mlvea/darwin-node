@@ -254,6 +254,13 @@ func (c *Config) ApplyEnv() error {
 		}
 		c.ImageReadStall = d
 	}
+	if v := os.Getenv("DARWIN_NODE_AGENT_READY_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("DARWIN_NODE_AGENT_READY_TIMEOUT: %w", err)
+		}
+		c.AgentReadyTimeout = d
+	}
 	if v := os.Getenv("DARWIN_NODE_AGENT_TCP_FALLBACK"); v != "" {
 		c.AgentTCPFallback = v == "true" || v == "1"
 	}
@@ -337,6 +344,9 @@ func (c Config) Validate() error {
 	}
 	if c.ImagePullTimeout < 0 || c.ImageReadStall < 0 {
 		return fmt.Errorf("image pull timeouts must not be negative")
+	}
+	if c.AgentReadyTimeout < 0 {
+		return fmt.Errorf("agent ready timeout must not be negative")
 	}
 	return nil
 }
