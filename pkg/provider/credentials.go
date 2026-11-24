@@ -116,6 +116,7 @@ func (r KubeResolver) Resolve(ctx context.Context, pod *corev1.Pod) (engine.Cred
 			}
 		}
 	}
+	var pullEntries []image.RegistryCreds
 	for _, ref := range pod.Spec.ImagePullSecrets {
 		sec, err := core.Secrets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
 		if err != nil {
@@ -125,10 +126,14 @@ func (r KubeResolver) Resolve(ctx context.Context, pod *corev1.Pod) (engine.Cred
 		if err != nil {
 			return engine.Credentials{}, err
 		}
-		for _, c := range parsed {
-			creds.Pull = c
-			break
+		pullEntries = append(pullEntries, image.CredList(parsed)...)
+	}
+	if len(pullEntries) > 0 {
+		ring, err := image.NewPullCreds(pullEntries)
+		if err != nil {
+			return engine.Credentials{}, err
 		}
+		creds.Pull = ring
 	}
 	return creds, nil
 }

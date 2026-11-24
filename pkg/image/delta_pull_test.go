@@ -194,14 +194,22 @@ func TestPullDeltaArtifactEndToEnd(t *testing.T) {
 		t.Fatalf("sidecar not refreshed: %q %v", b, err)
 	}
 
-	// Second pull must be served entirely from cache.
-	reg.close()
+	// A second pull reuses the committed directory, but only after the
+	// registry accepts this pod's credentials. Closing the registry first
+	// refuses the cache.
 	img2, err := m.Pull(context.Background(), deltaRef, RegistryCreds{}, false)
 	if err != nil {
 		t.Fatalf("cached re-pull failed: %v", err)
 	}
 	if img2.Dir != img.Dir {
 		t.Fatal("second pull resolved outside the cache")
+	}
+	reg.close()
+	if _, err := m.Pull(context.Background(), deltaRef, RegistryCreds{}, false); err == nil {
+		t.Fatal("cached re-pull succeeded after the registry became unreachable")
+	}
+	if still, err := os.ReadFile(img.DiskPath); err != nil || !bytes.Equal(still, targetDisk) {
+		t.Fatal("unreachable registry removed the committed cache")
 	}
 }
 

@@ -179,7 +179,24 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
 
 ## Images
 
+- Cluster mode rejects a host directory as the pod image. A cache path or
+  another pod's overlay cannot be named as `image`. `--standalone` still
+  boots a local bake. A symlink in an image directory (the directory
+  itself, `disk.img`, or `aux.img`) is rejected, and clonefile does not
+  follow a symlink.
 - Pull authenticates with dockerconfigjson from the pod's pull secrets.
+  The entry is chosen by registry host, using the kubelet docker-config
+  rules (host and port, path prefix, `*` in a host label, `/v1/` and
+  `/v2/` meaning the host, `index.docker.io/v1/` for Docker Hub). The
+  `auth` field (`base64(username:password)`) is decoded. A secret for one
+  registry is not sent to another, including a delta image's base.
+- A cached image is used only after the registry accepts this pod's
+  credentials. Anonymous success is a public image. `imagePullPolicy:
+  Always` pulls again. `IfNotPresent` and `Never` still do the manifest
+  check, so a registry that is down refuses the cache.
+- The cache directory name is the sha256 of the full reference. Older
+  names (`:` rewritten to `--`, `/` to `_`) are deleted on startup and
+  are not renamed onto the new key. The next start pulls again.
 - Uncompressed sha256 is verified before a VM is started from cache.
 - We do not run untrusted host code from the image; we boot it as a VM.
 

@@ -3,6 +3,8 @@ package image
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -52,12 +54,18 @@ func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ign
 		// A directory of blobs without provenance.json is not a cache hit.
 		// VerifyOptional allows that shape for a local bake; a pull cache
 		// is only the tree we rename into place after the lockfile is written.
+		// A hit still has to be authorized: the pod that filled the cache
+		// is not the pod that is asking now.
 		if img, err := LoadCommitted(CacheDir(m.CacheDir, ref)); err == nil {
+			if err := m.Authorize(ctx, ref, creds); err != nil {
+				return LocalImage{}, err
+			}
 			return img, nil
 		}
 	}
+	flight := pullFlightKey(ref, creds)
 	m.mu.Lock()
-	if w, ok := m.inflight[ref]; ok {
+	if w, ok := m.inflight[flight]; ok {
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -67,7 +75,7 @@ func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ign
 		}
 	}
 	w := &pullWait{done: make(chan struct{})}
-	m.inflight[ref] = w
+	m.inflight[flight] = w
 	m.mu.Unlock()
 
 	img, err := m.pullOnce(ctx, ref, creds)
@@ -75,9 +83,52 @@ func (m *Manager) Pull(ctx context.Context, ref string, creds RegistryCreds, ign
 	close(w.done)
 
 	m.mu.Lock()
-	delete(m.inflight, ref)
+	delete(m.inflight, flight)
 	m.mu.Unlock()
 	return img, err
+}
+
+// pullFlightKey keeps two pods that name the same image from sharing one
+// in-flight pull when their credentials differ. The waiter would otherwise
+// receive an image it was not allowed to pull.
+func pullFlightKey(ref string, creds RegistryCreds) string {
+	use := creds.For(ref)
+	sum := sha256.Sum256([]byte(use.Username + "\n" + use.Password + "\n" + use.IdentityToken))
+	return ref + "\x00" + hex.EncodeToString(sum[:])
+}
+
+// Authorize checks that creds can read ref's manifest. Anonymous success
+// is a public image. A failure, including a registry we cannot reach,
+// refuses the cached copy.
+func (m *Manager) Authorize(ctx context.Context, ref string, creds RegistryCreds) error {
+	repo, err := m.repository(ref, creds)
+	if err != nil {
+		return err
+	}
+	if _, err := repo.Resolve(ctx, repo.Reference.Reference); err != nil {
+		return fmt.Errorf("registry did not accept credentials for %s: %w", ref, err)
+	}
+	return nil
+}
+
+func (m *Manager) repository(ref string, creds RegistryCreds) (*remote.Repository, error) {
+	repo, err := remote.NewRepository(ref)
+	if err != nil {
+		return nil, fmt.Errorf("parse image ref %q: %w", ref, err)
+	}
+	use := creds.For(ref)
+	repo.Client = &auth.Client{
+		Client: retry.DefaultClient,
+		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
+			Username:     use.Username,
+			Password:     use.Password,
+			RefreshToken: use.IdentityToken,
+		}),
+	}
+	if isPlainHTTP(repo.Reference.Registry, m.InsecureRegistries) {
+		repo.PlainHTTP = true
+	}
+	return repo, nil
 }
 
 func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds) (LocalImage, error) {
@@ -85,9 +136,9 @@ func (m *Manager) pullOnce(ctx context.Context, ref string, creds RegistryCreds)
 	if err := os.MkdirAll(filepath.Dir(final), cacheDirPerm); err != nil {
 		return LocalImage{}, err
 	}
-	// Stage outside images/. A suffix on the cache path is itself a legal
-	// cache key (tag "v1.partial"), and RemoveAll of that path deletes the
-	// other image. Same filesystem as the cache, so the commit rename works.
+	// Stage outside images/. The stage directory is not a cache key, so
+	// RemoveAll of an unfinished pull cannot delete a committed image.
+	// Same filesystem as the cache, so the commit rename works.
 	stage := filepath.Join(m.CacheDir, "image-partial", CacheKey(ref))
 	backup := filepath.Join(m.CacheDir, "image-replacing", CacheKey(ref))
 	if err := os.MkdirAll(filepath.Dir(stage), cacheDirPerm); err != nil {
@@ -141,20 +192,9 @@ func commitCacheDir(stage, final, backup string) error {
 }
 
 func (m *Manager) pullInto(ctx context.Context, ref string, creds RegistryCreds, destDir string) error {
-	repo, err := remote.NewRepository(ref)
+	repo, err := m.repository(ref, creds)
 	if err != nil {
-		return fmt.Errorf("parse image ref %q: %w", ref, err)
-	}
-	repo.Client = &auth.Client{
-		Client: retry.DefaultClient,
-		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
-			Username:     creds.Username,
-			Password:     creds.Password,
-			RefreshToken: creds.IdentityToken,
-		}),
-	}
-	if isPlainHTTP(repo.Reference.Registry, m.InsecureRegistries) {
-		repo.PlainHTTP = true
+		return err
 	}
 	if err := os.MkdirAll(destDir, cacheDirPerm); err != nil {
 		return err
