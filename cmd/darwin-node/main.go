@@ -79,6 +79,7 @@ func main() {
 	f.BoolVar(&standalone, "standalone", false, "run engine without joining a cluster (dev)")
 	f.DurationVar(&cfg.StartupTimeout, "startup-timeout", cfg.StartupTimeout, "wait for node Ready")
 	f.DurationVar(&cfg.InitTimeout, "init-timeout", cfg.InitTimeout, "max time to wait for each init container")
+	f.DurationVar(&cfg.AgentReadyTimeout, "agent-ready-timeout", cfg.AgentReadyTimeout, "budget for each guest-agent dial and ready check")
 	f.StringSliceVar(&cfg.InsecureRegistries, "insecure-registry", cfg.InsecureRegistries, "registries allowed to use plaintext HTTP (loopback is always allowed)")
 	f.Int64Var(&cfg.MaxImageBytes, "max-image-bytes", cfg.MaxImageBytes, "max declared or decompressed image bytes (default 256GiB)")
 	f.Int64Var(&cfg.MaxImageCompressedBytes, "max-image-compressed-bytes", cfg.MaxImageCompressedBytes, "max compressed blob bytes accepted from a registry (default 256GiB)")

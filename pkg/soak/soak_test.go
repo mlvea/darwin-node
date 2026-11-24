@@ -201,39 +201,25 @@ func TestSoakRecoversAfterInjectedStartFailure(t *testing.T) {
 	inner := fake.New()
 	rt := &failStartRuntime{Runtime: inner}
 	rt.left.Store(1)
-	_, err := Run(context.Background(), Config{
+	rep, err := Run(context.Background(), Config{
 		CacheDir: dir,
 		Runtime:  rt,
 		Running:  inner.Running,
 		Cycles:   1,
 		MaxVMs:   2,
 	})
-	if err == nil {
-		t.Fatal("expected injected start failure")
+	if err != nil {
+		t.Fatalf("one transient VM start failure failed the cycle: %v", err)
 	}
-	if inner.Running() != 0 {
-		t.Fatalf("running VMs after failure: %d", inner.Running())
+	if rep.Cycles != 1 || inner.Running() != 0 {
+		t.Fatalf("cycles %d running %d", rep.Cycles, inner.Running())
 	}
 	ents, readErr := os.ReadDir(filepath.Join(dir, "pods"))
 	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatal(readErr)
 	}
 	if len(ents) != 0 {
-		t.Fatalf("pod dirs after injected failure: %d", len(ents))
-	}
-
-	rep, err := Run(context.Background(), Config{
-		CacheDir: dir,
-		Runtime:  inner,
-		Running:  inner.Running,
-		Cycles:   2,
-		MaxVMs:   2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rep.Cycles != 2 || inner.Running() != 0 {
-		t.Fatalf("recovered cycles %d running %d", rep.Cycles, inner.Running())
+		t.Fatalf("pod dirs after the cycle: %d", len(ents))
 	}
 }
 
