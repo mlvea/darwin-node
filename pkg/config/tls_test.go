@@ -41,8 +41,15 @@ func TestTLSConfigClientAuth(t *testing.T) {
 	if noCA.ClientAuth != tls.NoClientCert || noCA.ClientCAs != nil {
 		t.Fatalf("client auth %+v", noCA.ClientAuth)
 	}
-	if len(noCA.Certificates) != 1 {
-		t.Fatalf("certs %d", len(noCA.Certificates))
+	if noCA.GetCertificate == nil {
+		t.Fatal("serving certificate is fixed at process start")
+	}
+	if len(noCA.Certificates) != 0 {
+		t.Fatalf("Certificates has %d entries; a client that sends no SNI would skip GetCertificate", len(noCA.Certificates))
+	}
+	pair, err := noCA.GetCertificate(nil)
+	if err != nil || pair == nil || len(pair.Certificate) == 0 {
+		t.Fatalf("GetCertificate: %v", err)
 	}
 	if noCA.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("min %d", noCA.MinVersion)
@@ -120,6 +127,112 @@ func TestTLSConfigHandshake(t *testing.T) {
 	}); serr == nil {
 		t.Fatal("untrusted client cert was accepted")
 	}
+}
+
+func TestTLSConfigReloadsCertificateWhenFileChanges(t *testing.T) {
+	dir := t.TempDir()
+	ca, caKey, caDER := makeCA(t, "server-ca")
+	key, der := makeLeaf(t, "first", ca, caKey, false, true)
+	certPath := writePEM(t, dir, "server.crt", "CERTIFICATE", der)
+	keyPath := writeKey(t, dir, "server.key", key)
+	caPath := writePEM(t, dir, "server-ca.crt", "CERTIFICATE", caDER)
+
+	srv, err := TLSConfig(certPath, keyPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", srv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go acceptHandshakes(ln)
+
+	roots := loadPool(t, caPath)
+	cn, err := dialServerCN(ln.Addr().String(), roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn != "first" {
+		t.Fatalf("server CN %q", cn)
+	}
+
+	key2, der2 := makeLeaf(t, "rotated", ca, caKey, false, true)
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der2}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(certPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(keyPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	cn, err = dialServerCN(ln.Addr().String(), roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn != "rotated" {
+		t.Fatalf("server CN %q after the cert file changed; the process is still serving the certificate it read at start", cn)
+	}
+
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := future.Add(time.Hour)
+	if err := os.Chtimes(certPath, later, later); err != nil {
+		t.Fatal(err)
+	}
+	cn, err = dialServerCN(ln.Addr().String(), roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn != "rotated" {
+		t.Fatalf("server CN %q after a bad replacement; the last good certificate was dropped", cn)
+	}
+}
+
+func acceptHandshakes(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			if tc, ok := c.(*tls.Conn); ok {
+				_ = tc.Handshake()
+			}
+		}(c)
+	}
+}
+
+func dialServerCN(addr string, roots *x509.CertPool) (string, error) {
+	d := &tls.Dialer{Config: &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS12}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	tc, ok := conn.(*tls.Conn)
+	if !ok {
+		return "", fmt.Errorf("%T", conn)
+	}
+	certs := tc.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return "", fmt.Errorf("no peer certificate")
+	}
+	return certs[0].Subject.CommonName, nil
 }
 
 func TestTLSConfigHandshakeNoClientCA(t *testing.T) {

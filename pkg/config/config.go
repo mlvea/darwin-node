@@ -102,9 +102,15 @@ type Config struct {
 	ImageGCHigh     int
 	ImageGCLow      int
 	ImageGCInterval time.Duration
+
+	// MetricsAddress is the Prometheus listener. The default port is
+	// 9102 so it does not take node_exporter's 9100. "off" disables it.
+	MetricsAddress string
 }
 
 const (
+	// DefaultMetricsAddress is the Prometheus bind. It is not 9100.
+	DefaultMetricsAddress = "127.0.0.1:9102"
 	// DefaultImageGCHigh is the kubelet image-gc-high-threshold.
 	DefaultImageGCHigh = 85
 	// DefaultImageGCLow is the kubelet image-gc-low-threshold.
@@ -143,6 +149,7 @@ func Default() Config {
 		ImageGCHigh:             DefaultImageGCHigh,
 		ImageGCLow:              DefaultImageGCLow,
 		ImageGCInterval:         DefaultImageGCInterval,
+		MetricsAddress:          DefaultMetricsAddress,
 		MaxImageBytes:           256 << 30,
 		MaxImageCompressedBytes: 256 << 30,
 		ImageDiskHeadroom:       10 << 30,
@@ -336,7 +343,22 @@ func (c *Config) ApplyEnv() error {
 		}
 		c.ImageGCInterval = d
 	}
+	if v, ok := os.LookupEnv("DARWIN_NODE_METRICS_ADDRESS"); ok {
+		c.MetricsAddress = v
+	}
 	return c.Validate()
+}
+
+// MetricsDisabled reports that addr turns the Prometheus listener off.
+// An empty address, "off", "disabled", and "-" are off. The default
+// address is not empty.
+func MetricsDisabled(addr string) bool {
+	switch strings.ToLower(strings.TrimSpace(addr)) {
+	case "", "off", "disabled", "-":
+		return true
+	default:
+		return false
+	}
 }
 
 // HTTPListenAddr is host:port for the kubelet HTTP server.
@@ -407,6 +429,11 @@ func (c Config) Validate() error {
 	}
 	if c.ImageGCInterval < 0 {
 		return fmt.Errorf("image GC interval must not be negative, got %s", c.ImageGCInterval)
+	}
+	if !MetricsDisabled(c.MetricsAddress) {
+		if _, _, err := net.SplitHostPort(c.MetricsAddress); err != nil {
+			return fmt.Errorf("metrics address: %w", err)
+		}
 	}
 	if c.AgentReadyTimeout < 0 {
 		return fmt.Errorf("agent ready timeout must not be negative")

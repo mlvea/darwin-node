@@ -1,11 +1,19 @@
 package observability
 
 import (
+	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/darwin-node/darwin-node/pkg/runtime"
+	rtfake "github.com/darwin-node/darwin-node/pkg/runtime/fake"
+	"github.com/darwin-node/darwin-node/pkg/types"
 )
 
 func TestMetricsHandlerExposesGauges(t *testing.T) {
@@ -63,4 +71,72 @@ func TestServeMetricsPath(t *testing.T) {
 	if !strings.Contains(body, "darwin_node_vms") || !strings.Contains(body, "darwin_node_pods") {
 		t.Fatalf("missing series: %s", body)
 	}
+}
+
+func TestPullBootAndProbeSeries(t *testing.T) {
+	m := NewMetrics()
+	m.ObservePull(time.Second, nil)
+	m.ObservePull(time.Second, errors.New("pull"))
+	m.ObserveBoot(time.Second, nil)
+	m.ObserveProbe("readiness", 10*time.Millisecond, nil)
+	body := scrape(t, m)
+	for _, name := range []string{
+		"darwin_node_image_pulls_total",
+		"darwin_node_image_pull_duration_seconds",
+		"darwin_node_vm_boots_total",
+		"darwin_node_vm_boot_duration_seconds",
+		"darwin_node_probes_total",
+		"darwin_node_probe_duration_seconds",
+	} {
+		if !strings.Contains(body, name) {
+			t.Fatalf("missing %s\n%s", name, body)
+		}
+	}
+}
+
+func TestListenMetricsReportsBindError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	if _, err := ListenMetrics(ln.Addr().String(), NewMetrics().Handler()); err == nil {
+		t.Fatal("bind error was dropped")
+	}
+}
+
+func TestListenMetricsServes(t *testing.T) {
+	m := NewMetrics()
+	m.VMs.Set(1)
+	stop, err := ListenMetrics("127.0.0.1:0", m.Handler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stop(context.Background()) })
+}
+
+func TestMeterRecordsBootAndKeepsConsole(t *testing.T) {
+	m := NewMetrics()
+	rt := Meter(rtfake.New(), m)
+	machine, err := rt.Create(context.Background(), types.VMSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := machine.(runtime.Consoler); !ok {
+		t.Fatal("console machine lost Consoler")
+	}
+	if err := machine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	body := scrape(t, m)
+	if !strings.Contains(body, `darwin_node_vm_boots_total{result="ok"} 1`) {
+		t.Fatalf("boot counter:\n%s", body)
+	}
+}
+
+func scrape(t *testing.T, m *Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	return rec.Body.String()
 }

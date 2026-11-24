@@ -50,7 +50,8 @@ on Apple Silicon macOS VMs; others are degraded. This file is the contract.
 | Exec stdin | A guest that advertises `stdinWindow` (1 MiB) grants those bytes back as the process reads them. The host does not drop frames, and EOF is a frame that waits for credit. A non-TTY exec frees its slot when the process exits, including when the client has not sent EOF. An older guest advertises no window. The host then sends without waiting, and that guest can still drop a full queue. A new guest talking to an older host does not drop stdin; the older host ignores the credit frames. |
 | GPU scheduling | `darwin.node/metal` is a token, not isolation. See [gpu.md](gpu.md). |
 | hostPath | Shared into the guest via virtio-fs. Semantics ≠ Linux bind-mount. |
-| DaemonSets | Must not request a VM slot. This node does not run node-exporter as a VM. Scrape darwin-node `/metrics`. |
+| DaemonSets | Must not request a VM slot. This node does not run node-exporter as a VM. Scrape darwin-node `/metrics` on `--metrics-address` (default `127.0.0.1:9102`). |
+| `kubectl top` / `/metrics/resource` | metrics-server reads `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes`. When the guest reports CPU and memory, those values are used (the CPU counter is the integral of the guest's instantaneous nano-core rate). When the guest does not, the series are the configured VM allocation (requests, or the 2 CPU / 4Gi default) and carry `source=allocation`. That is the VM size, not measured use. Sidecar CPU is not included. Node series come from the host probe. |
 
 ## Not yet implemented (tracked)
 

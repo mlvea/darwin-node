@@ -19,6 +19,7 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/debug"
 	"github.com/darwin-node/darwin-node/pkg/engine"
 	"github.com/darwin-node/darwin-node/pkg/event"
+	"github.com/darwin-node/darwin-node/pkg/image"
 	"github.com/darwin-node/darwin-node/pkg/node"
 	"github.com/darwin-node/darwin-node/pkg/observability"
 	"github.com/darwin-node/darwin-node/pkg/provider"
@@ -90,6 +91,7 @@ func main() {
 	f.IntVar(&cfg.ImageGCHigh, "image-gc-high-threshold", cfg.ImageGCHigh, "percent used at which image GC starts (kubelet default 85)")
 	f.IntVar(&cfg.ImageGCLow, "image-gc-low-threshold", cfg.ImageGCLow, "percent used at which image GC stops (kubelet default 80)")
 	f.DurationVar(&cfg.ImageGCInterval, "image-gc-interval", cfg.ImageGCInterval, "how often to evaluate image and cache-store GC")
+	f.StringVar(&cfg.MetricsAddress, "metrics-address", cfg.MetricsAddress, "Prometheus listen address (default 127.0.0.1:9102, not node_exporter's 9100); off disables it")
 
 	cmd.AddCommand(cmdDebugDump(&cfg))
 	cmd.AddCommand(cmdConsole(&cfg))
@@ -131,6 +133,8 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	if err != nil {
 		return err
 	}
+	metrics := observability.NewMetrics()
+	rt = observability.Meter(rt, metrics)
 	host, herr := node.ProbeHost(ctx)
 	if herr != nil && cfg.Runtime != types.RuntimeFake {
 		return fmt.Errorf("probe host: %w", herr)
@@ -169,9 +173,16 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	defer eng.Close()
 	inv := node.Inventory{Host: host, Cfg: cfg, Slots: slots}
 	p := provider.New(cfg, eng, inv, event.Slog{})
-	metrics := observability.NewMetrics()
 	metrics.Observe(func() (float64, float64) { return float64(slots.Used()), float64(len(eng.List())) })
-	go func() { _ = observability.ServeMetrics("127.0.0.1:9100", metrics.Handler()) }()
+	image.SetPullObserver(func(d time.Duration, err error) { metrics.ObservePull(d, err) })
+	engine.SetProbeObserver(func(kind string, d time.Duration, err error) { metrics.ObserveProbe(kind, d, err) })
+	if !dnconfig.MetricsDisabled(cfg.MetricsAddress) {
+		stop, err := observability.ListenMetrics(cfg.MetricsAddress, metrics.Handler())
+		if err != nil {
+			return fmt.Errorf("metrics: %w", err)
+		}
+		defer func() { _ = stop(context.Background()) }()
+	}
 	eng.StartDiskGC(ctx)
 
 	if standalone {

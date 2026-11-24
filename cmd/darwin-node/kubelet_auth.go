@@ -80,7 +80,13 @@ func kubeletAuth(nodeName string, bundle *dnconfig.ClientCABundle) nodeutil.Node
 // are not requested: virtual-kubelet's base config asks for them, and
 // leaving that in place would advertise an empty CA list.
 func applyKubeletTLS(dst, src *tls.Config, bundle *dnconfig.ClientCABundle) {
-	dst.Certificates = src.Certificates
+	if src.GetCertificate != nil {
+		dst.GetCertificate = src.GetCertificate
+		dst.Certificates = nil
+	} else {
+		dst.Certificates = src.Certificates
+		dst.GetCertificate = nil
+	}
 	if src.MinVersion != 0 {
 		dst.MinVersion = src.MinVersion
 	}

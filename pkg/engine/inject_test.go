@@ -115,42 +115,6 @@ func injectEngine(t *testing.T, fail failMode) *Engine {
 	return e
 }
 
-func assertFailedAndClean(t *testing.T, e *Engine, ns, name, uid string) {
-	t.Helper()
-	p := waitPhase(t, e, ns, name, corev1.PodFailed)
-	if p.Status.Message == "" {
-		t.Fatal("failed pod must carry a message")
-	}
-	// failWith publishes PodFailed, then teardown releases the slot, then
-	// RemoveAll deletes the pod directory. Those last two steps run on the
-	// start goroutine and finish before startDone is released. Sampling the
-	// directory at the phase transition races that goroutine: on a loaded
-	// runner Stat still succeeds and the test reports a leftover directory
-	// that RemoveAll is about to delete. Wait for the goroutine, then apply
-	// the same checks.
-	e.mu.RLock()
-	rec := e.pods[Key(ns, name)]
-	e.mu.RUnlock()
-	if rec == nil {
-		t.Fatal("pod record missing after failure")
-	}
-	rec.startDone.Wait()
-	if got := e.slots.Used(); got != 0 {
-		t.Fatalf("slot leak after failure: used=%d", got)
-	}
-	dir := filepath.Join(e.cfg.CacheDir, "pods", uid)
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("failed pod left state behind: %v", err)
-	}
-	// The node must be immediately reusable.
-	next := samplePod(name+"-next", uid+"-next")
-	if err := e.Create(context.Background(), next, Credentials{}); err != nil {
-		t.Fatalf("node not reusable after failure: %v", err)
-	}
-	waitPhase(t, e, ns, name+"-next", corev1.PodRunning)
-	_ = e.Delete(context.Background(), ns, name+"-next", 0)
-}
-
 // One transient failure used to fail the pod. The start is retried, so the
 // pod reaches Running and keeps its slot.
 func waitRunningOrFail(t *testing.T, e *Engine, ns, name string) {

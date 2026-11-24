@@ -710,7 +710,7 @@ func cleanMountPath(p string) (string, error) {
 	}
 	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
 		if seg == ".." {
-			return "", fmt.Errorf("mountPath %q contains ..", p)
+			return "", fmt.Errorf("mountPath %q contains a '..' segment", p)
 		}
 	}
 	cleaned := filepath.Clean(p)

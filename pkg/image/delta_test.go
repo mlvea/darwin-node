@@ -134,9 +134,9 @@ func TestDeltaRejectsEscapeAndOversizedRecord(t *testing.T) {
 	}
 
 	escapeDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(escapeDir, "..patch"), []byte("x"), 0o644); err != nil && !os.IsNotExist(err) {
-		// name is irrelevant; the manifest is rejected before any write
-	}
+	// The patch name is rejected before this file is opened. The write
+	// only plants a name that looks like a traversal.
+	_ = os.WriteFile(filepath.Join(escapeDir, "..patch"), []byte("x"), 0o644)
 	if err := WriteDeltaManifest(escapeDir, DeltaManifest{Patches: []PatchRef{{
 		Name: "../evil", BaseSHA: sum.String(), BaseSize: int64(len(data)),
 		DestSHA: sum.String(), DestSize: int64(len(data)),

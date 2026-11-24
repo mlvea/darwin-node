@@ -9,6 +9,12 @@
 - Cluster mode will not start a plaintext kubelet HTTP server. Set
   `APISERVER_CERT_LOCATION` and `APISERVER_KEY_LOCATION` (server cert/key).
   `--standalone` does not serve exec/logs and does not need those files.
+  The process re-reads that pair on each handshake when the file mtime
+  or size changes. A replacement that does not parse is ignored and the
+  last good pair stays in use. Replacing the files does not require a
+  restart. There is no CSR bootstrap.
+- The kubeconfig client credential is loaded once. Rotating it is a
+  process restart. See [kubeconfig-rotation.md](kubeconfig-rotation.md).
 - Cluster mode will not start without `APISERVER_CA_CERT_LOCATION`.
   That file is the client-certificate CA. The kubelet HTTP server verifies
   any client certificate that is presented (`tls.VerifyClientCertIfGiven`)
