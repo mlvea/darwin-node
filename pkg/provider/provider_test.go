@@ -130,8 +130,9 @@ func TestKubeResolverLoadsPullSecretAndConfigMap(t *testing.T) {
 	if creds.ConfigMaps["cm"] == nil || creds.ConfigMaps["cm"].Data["app.plist"] != "from-api" {
 		t.Fatalf("configmap %+v", creds.ConfigMaps)
 	}
-	if creds.Pull.Username != "u" || creds.Pull.Password != "p" {
-		t.Fatalf("pull %+v", creds.Pull)
+	got := creds.Pull.For("ghcr.io/darwin/macos:15")
+	if got.Username != "u" || got.Password != "p" {
+		t.Fatalf("pull %+v", got)
 	}
 }
 
@@ -415,5 +416,78 @@ func TestGetStatsSummaryWedgeDoesNotBlock(t *testing.T) {
 	}
 	if found < 1 {
 		t.Fatalf("expected at least one healthy pod sample, pods=%+v", sum.Pods)
+	}
+}
+
+func TestImagePullSecretIsSelectedByRegistry(t *testing.T) {
+	raw := []byte(`{"auths":{
+		"aaa.example":{"username":"attacker","password":"stolen"},
+		"ghcr.io":{"username":"real","password":"secret"}
+	}}`)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "reg", Namespace: "ns"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: raw},
+	}
+	r := KubeResolver{Client: k8sfake.NewSimpleClientset(sec)}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: corev1.PodSpec{
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "reg"}},
+			Containers:       []corev1.Container{{Name: "macos", Image: "ghcr.io/team/macos:15"}},
+		},
+	}
+	creds, err := r.Resolve(context.Background(), pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := creds.Pull.For("ghcr.io/team/macos:15")
+	if got.Server != "ghcr.io" || got.Username != "real" || got.Password != "secret" {
+		t.Fatalf("credential for ghcr.io/team/macos:15 is server=%q user=%q", got.Server, got.Username)
+	}
+	if creds.Pull.For("aaa.example/other:1").Username != "attacker" {
+		t.Fatal("aaa.example lost its own credential")
+	}
+	if !creds.Pull.For("quay.io/other:1").Empty() {
+		t.Fatal("quay.io received a credential from a different registry")
+	}
+	base := creds.Pull.For("example.com:5000/team/base:1")
+	if !base.Empty() {
+		t.Fatalf("delta base registry received %+v", base)
+	}
+}
+
+func TestLaterImagePullSecretMatchesItsRegistry(t *testing.T) {
+	other := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "ns"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{
+			corev1.DockerConfigJsonKey: []byte(`{"auths":{"aaa.example":{"username":"attacker","password":"stolen"}}}`),
+		},
+	}
+	gh := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "gh", Namespace: "ns"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{
+			corev1.DockerConfigJsonKey: []byte(`{"auths":{"ghcr.io":{"username":"real","password":"secret"}}}`),
+		},
+	}
+	r := KubeResolver{Client: k8sfake.NewSimpleClientset(other, gh)}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: corev1.PodSpec{
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "other"}, {Name: "gh"}},
+		},
+	}
+	creds, err := r.Resolve(context.Background(), pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := creds.Pull.For("ghcr.io/team/macos:15")
+	if got.Username != "real" || got.Password != "secret" {
+		t.Fatalf("later pull secret was ignored: %+v", got)
+	}
+	if creds.Pull.For("aaa.example/x:1").Username != "attacker" {
+		t.Fatal("first secret's registry was dropped")
 	}
 }

@@ -146,6 +146,32 @@ func TestRecoverDoesNotReadThroughStagingSymlink(t *testing.T) {
 	}
 }
 
+func TestRecoverDoesNotPromoteLegacyCacheKey(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "image-replacing", "team_macos--15")
+	plantCommitted(t, legacy, "COLLIDED")
+	if err := Recover(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy cache key was kept: %v", err)
+	}
+	img, err := LoadCommitted(CacheDir(root, "team/macos:15"))
+	if err == nil {
+		body, _ := os.ReadFile(img.DiskPath)
+		if string(body) == "COLLIDED" {
+			t.Fatal("legacy key was migrated onto team/macos:15")
+		}
+	}
+	img, err = LoadCommitted(CacheDir(root, "team_macos:15"))
+	if err == nil {
+		body, _ := os.ReadFile(img.DiskPath)
+		if string(body) == "COLLIDED" {
+			t.Fatal("legacy key was migrated onto team_macos:15")
+		}
+	}
+}
+
 func plantCommitted(t *testing.T, dir, disk string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {

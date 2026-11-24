@@ -13,6 +13,12 @@ func Recover(cacheRoot string) error {
 	if cacheRoot == "" {
 		return nil
 	}
+	// Legacy keys are the old ":" → "--", "/" → "_" names. Two refs
+	// shared one, so renaming a leftover onto the new hash would keep
+	// that mix-up. Drop them. A hash-named tree is still restored below.
+	if err := dropLegacyCacheKeys(cacheRoot); err != nil {
+		return err
+	}
 	keys := map[string]struct{}{}
 	var first error
 	remember := func(err error) {
@@ -108,6 +114,35 @@ func recoverImageKey(cacheRoot, key string) error {
 		return err
 	}
 	return removeCacheTree(partial)
+}
+
+func dropLegacyCacheKeys(cacheRoot string) error {
+	for _, sub := range []string{"images", "image-partial", "image-replacing"} {
+		dir := filepath.Join(cacheRoot, sub)
+		fi, err := os.Lstat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			continue
+		}
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, ent := range ents {
+			if validCacheKey(ent.Name()) {
+				continue
+			}
+			if err := removeCacheTree(filepath.Join(dir, ent.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func realDir(path string) (bool, error) {

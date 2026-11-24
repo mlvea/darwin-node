@@ -59,9 +59,9 @@ requirement). Hardware model stays as baked (tied to the IPSW).
 ### Cache and CoW
 
 - Cache root: `~/Library/Caches/io.darwin-node.node/images/` (configurable).
-- Image key: `CacheKey(ref)`, `:` -> `--`, `/` -> `_`. We do **not** copy
-  Agoda's `convertToPath` (it turns `127.0.0.1:5000/macos:latest` into
-  `127.0.0.1/5000/macos/latest`).
+- Image key: `CacheKey(ref)`, the hex sha256 of the full reference. A
+  rewrite of `:` and `/` mapped `team/macos:15` and `team_macos:15` onto
+  one directory. Old keys are deleted on startup, not renamed.
 - On start: `clonefile` disk + aux into
   `~/Library/Caches/io.darwin-node.node/pods/<uid>/overlay/`. **Not**
   `os.TempDir()`.

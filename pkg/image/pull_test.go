@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -290,8 +294,9 @@ func TestProvenanceFromDescriptorsSkipsCompressedDiskBlob(t *testing.T) {
 }
 
 func TestPullServesCommittedCache(t *testing.T) {
+	host, seen := manifestHead(t, func(*http.Request) bool { return true })
 	root := t.TempDir()
-	ref := "127.0.0.1:1/darwin/macos:good"
+	ref := host + "/darwin/macos:good"
 	dir := CacheDir(root, ref)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -320,6 +325,9 @@ func TestPullServesCommittedCache(t *testing.T) {
 	got, err := os.ReadFile(img.DiskPath)
 	if err != nil || string(got) != "GOOD-DISK" {
 		t.Fatalf("disk %q err=%v", got, err)
+	}
+	if len(*seen) == 0 {
+		t.Fatal("committed cache was served without a manifest check")
 	}
 }
 
@@ -473,5 +481,132 @@ func TestFailedRefreshKeepsCommittedCache(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dir, "disk.img"))
 	if err != nil || string(got) != "GOOD-DISK" {
 		t.Fatalf("committed disk = %q err=%v", got, err)
+	}
+}
+
+func TestCacheDirsDoNotCollideWhenSlashBecomesUnderscore(t *testing.T) {
+	root := t.TempDir()
+	refA := "127.0.0.1:1/team/macos:15"
+	refB := "127.0.0.1:1/team_macos:15"
+	if CacheDir(root, refA) == CacheDir(root, refB) {
+		t.Fatalf("distinct refs share cache dir %s", CacheDir(root, refA))
+	}
+	plantCommitted(t, filepath.Join(root, "images", "127.0.0.1--1_team_macos--15"), "FIRST-PULL")
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	img, err := m.Pull(ctx, refA, RegistryCreds{}, false)
+	if err == nil {
+		body, _ := os.ReadFile(img.DiskPath)
+		if string(body) == "FIRST-PULL" {
+			t.Fatal("team/macos:15 booted the cache written for team_macos:15")
+		}
+	}
+}
+
+// manifestHead is a loopback registry that answers manifest HEAD/GET.
+// allow reports whether this request may see the manifest. A denial is a
+// Basic challenge so the client can retry with credentials.
+func manifestHead(t *testing.T, allow func(*http.Request) bool) (host string, seen *[]string) {
+	t.Helper()
+	var headers []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = append(headers, r.Header.Get("Authorization"))
+		if !allow(r) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		w.Header().Set("Docker-Content-Digest", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write([]byte("{}"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host, &headers
+}
+
+func TestPullDoesNotServeCacheWhenRegistryDenies(t *testing.T) {
+	host, seen := manifestHead(t, func(r *http.Request) bool {
+		return r.Header.Get("Authorization") == "Basic "+base64.StdEncoding.EncodeToString([]byte("real:secret"))
+	})
+	ref := host + "/team/macos:v1"
+	root := t.TempDir()
+	plantCommitted(t, CacheDir(root, ref), "PRIVATE")
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	img, err := m.Pull(ctx, ref, RegistryCreds{}, false)
+	if err == nil {
+		body, _ := os.ReadFile(img.DiskPath)
+		t.Fatalf("anonymous pull used cached private image %q (registry saw %v)", body, *seen)
+	}
+	if len(*seen) == 0 {
+		t.Fatal("cache hit did not contact the registry")
+	}
+	img, err = m.Pull(ctx, ref, RegistryCreds{Username: "real", Password: "secret"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(img.DiskPath)
+	if err != nil || string(body) != "PRIVATE" {
+		t.Fatalf("authorized cache hit got %q err=%v", body, err)
+	}
+}
+
+func TestPullSendsCredentialForTheImageRegistry(t *testing.T) {
+	host, seen := manifestHead(t, func(*http.Request) bool { return false })
+	creds, err := NewPullCreds([]RegistryCreds{
+		{Server: "aaa.example", Username: "attacker", Password: "stolen"},
+		{Server: host, Username: "real", Password: "secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = m.Pull(ctx, host+"/team/macos:v1", creds, true)
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("real:secret"))
+	bad := "Basic " + base64.StdEncoding.EncodeToString([]byte("attacker:stolen"))
+	found := false
+	for _, h := range *seen {
+		if h == bad {
+			t.Fatalf("sent another registry's credential: %v", *seen)
+		}
+		if h == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("authorization headers %v, want %s", *seen, want)
+	}
+}
+
+func TestPullContactsRegistryBeforeServingPublicCache(t *testing.T) {
+	host, seen := manifestHead(t, func(*http.Request) bool { return true })
+	ref := host + "/team/macos:v1"
+	root := t.TempDir()
+	plantCommitted(t, CacheDir(root, ref), "PUBLIC")
+	m := NewManager(root)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	img, err := m.Pull(ctx, ref, RegistryCreds{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(img.DiskPath)
+	if err != nil || string(body) != "PUBLIC" {
+		t.Fatalf("public cache got %q err=%v", body, err)
+	}
+	if len(*seen) == 0 {
+		t.Fatal("public cache hit did not contact the registry")
 	}
 }
