@@ -669,7 +669,21 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		ch := make(chan Envelope, 16)
 		go func() {
 			defer close(ch)
-			lines := h.LogBuffer.TailFormatted(req.TailLines, req.Timestamps)
+			var lines [][]byte
+			var notify <-chan logLine
+			if req.Follow {
+				// Snapshot and subscribe under one lock. A Write between
+				// those two steps used to be in neither, so follow dropped it.
+				entries, nch, cancel := h.LogBuffer.tailAndSubscribe(req.TailLines)
+				notify = nch
+				defer cancel()
+				lines = make([][]byte, len(entries))
+				for i, e := range entries {
+					lines[i] = formatLogLine(e.at, e.data, req.Timestamps)
+				}
+			} else {
+				lines = h.LogBuffer.TailFormatted(req.TailLines, req.Timestamps)
+			}
 			for _, ln := range lines {
 				b, _ := json.Marshal(LogsEvent{Line: ln})
 				if !sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindStream, Method: MethodLogs, Payload: b}) {
@@ -680,9 +694,6 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 				sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodLogs})
 				return
 			}
-			// Follow: stream appended lines until the connection ends.
-			notify, cancel := h.LogBuffer.Subscribe()
-			defer cancel()
 			ticker := time.NewTicker(200 * time.Millisecond)
 			defer ticker.Stop()
 			for {
@@ -1240,15 +1251,29 @@ func formatLogLine(at time.Time, line []byte, timestamps bool) []byte {
 	return out
 }
 
-// Subscribe returns a channel receiving every line appended from now on.
+// tailAndSubscribe copies the current tail and registers the subscriber
+// before releasing the lock. A Write holds the same lock, so it is either
+// in the returned tail or delivered on the channel, not lost between them.
 // Delivery is best-effort: a subscriber that falls more than its buffer
 // behind loses lines rather than blocking writers. cancel releases the slot.
-func (b *LogBuffer) Subscribe() (<-chan logLine, func()) {
+func (b *LogBuffer) tailAndSubscribe(n int) ([]logLine, <-chan logLine, func()) {
 	ch := make(chan logLine, 256)
 	b.mu.Lock()
+	var entries []logLine
+	if n <= 0 || n >= len(b.lines) {
+		entries = make([]logLine, len(b.lines))
+		copy(entries, b.lines)
+	} else {
+		entries = make([]logLine, n)
+		copy(entries, b.lines[len(b.lines)-n:])
+	}
 	b.subs = append(b.subs, ch)
 	b.mu.Unlock()
-	cancel := func() {
+	return entries, ch, b.unsub(ch)
+}
+
+func (b *LogBuffer) unsub(ch chan logLine) func() {
+	return func() {
 		b.mu.Lock()
 		for i, c := range b.subs {
 			if c == ch {
@@ -1259,7 +1284,6 @@ func (b *LogBuffer) Subscribe() (<-chan logLine, func()) {
 		}
 		b.mu.Unlock()
 	}
-	return ch, cancel
 }
 
 func (b *LogBuffer) notifyLocked(line logLine) {

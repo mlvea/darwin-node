@@ -9,6 +9,12 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — log follow keeps the line written as the snapshot is taken
+
+- **HEAD:** `cursor/ops-sprint-batch-i-da4b` after merging `origin/main` at `5dc9bf8` (PR #34) into `48c0862`. `main` was not pushed. No rebase, no force-push.
+- **Failure:** the push CI run of that merge failed `TestLogsFollowStreamsAppends` with `follow did not deliver append: ""`. The pull_request run of the same SHA passed. `MethodLogs` copied the tail, sent it, and only then subscribed. A `Write` in that gap was in neither place, so follow dropped it. The same run also reported a `readLineNonblock` goroutine still blocked on that missed read.
+- **Fix:** `tailAndSubscribe` copies the tail and registers the subscriber under the buffer lock. A write is in the snapshot or on the follow channel. `TestTailAndSubscribeIsContiguous` writes 200 numbered lines across that call and requires each id once.
+
 ### 2026-11-25 (Asia/Singapore) — T-13 metrics; T-14 cert reload; T-16 lint and vuln scan
 
 - **HEAD:** stacked on `cursor/ops-sprint-batch-i-da4b` (`120ca35`), which is based on `main` at `6f0b657`. This branch is `cursor/ops-sprint-metrics-tls-ci-da4b`. `main` was not pushed. No rebase, no force-push.
