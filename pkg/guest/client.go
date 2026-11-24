@@ -21,6 +21,13 @@ type Client struct {
 	stdinWindow int
 	heartbeat   time.Duration
 
+	// life cancels the host heartbeat. Close cancels it directly so the
+	// loop does not stay parked on Done until the read loop notices the
+	// closed connection. leakcheck treats that gap as a leaked goroutine.
+	life   context.Context
+	stop   context.CancelFunc
+	hbDone chan struct{}
+
 	exitMu sync.Mutex
 	exitFn func(ExitReport)
 	exit   *ExitReport
@@ -70,6 +77,8 @@ func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string, cfg
 	}
 	c.heartbeat = heartbeatEvery(hc, idle)
 	if c.heartbeat > 0 {
+		c.life, c.stop = context.WithCancel(context.Background())
+		c.hbDone = make(chan struct{})
 		go c.heartbeatLoop()
 	}
 	return c, nil
@@ -109,19 +118,24 @@ func (c *Client) Done() <-chan struct{} {
 }
 
 func (c *Client) heartbeatLoop() {
+	defer close(c.hbDone)
 	t := time.NewTicker(c.heartbeat)
 	defer t.Stop()
 	for {
 		select {
+		case <-c.life.Done():
+			return
 		case <-c.Done():
 			return
 		case <-t.C:
-			ctx, cancel := context.WithTimeout(context.Background(), c.heartbeat)
+			ctx, cancel := context.WithTimeout(c.life, c.heartbeat)
 			_, err := c.Health(ctx)
 			cancel()
 			if err != nil {
 				select {
 				case <-c.Done():
+					return
+				case <-c.life.Done():
 					return
 				default:
 				}
@@ -470,5 +484,18 @@ func (c *Client) LogsFollow(ctx context.Context, req LogsReq, w io.Writer) error
 }
 
 func (c *Client) Close() error {
-	return c.sess.Close()
+	if c.stop != nil {
+		c.stop()
+	}
+	var err error
+	if c.sess != nil {
+		err = c.sess.Close()
+	}
+	if c.hbDone != nil {
+		select {
+		case <-c.hbDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return err
 }
