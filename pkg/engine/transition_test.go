@@ -53,11 +53,11 @@ func TestPodConditionTransitionTimeStaysUntilStatusChanges(t *testing.T) {
 		t.Fatalf("PodReady %+v", ready2)
 	}
 	if !ready2.LastTransitionTime.Equal(&ready.LastTransitionTime) && !ready2.LastTransitionTime.Time.Equal(ready.LastTransitionTime.Time) {
-		t.Fatalf("PodReady LastTransitionTime moved from %s to %s while Ready stayed True", ready.LastTransitionTime.Time.Format(time.RFC3339Nano), ready2.LastTransitionTime.Time.Format(time.RFC3339Nano))
+		t.Fatalf("PodReady LastTransitionTime moved from %s to %s while Ready stayed True", ready.LastTransitionTime.Format(time.RFC3339Nano), ready2.LastTransitionTime.Format(time.RFC3339Nano))
 	}
 	scheduled2, _ := cond(p, corev1.PodScheduled)
 	if !scheduled2.LastTransitionTime.Time.Equal(scheduled.LastTransitionTime.Time) {
-		t.Fatalf("PodScheduled LastTransitionTime moved from %s to %s", scheduled.LastTransitionTime.Time.Format(time.RFC3339Nano), scheduled2.LastTransitionTime.Time.Format(time.RFC3339Nano))
+		t.Fatalf("PodScheduled LastTransitionTime moved from %s to %s", scheduled.LastTransitionTime.Format(time.RFC3339Nano), scheduled2.LastTransitionTime.Format(time.RFC3339Nano))
 	}
 
 	e.mu.RLock()
@@ -76,7 +76,7 @@ func TestPodConditionTransitionTimeStaysUntilStatusChanges(t *testing.T) {
 		t.Fatalf("PodReady status %s, want False after the container left Ready", ready3.Status)
 	}
 	if !ready3.LastTransitionTime.After(ready2.LastTransitionTime.Time) {
-		t.Fatalf("PodReady LastTransitionTime %s did not move when Ready became False (was %s)", ready3.LastTransitionTime.Time.Format(time.RFC3339Nano), ready2.LastTransitionTime.Time.Format(time.RFC3339Nano))
+		t.Fatalf("PodReady LastTransitionTime %s did not move when Ready became False (was %s)", ready3.LastTransitionTime.Format(time.RFC3339Nano), ready2.LastTransitionTime.Format(time.RFC3339Nano))
 	}
 	scheduled3, _ := cond(p, corev1.PodScheduled)
 	if !scheduled3.LastTransitionTime.Time.Equal(scheduled.LastTransitionTime.Time) {

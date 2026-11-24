@@ -40,7 +40,7 @@ func TestNodeConditionTransitionTimeStaysUntilStatusChanges(t *testing.T) {
 			t.Fatalf("%s status changed %s -> %s with the same inventory", c.Type, prev.Status, c.Status)
 		}
 		if !c.LastTransitionTime.Time.Equal(prev.LastTransitionTime.Time) {
-			t.Fatalf("%s LastTransitionTime moved from %s to %s while status stayed %s", c.Type, prev.LastTransitionTime.Time.Format(time.RFC3339Nano), c.LastTransitionTime.Time.Format(time.RFC3339Nano), c.Status)
+			t.Fatalf("%s LastTransitionTime moved from %s to %s while status stayed %s", c.Type, prev.LastTransitionTime.Format(time.RFC3339Nano), c.LastTransitionTime.Format(time.RFC3339Nano), c.Status)
 		}
 		if c.LastHeartbeatTime.Time.Equal(prev.LastHeartbeatTime.Time) {
 			t.Fatalf("%s LastHeartbeatTime did not refresh", c.Type)
@@ -58,7 +58,7 @@ func TestNodeConditionTransitionTimeStaysUntilStatusChanges(t *testing.T) {
 	}
 	prevDisk, _ := conditionByType(first, corev1.NodeDiskPressure)
 	if !disk.LastTransitionTime.After(prevDisk.LastTransitionTime.Time) {
-		t.Fatalf("DiskPressure LastTransitionTime %s did not move when status became True", disk.LastTransitionTime.Time.Format(time.RFC3339Nano))
+		t.Fatalf("DiskPressure LastTransitionTime %s did not move when status became True", disk.LastTransitionTime.Format(time.RFC3339Nano))
 	}
 	ready, _ := conditionByType(n.Status.Conditions, corev1.NodeReady)
 	prevReady, _ := conditionByType(first, corev1.NodeReady)
@@ -87,7 +87,7 @@ func TestStatusProviderKeepsTransitionAcrossPublishes(t *testing.T) {
 			t.Fatalf("condition %s disappeared", c.Type)
 		}
 		if !c.LastTransitionTime.Time.Equal(prev.LastTransitionTime.Time) {
-			t.Fatalf("%s LastTransitionTime moved from %s to %s across publishes while status stayed %s", c.Type, prev.LastTransitionTime.Time.Format(time.RFC3339Nano), c.LastTransitionTime.Time.Format(time.RFC3339Nano), c.Status)
+			t.Fatalf("%s LastTransitionTime moved from %s to %s across publishes while status stayed %s", c.Type, prev.LastTransitionTime.Format(time.RFC3339Nano), c.LastTransitionTime.Format(time.RFC3339Nano), c.Status)
 		}
 		if c.LastHeartbeatTime.Time.Equal(prev.LastHeartbeatTime.Time) {
 			t.Fatalf("%s LastHeartbeatTime did not refresh", c.Type)
