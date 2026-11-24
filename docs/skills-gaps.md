@@ -91,8 +91,9 @@ next engineer.
 **Still hard**
 
 - APFS quotas for `emptyDir.sizeLimit`. The watch loop already fails a
-  pod whose host directory exceeds the limit, and fails one whose
-  symlink leaves the volume. That check runs between ticks.
+  pod whose host directory exceeds the limit. It does not follow guest
+  symlinks. A relative symlink that lexically leaves the directory still
+  fails the pod. That check runs between ticks.
 - `mount_null` reliability inside the guest across macOS versions.
 - PVC/CSI design that does not fight Time Machine / local snapshots.
 

@@ -97,14 +97,60 @@ func TestEmptyDirSymlinkEscapeFailsPod(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(cfg.CacheDir, "pods", "uid-link", "volumes", "scratch")
-	if err := os.Symlink(outside, filepath.Join(dir, "escape")); err != nil {
+	rel, err := filepath.Rel(dir, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(rel) {
+		t.Fatal("fixture relative escape is absolute")
+	}
+	if err := os.Symlink(rel, filepath.Join(dir, "escape")); err != nil {
 		t.Fatal(err)
 	}
 	failed := waitPhase(t, e, "default", "link", corev1.PodFailed)
 	if !strings.Contains(failed.Status.Message, "escape") && !strings.Contains(failed.Status.Message, "symlink") {
 		t.Fatalf("message %q", failed.Status.Message)
 	}
+	if strings.Contains(failed.Status.Message, cfg.CacheDir) || strings.Contains(failed.Status.Message, outside) {
+		t.Fatalf("pod message contains a host path: %q", failed.Status.Message)
+	}
 	waitSlotReleased(t, e, rt)
+}
+
+func TestEmptyDirGuestSymlinksDoNotFailPod(t *testing.T) {
+	e, _, _, cfg := contractEngine(t)
+	limit := resource.MustParse("1Mi")
+	pod := samplePod("guestlink", "uid-guestlink")
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name:         "scratch",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &limit}},
+	}}
+	pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "scratch", MountPath: "/scratch"}}
+	t.Cleanup(func() {
+		_ = e.Delete(context.Background(), "default", "guestlink", 0)
+	})
+	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, e, "default", "guestlink", corev1.PodRunning)
+	dir := filepath.Join(cfg.CacheDir, "pods", "uid-guestlink", "volumes", "scratch")
+	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "abs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing-in-guest", filepath.Join(dir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	got, err := e.Get("default", "guestlink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != corev1.PodRunning {
+		t.Fatalf("guest symlink failed the pod: phase %s msg %q", got.Status.Phase, got.Status.Message)
+	}
+	if strings.Contains(got.Status.Message, cfg.CacheDir) {
+		t.Fatalf("pod message contains the host cache path: %q", got.Status.Message)
+	}
 }
 
 func TestProjectedTokenMissingFailsClosed(t *testing.T) {

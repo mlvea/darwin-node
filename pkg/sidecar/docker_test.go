@@ -65,3 +65,57 @@ func TestVolumeBindsAndResources(t *testing.T) {
 		t.Fatalf("memory %d", hc.Memory)
 	}
 }
+
+func TestContentVolumesBindReadOnly(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm"}}}},
+				{Name: "sec", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "s"}}},
+				{Name: "proj", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "token"}},
+				}}}},
+				{Name: "down", VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{
+					{Path: "ns", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}},
+				}}}},
+				{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: "hp", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/host/ci"}}},
+			},
+		},
+	}
+	c := corev1.Container{
+		Name: "log",
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "cfg", MountPath: "/etc/cfg"},
+			{Name: "sec", MountPath: "/etc/sec"},
+			{Name: "proj", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount"},
+			{Name: "down", MountPath: "/etc/down"},
+			{Name: "scratch", MountPath: "/scratch"},
+			{Name: "hp", MountPath: "/host"},
+		},
+	}
+	binds := volumeBinds(pod, c, "/vol")
+	want := map[string]string{
+		"/etc/cfg": ":ro",
+		"/etc/sec": ":ro",
+		"/var/run/secrets/kubernetes.io/serviceaccount": ":ro",
+		"/etc/down": ":ro",
+		"/scratch":  ":rw",
+		"/host":     ":rw",
+	}
+	if len(binds) != len(want) {
+		t.Fatalf("binds %v", binds)
+	}
+	for mount, mode := range want {
+		found := false
+		for _, b := range binds {
+			if strings.HasSuffix(b, ":"+mount+mode) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("mount %s mode %s missing in %v", mount, mode, binds)
+		}
+	}
+}
