@@ -153,7 +153,9 @@ make sign
 export APISERVER_CERT_LOCATION=$HOME/.kube/tls.crt
 export APISERVER_KEY_LOCATION=$HOME/.kube/tls.key
 export APISERVER_CA_CERT_LOCATION=$HOME/.kube/ca.crt
-./bin/darwin-node --nodename=e2e-mac --allow-nat-workloads
+# 127.0.0.1 is the default. Use the address the API server dials.
+./bin/darwin-node --nodename=e2e-mac --allow-nat-workloads \
+  --listen-address="$(ipconfig getifaddr en0)"
 ```
 
 In another shell:

@@ -38,17 +38,21 @@ the Go module graph after dependency changes.
 
 ## Run (dev)
 
-Cluster mode refuses a plaintext kubelet HTTP server. Provide a cert
-and key (and, in production, a client CA):
+Cluster mode refuses a plaintext kubelet HTTP server and refuses to start
+without a client CA. The kubeconfig user should be `system:node:<nodename>`
+in group `system:nodes` (see [security notes](security.md)). The listen
+address defaults to `127.0.0.1`. Set it to the address the API server
+dials before expecting `kubectl logs` or `kubectl exec`.
 
 ```bash
 export KUBECONFIG="$HOME/.kube/config"
 export APISERVER_CERT_LOCATION="$HOME/.kube/tls.crt"
 export APISERVER_KEY_LOCATION="$HOME/.kube/tls.key"
-# export APISERVER_CA_CERT_LOCATION="$HOME/.kube/ca.crt"
+export APISERVER_CA_CERT_LOCATION="$HOME/.kube/ca.crt"
 
 ./bin/darwin-node \
   --nodename="$(hostname | tr '[:upper:]' '[:lower:]')" \
+  --listen-address="$(ipconfig getifaddr en0)" \
   --allow-nat-workloads \
   --log-level=info
 ```
@@ -102,7 +106,7 @@ directories at startup.
 
 ## Configuration
 
-Precedence: flags > environment > config file > defaults.
+Precedence: `ApplyEnv` runs after flag parsing, so a set environment variable overrides the matching flag. Defaults apply when neither is set.
 
 Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
 
@@ -124,17 +128,35 @@ Kubernetes connection (same as Virtual Kubelet):
 
 | Variable | Meaning |
 |---|---|
-| `KUBECONFIG` | kubeconfig path |
-| `APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION` | client cert |
+| `KUBECONFIG` | kubeconfig path. User should be `system:node:<nodename>` in group `system:nodes` |
+| `APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION` | kubelet server cert and key. Required in cluster mode |
+| `APISERVER_CA_CERT_LOCATION` | kubelet client CA. Required in cluster mode |
 | `KUBELET_PORT` | default `10250` |
+| `DARWIN_NODE_LISTEN_ADDRESS` | kubelet HTTP bind address. Default `127.0.0.1`. When set, overrides `--listen-address` |
 
 ## Helm (optional skeleton)
 
-`deploy/helm/darwin-node` is a *skeleton* for operators who wrap the Mac
-fleet. The agent itself still runs on the Mac via launchd, not as a Linux
-pod. The chart deploys RBAC, a ConfigMap of node flags, and (optionally) a
-DaemonSet of *documentation* ConfigMaps. It does not magically start VMs
-on Linux nodes.
+`deploy/helm/darwin-node` installs RBAC for the Mac fleet. The agent
+itself still runs on the Mac via launchd, not as a Linux pod. The chart
+does not start VMs.
+
+The default `rbac.identity` is `node`. Install the chart for the notes,
+and authenticate each Mac as `system:node:<nodename>` in group
+`system:nodes`. That identity is what the Node authorizer and
+NodeRestriction apply to, including `serviceaccounts/token` create for
+pods on the node.
+
+```bash
+helm upgrade --install darwin-node deploy/helm/darwin-node \
+  --set rbac.identity=serviceaccount \
+  --set rbac.namespaces='{default,ci}'
+```
+
+`serviceaccount` is the fallback when a node client certificate cannot be
+issued. Secret get, ConfigMap get, pod delete, pod status update, and
+`serviceaccounts/token` create are Roles in the listed namespaces only.
+A pod in any other namespace cannot receive a projected service account
+token from this node.
 
 ## Homebrew (sketch)
 

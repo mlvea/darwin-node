@@ -1,3 +1,11 @@
+# Node identity (the default, rbac.identity=node) renders no bindings.
+# Run the Mac as user system:node:<nodename> in group system:nodes so the
+# Node authorizer and NodeRestriction scope Secret, ConfigMap, pod, and
+# serviceaccounts/token access to pods on that node.
+{{- if eq .Values.rbac.identity "serviceaccount" }}
+{{- if eq (len .Values.rbac.namespaces) 0 }}
+{{- fail "rbac.identity=serviceaccount requires rbac.namespaces so Secret, ConfigMap, pod, and serviceaccounts/token rules stay in a Role per namespace" }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -9,21 +17,6 @@ kind: ClusterRole
 metadata:
   name: {{ .Values.clusterRole.name }}
 rules:
-  - apiGroups: [""]
-    resources: ["nodes", "nodes/status", "nodes/stats", "nodes/metrics", "nodes/proxy"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: [""]
-    resources: ["pods", "pods/status", "pods/log", "pods/exec", "pods/attach", "pods/portforward"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["secrets", "configmaps", "serviceaccounts", "services"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # WebhookAuth delegates to the API server with this identity.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
@@ -31,6 +24,25 @@ rules:
   - apiGroups: ["authorization.k8s.io"]
     resources: ["subjectaccessreviews"]
     verbs: ["create"]
+  # Virtual-kubelet creates this node and patches its status.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["update", "patch"]
+  # The pod informer lists at cluster scope with spec.nodeName=<this node>.
+  # A Role cannot authorize that list. Delete and status writes are namespaced.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # The service informer lists at cluster scope for service environment variables.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -44,3 +56,66 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.serviceAccount.name }}
     namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.clusterRole.name }}-lease
+  namespace: kube-node-lease
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.clusterRole.name }}-lease
+  namespace: kube-node-lease
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.clusterRole.name }}-lease
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+{{- range .Values.rbac.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $.Values.clusterRole.name }}
+  namespace: {{ . }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Values.clusterRole.name }}
+  namespace: {{ . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $.Values.clusterRole.name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $.Values.serviceAccount.name }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

@@ -18,7 +18,13 @@ advisory if this project is on GitHub.
 ## Defaults that matter
 
 - Cluster mode **will not start** without a kubelet TLS cert/key
-  (`APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION`).
+  (`APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION`) and a client CA
+  (`APISERVER_CA_CERT_LOCATION`). The kubelet HTTP server defaults to
+  `127.0.0.1:10250`.
+- Authenticate the process as `system:node:<nodename>` in group
+  `system:nodes` so the Node authorizer and NodeRestriction apply.
+  The chart default does not grant cluster-wide Secret, ConfigMap, or
+  pod delete. See [docs/security.md](docs/security.md).
 - Guest-agent TCP fallback is **off**. vsock is the production path.
   Do not pass `--agent-tcp-fallback` on a bridged network until TLS/PSK
   for that path exists.
