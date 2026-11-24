@@ -79,6 +79,11 @@ type LogsEvent struct {
 	Line []byte `json:"line"`
 }
 
+// WindowUpdate grants the peer more stream credit for one envelope ID.
+type WindowUpdate struct {
+	Credit int `json:"credit"`
+}
+
 // ProbeType is a Kubernetes probe kind.
 type ProbeType string
 

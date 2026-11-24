@@ -30,12 +30,16 @@ func newHandshakeNonce() (string, error) {
 }
 
 // Dial wraps an established stream (vsock, TCP, or net.Pipe).
-func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string) (*Client, error) {
+func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string, cfg ...HostConfig) (*Client, error) {
 	nonce, err := newHandshakeNonce()
 	if err != nil {
 		return nil, err
 	}
-	s := newSession(rw)
+	var hc HostConfig
+	if len(cfg) > 0 {
+		hc = cfg[0]
+	}
+	s := newSession(rw, hc)
 	c := &Client{sess: s, close: rw}
 	s.onNotify = c.consumeNotify
 	go s.readLoop()
@@ -241,7 +245,7 @@ func (c *Client) ExecInteractive(ctx context.Context, req ExecReq, stdin io.Read
 func (c *Client) pumpStdin(ctx context.Context, id string, stdin io.Reader) {
 	defer func() {
 		if ctx.Err() == nil {
-			_ = c.sess.WriteStream(id, ExecStdin{EOF: true})
+			_ = c.sess.writeStream(ctx, id, ExecStdin{EOF: true})
 		}
 	}()
 	buf := make([]byte, 32<<10)
@@ -249,7 +253,7 @@ func (c *Client) pumpStdin(ctx context.Context, id string, stdin io.Reader) {
 		n, rerr := stdin.Read(buf)
 		if n > 0 {
 			data := append([]byte(nil), buf[:n]...)
-			if err := c.sess.WriteStream(id, ExecStdin{Data: data}); err != nil {
+			if err := c.sess.writeStream(ctx, id, ExecStdin{Data: data}); err != nil {
 				return
 			}
 		}
@@ -272,7 +276,7 @@ func (c *Client) pumpResize(ctx context.Context, id string, resize <-chan TtyRes
 			if !ok {
 				return
 			}
-			if err := c.sess.WriteStream(id, ev); err != nil {
+			if err := c.sess.writeStream(ctx, id, ev); err != nil {
 				return
 			}
 		}
@@ -302,11 +306,18 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 // Logs returns buffered lines (follow is best-effort in this MVP: one snapshot
 // plus response). The engine can poll. For true follow, use LogsFollow.
 func (c *Client) Logs(ctx context.Context, req LogsReq) ([][]byte, error) {
+	// Cancel the stream when we return. A guest that never sends a final
+	// response used to pin the collector, and the slice, until the process
+	// restarted.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	ch, err := c.sess.Stream(ctx, MethodLogs, req)
 	if err != nil {
 		return nil, err
 	}
+	limit := c.sess.callByteLimit()
 	var lines [][]byte
+	var total int
 	for env := range ch {
 		if env.Kind == KindResponse || env.Kind == KindError {
 			if env.Error != nil {
@@ -318,9 +329,14 @@ func (c *Client) Logs(ctx context.Context, req LogsReq) ([][]byte, error) {
 		if err != nil {
 			continue
 		}
-		if len(ev.Line) > 0 {
-			lines = append(lines, ev.Line)
+		if len(ev.Line) == 0 {
+			continue
 		}
+		if limit > 0 && total+len(ev.Line) > limit {
+			return lines, &CallError{Code: ErrCodeLimit, Message: "call byte limit exceeded"}
+		}
+		total += len(ev.Line)
+		lines = append(lines, ev.Line)
 	}
 	return lines, nil
 }
