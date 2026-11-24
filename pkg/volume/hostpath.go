@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -134,9 +135,10 @@ func ensureHostPathType(path string, t *corev1.HostPathType) error {
 			return fmt.Errorf("hostPath %q is not a directory", path)
 		}
 	case corev1.HostPathFileOrCreate:
-		fi, err := os.Stat(path)
+		fi, err := os.Lstat(path)
 		if os.IsNotExist(err) {
-			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, filePerm)
+			// O_NOFOLLOW refuses a symlink that appears at path before create.
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|unix.O_NOFOLLOW, filePerm)
 			if err != nil {
 				return err
 			}
@@ -144,6 +146,9 @@ func ensureHostPathType(path string, t *corev1.HostPathType) error {
 		}
 		if err != nil {
 			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("hostPath %q is a symlink", path)
 		}
 		if fi.IsDir() {
 			return fmt.Errorf("hostPath %q is a directory, not a file", path)

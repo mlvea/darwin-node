@@ -504,6 +504,37 @@ func TestOverloadedInteractiveDoesNotPinConnection(t *testing.T) {
 	}
 }
 
+func TestCopyPathSkipsAtomicWriterMetadata(t *testing.T) {
+	src := t.TempDir()
+	ts := filepath.Join(src, "..2026_01_01")
+	if err := os.Mkdir(ts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ts, "k"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("..2026_01_01", filepath.Join(src, "..data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "k"), filepath.Join(src, "k")); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "placed")
+	if err := copyPath(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dst, "k"))
+	if err != nil || string(b) != "secret" {
+		t.Fatalf("payload %q %v", b, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "..data")); !os.IsNotExist(err) {
+		t.Fatalf("..data copied into the guest: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "..2026_01_01")); !os.IsNotExist(err) {
+		t.Fatalf("timestamp directory copied into the guest: %v", err)
+	}
+}
+
 func TestMaterializeRefusesToDeleteGuestDir(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "keep")

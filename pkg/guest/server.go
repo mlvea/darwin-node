@@ -966,6 +966,11 @@ func copyPath(src, dst string) error {
 			return err
 		}
 		for _, e := range ents {
+			// Atomic volume publish reserves ".." names (..data, timestamp
+			// directories). Copying them would duplicate the payload.
+			if strings.HasPrefix(e.Name(), "..") {
+				continue
+			}
 			if err := copyPath(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
 				return err
 			}

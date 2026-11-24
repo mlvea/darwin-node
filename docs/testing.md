@@ -49,8 +49,9 @@ that checklist. They do not mark it done.
 
 Host-side checks that Linux does run:
 
-- `emptyDir.sizeLimit`: directory usage on the probe interval, symlink
-  escape fails the pod and frees the slot
+- `emptyDir.sizeLimit`: directory usage on the probe interval. Absolute
+  and dangling symlinks do not fail the pod. A relative symlink that
+  lexically leaves the directory fails it, and the message has no host path
 - Projected ServiceAccount tokens: one token per projection, empty and
   failed mints refused, refresh rewrites the file before expiry
 
