@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/digest"
 )
 
 // writeImageDirWithDisk writes a minimal valid image dir whose disk.img is

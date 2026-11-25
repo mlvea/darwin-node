@@ -1,4 +1,4 @@
-module github.com/darwin-node/darwin-node
+module github.com/mlvea/darwin-node
 
 go 1.25.0
 

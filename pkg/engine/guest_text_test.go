@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/darwin-node/darwin-node/pkg/guest"
+	"github.com/mlvea/darwin-node/pkg/guest"
 )
 
 func TestProbeMessageTruncatesGuestText(t *testing.T) {

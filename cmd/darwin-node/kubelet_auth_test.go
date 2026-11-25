@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	dnconfig "github.com/darwin-node/darwin-node/pkg/config"
+	dnconfig "github.com/mlvea/darwin-node/pkg/config"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"

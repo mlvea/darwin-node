@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/darwin-node/darwin-node/pkg/event"
+	"github.com/mlvea/darwin-node/pkg/event"
 
 	corev1 "k8s.io/api/core/v1"
 )

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/image"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/image"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 func TestParseGraphics(t *testing.T) {

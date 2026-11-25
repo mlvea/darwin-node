@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/internal/leakcheck"
+	"github.com/mlvea/darwin-node/internal/leakcheck"
 )
 
 // A non-TTY exec whose process exits without reading stdin must return

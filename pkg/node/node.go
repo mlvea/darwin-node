@@ -7,10 +7,10 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/darwin-node/darwin-node/internal/labels"
-	"github.com/darwin-node/darwin-node/pkg/capacity"
-	"github.com/darwin-node/darwin-node/pkg/config"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/internal/labels"
+	"github.com/mlvea/darwin-node/pkg/capacity"
+	"github.com/mlvea/darwin-node/pkg/config"
+	"github.com/mlvea/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"

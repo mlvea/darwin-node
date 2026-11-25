@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/guest"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/guest"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 func TestFakeLifecycle(t *testing.T) {

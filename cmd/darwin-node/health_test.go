@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/darwin-node/darwin-node/pkg/config"
-	"github.com/darwin-node/darwin-node/pkg/node"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/config"
+	"github.com/mlvea/darwin-node/pkg/node"
+	"github.com/mlvea/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
 )

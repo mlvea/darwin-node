@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/event"
-	"github.com/darwin-node/darwin-node/pkg/image"
+	"github.com/mlvea/darwin-node/pkg/event"
+	"github.com/mlvea/darwin-node/pkg/image"
 
 	"github.com/shirou/gopsutil/v4/disk"
 	corev1 "k8s.io/api/core/v1"

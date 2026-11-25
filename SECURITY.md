@@ -11,9 +11,10 @@ see [LICENSE](LICENSE).
 
 ## Report a vulnerability
 
-Please **do not** open a public issue for exploitable bugs. Email the
-maintainers listed in the repository, or open a private security
-advisory if this project is on GitHub.
+Please **do not** open a public issue for exploitable bugs. Report them
+through GitHub private vulnerability reporting, which is the only
+channel: on https://github.com/mlvea/darwin-node open the **Security**
+tab and choose **Report a vulnerability**.
 
 ## Defaults that matter
 
