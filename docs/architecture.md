@@ -37,6 +37,14 @@ Lineage and third-party licenses: [credits.md](credits.md).
                  └─────────────────────┘
 ```
 
+With `--vm-supervisor` left at its default `off`, the runtime box above
+creates the `VZVirtualMachine` inside the agent process. `--vm-supervisor=on`
+replaces that box with a Unix client. Each VM then lives in the same
+signed binary started as `--role=supervisor --slot=0` or `--slot=1`.
+The agent still watches Kubernetes and serves `:10250`. The supervisor
+does not pull images, watch the API server, or listen on that port.
+See [Per-VM supervisor](#per-vm-supervisor).
+
 ## Hybrid pods
 
 ```
@@ -136,6 +144,8 @@ workload's stdio, so attach does not start a shell.
   pipe pairs (`FileHandleSerialPortAttachment`). The engine bridges it
   to `darwin-console-<hash>.sock` in TempDir; `darwin-node console`
   dials and enters raw mode. Independent of agent and SSH by design.
+  The supervised machine does not expose that socket.
+  `--serial-console` on the in-process runtime is unchanged.
 
 ## Delta images
 
@@ -166,6 +176,51 @@ close: the error is logged, and the slot stays held until the call
 returns and the normal path releases it. A second signal cancels the
 rest of that drain and still runs `Close` before exiting 130. A crash
 still skips the stop; the next process reclaims leftover pod directories.
+That reclaim is the in-process runtime (`--vm-supervisor` left off). With
+the flag on, the supervisor can keep the VM and the engine still leaves
+it unadopted. See [Per-VM supervisor](#per-vm-supervisor).
+
+## Per-VM supervisor
+
+A `VZVirtualMachine` cannot outlive the process that created it. The
+default, `--vm-supervisor=off`, keeps that VM in the agent, so a crash
+or upgrade stops it. `--vm-supervisor=on` moves each VM into
+`darwin-node --role=supervisor --slot=N` (`N` is 0 or 1). The two
+processes speak a versioned Unix protocol on `<run dir>/slot-N.sock`:
+`StartVM`, `InspectVM`, `PauseAndSaveVM`, `StopVM`, and
+`AttachChannels`. `AttachChannels` passes two `SCM_RIGHTS` descriptors:
+the supervisor's end of the datagram socketpair used as
+`VZFileHandleNetworkDeviceAttachment`, and a connected stream toward
+the guest agent. The supervisor does not parse the guest protocol.
+
+Production examples are LaunchAgents `io.darwin-node.slot-0` and
+`io.darwin-node.slot-1` in the `gui/<uid>` domain, with `KeepAlive`
+`{SuccessfulExit=false}`. After a supervisor exits 0, launchd leaves
+that slot stopped until `launchctl kickstart gui/$UID/io.darwin-node.slot-N`
+or the agent is using `--vm-supervisor-spawn=subprocess`.
+
+The engine does not call the adapter's `Recover` yet, so a restarted
+agent leaves a live supervisor VM unadopted. The guest agent still
+dials the host, while `AttachChannels` dials the guest, and those meet
+when the guest listens. The datagram descriptor is handed to the agent
+and is not bridged, so a guest booted with the flag on has no host
+network. A recovered machine has an empty guest-agent token because the
+lease does not store it. `PauseAndSaveVM` returns the framework error
+on macOS 13; the save API is macOS 14, and the minimum stays macOS 13.
+LaunchAgents, `launchctl`, and these Virtualization.framework calls are
+hardware-pending. The plist text is what CI checks.
+
+The operator notes, the 103-byte macOS socket-path limit, and the
+install steps are in [vm-supervisor.md](vm-supervisor.md) and
+[installation.md](installation.md). The decision is
+[ADR 0010](adr/0010-per-vm-supervisor.md).
+
+## Linux stand-in
+
+[simvz.md](simvz.md) is `pkg/runtime/simvz`, a `runtime.Runtime` that
+opens real sockets so the engine can boot, dial, and stop a VM on
+Linux. `--runtime` still selects `vz` or `fake`. SimVZ is not wired to
+that flag.
 
 ## Package map
 
@@ -176,6 +231,9 @@ still skips the stop; the next process reclaims leftover pod directories.
 | `pkg/runtime` | VM interface |
 | `pkg/runtime/vz` | Virtualization.framework (`darwin/arm64`) |
 | `pkg/runtime/fake` | In-process VM for tests |
+| `pkg/runtime/simvz` | Linux stand-in that opens real sockets. See [simvz.md](simvz.md). Not selected by `--runtime` |
+| `pkg/runtime/supervised` | Agent-side adapter that speaks the slot control socket when `--vm-supervisor=on` |
+| `pkg/supervisor` | Slot control socket, boot lease, peer-uid check. See [vm-supervisor.md](vm-supervisor.md) |
 | `pkg/guest` | Agent protocol, client, server, transports |
 | `pkg/capacity` | Slot table, fail-closed acquire/release |
 | `pkg/image` | OCI pull/cache/verify, clonefile overlay |
@@ -197,6 +255,7 @@ directly. The provider stays the Kubernetes *Pod* API.
 ## Trust boundaries
 
 - Host agent is a privileged, entitled process (Virtualization, optional vmnet).
+- With `--vm-supervisor=on`, the run directory (mode `0700`, owned by the service uid) and a same-uid peer check on the control socket are the local trust boundary for that VM. The in-process path is unchanged while the flag is off.
 - Guest agent runs as root *inside* the VM, not on the host.
 - vsock is host-process-only. The guest agent has no TCP transport.
   Guest-reported metrics and status text are untrusted.

@@ -357,6 +357,37 @@ fails the pod. This is a host-side check between ticks, not an APFS quota.
   quotes stay literal arguments rather than a remote shell.
 - Prefer baking the guest agent into images. SSH is last-resort exec only.
 
+## Per-VM supervisor
+
+`--vm-supervisor` defaults to `off`. The in-process VM, the kubelet TLS
+setup, the virtualization entitlement, and the guest agent's handshake
+stay as they are. With the flag on, the run directory is the local trust
+boundary for the slot. The full model is
+[vm-supervisor.md](vm-supervisor.md).
+
+- The run directory is mode `0700` and owned by the service user. The
+  boot lease `<run dir>/slots/slot-N/lease.json` is mode `0600`. Another
+  local user cannot connect or swap the lease.
+- On accept, the supervisor reads the peer uid (`LOCAL_PEERCRED` on
+  macOS, `SO_PEERCRED` on Linux) and requires it to equal its own uid.
+  `ENOTCONN` closes the connection. That close is not an authentication
+  failure and does not stop the VM. Root can still impersonate the uid.
+  The service account is the boundary.
+- The HMAC token in the lease stops a restarted agent from adopting a VM
+  whose lease was replaced. Anyone who can read the lease can replay it,
+  which is why the directory is `0700`. The lease does not store the
+  guest-agent token.
+- The supervisor does not parse the guest protocol. A hostile guest
+  cannot drive the control socket through the vsock stream. The stream
+  is handed to the agent.
+- A process running as the same uid can call `StopVM`. That is the same
+  privilege the in-process runtime has.
+- The datagram descriptor from `AttachChannels` is handed to the agent
+  and is not bridged to host NAT. A guest booted with the flag on has
+  no host network until that bridge exists.
+- `pkg/engine` does not call the adapter's `Recover`. A restarted agent
+  leaves a live supervisor VM unadopted.
+
 ## What we will not do
 
 - Accept SSH password authentication (including the former Agoda
