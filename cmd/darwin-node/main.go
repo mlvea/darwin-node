@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,13 +35,53 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
+// starter is the process body RunE calls after the config is resolved.
+// Tests pass a function that records the config and returns.
+type starter func(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdownGate) error
+
 func main() {
+	cmd, _, gate, err := buildCommand(run)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	// A second signal skips the rest of the drain. Close still runs
+	// before exit 130; Graceful blocks in that case so main cannot
+	// return 0 first. os.Exit does not return, so Release is unused here.
+	go watchSecondSignal(ctx, func() <-chan os.Signal {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		return sig
+	}, os.Exit, gate.Force)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		if gate.Forced() {
+			os.Exit(130)
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if gate.Forced() {
+		os.Exit(130)
+	}
+}
+
+func buildCommand(start starter) (*cobra.Command, *dnconfig.Config, *shutdownGate, error) {
 	cfg := dnconfig.Default()
+	// pflag writes each flag's default into the struct when the flag is
+	// registered. MergeEnv first so an omitted flag keeps the environment
+	// value, and an explicit flag replaces it. RunE must not call ApplyEnv.
+	if err := cfg.MergeEnv(); err != nil {
+		return nil, nil, nil, err
+	}
 	var standalone bool
 	gate := newShutdownGate()
 
@@ -49,14 +90,11 @@ func main() {
 		Short: "Apple Silicon Kubernetes node agent for native macOS VMs",
 		Long:  "darwin-node presents this Mac as a Kubernetes node and runs at most two macOS VMs as pods.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := cfg.ApplyEnv(); err != nil {
-				return err
-			}
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
 			observability.SetupSlog(cfg.LogLevel)
-			return run(cmd.Context(), cfg, standalone, gate)
+			return start(cmd.Context(), cfg, standalone, gate)
 		},
 	}
 	f := cmd.Flags()
@@ -64,6 +102,9 @@ func main() {
 	f.StringVar(&cfg.ProviderID, "provider-id", cfg.ProviderID, "provider ID reported to the API server")
 	f.StringVar((*string)(&cfg.Runtime), "runtime", string(cfg.Runtime), "vz (hardware) or fake (tests/CI)")
 	f.IntVar(&cfg.MaxVMs, "max-vms", cfg.MaxVMs, "max concurrent macOS VMs (1 or 2)")
+	f.Var(quantityValue{q: &cfg.ReservedCPU}, "reserved-cpu", "host CPUs withheld from Allocatable")
+	f.Var(quantityValue{q: &cfg.ReservedMemory}, "reserved-memory", "host memory withheld from Allocatable")
+	f.Var(quantityValue{q: &cfg.ReservedEphemeral}, "reserved-ephemeral", "host ephemeral-storage withheld from Allocatable")
 	f.IntVar(&cfg.WarmSlots, "warm-slots", cfg.WarmSlots, "pre-booted idle VMs kept in free slots (0-2); matching pods adopt them instead of cold-booting")
 	f.StringVar(&cfg.WarmImage, "warm-image", cfg.WarmImage, "image pre-booted into warm slots (default: most recently used image)")
 	f.BoolVar(&cfg.SerialConsole, "serial-console", cfg.SerialConsole, "attach a VM serial port for `darwin-node console` break-glass access")
@@ -95,28 +136,33 @@ func main() {
 
 	cmd.AddCommand(cmdDebugDump(&cfg))
 	cmd.AddCommand(cmdConsole(&cfg))
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	// A second signal skips the rest of the drain. Close still runs
-	// before exit 130; Graceful blocks in that case so main cannot
-	// return 0 first. os.Exit does not return, so Release is unused here.
-	go watchSecondSignal(ctx, func() <-chan os.Signal {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		return sig
-	}, os.Exit, gate.Force)
-	if err := cmd.ExecuteContext(ctx); err != nil {
-		if gate.Forced() {
-			os.Exit(130)
-		}
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if gate.Forced() {
-		os.Exit(130)
-	}
+	return cmd, &cfg, gate, nil
 }
+
+// quantityValue parses a Kubernetes quantity into a config field.
+// The pointer is copied with the value, so Set still updates cfg.
+type quantityValue struct{ q *resource.Quantity }
+
+func (v quantityValue) String() string {
+	if v.q == nil {
+		return "0"
+	}
+	return v.q.String()
+}
+
+func (v quantityValue) Set(s string) error {
+	q, err := resource.ParseQuantity(strings.TrimSpace(s))
+	if err != nil {
+		return err
+	}
+	if q.Sign() < 0 {
+		return fmt.Errorf("negative quantity %q", s)
+	}
+	*v.q = q
+	return nil
+}
+
+func (v quantityValue) Type() string { return "quantity" }
 
 func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdownGate) error {
 	if err := dnconfig.RequireKubeletTLS(standalone, cfg); err != nil {
@@ -423,7 +469,7 @@ func cmdDebugDump(cfg *dnconfig.Config) *cobra.Command {
 		Use:   "debug-dump",
 		Short: "Write a JSON snapshot of node/slot/pod state for web/debug.html",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := cfg.ApplyEnv(); err != nil {
+			if err := cfg.Validate(); err != nil {
 				return err
 			}
 			cfg.Runtime = types.RuntimeFake
