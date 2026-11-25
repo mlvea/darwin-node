@@ -97,7 +97,30 @@ allowed writer that exits 0 is cloned back into
 `<cache-dir>/cache-store/<ns>/<name>/` before the pod directory is
 removed, including a workload that ends by itself. A failed exit, a
 kill, and a delete of a pod that is still running leave the previous
-store. Failed starts never snapshot. No new guest protocol; no PVC/CSI.
+store. Failed starts never snapshot. The commit clones to `<store>.tmp`
+and renames it into place. A write annotation outside the allowlist
+emits `CacheReadOnly` and the share stays read-only. No new guest
+protocol; no PVC/CSI. The guest-side check that a read-only virtio-fs
+mount cannot be written is hardware-pending. Details:
+[cache-volumes.md](cache-volumes.md).
+
+## hostPort and attach
+
+`hostPort` is a userspace TCP proxy in `pkg/hostport` from the host port
+to `PodIP:containerPort`. Pod teardown calls `Release` when the pod is
+deleted or has failed. That closes the pod's listeners and every
+connection still spliced, so a removed hostPort does not leave the guest
+dialed. When one side ends, the proxy half-closes the other and fully
+closes both after 5 seconds. A dial to the guest gives up after 5
+seconds. One pod may hold 256 connections and the node 512, counting a
+dial that has not finished. The next connection is closed and is not
+dialed. There is no flag for these bounds. UDP is rejected.
+
+`kubectl attach` returns
+`attach is not supported; use kubectl exec or kubectl logs -f` for the
+VM container and for a sidecar. The guest agent can exec a new process
+and can follow the workload log. It has no RPC that joins the running
+workload's stdio, so attach does not start a shell.
 
 ## Interactive exec, follow logs, console
 

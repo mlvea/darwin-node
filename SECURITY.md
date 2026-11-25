@@ -51,6 +51,26 @@ tab and choose **Report a vulnerability**.
   `privileged`, `hostNetwork`, `hostPID`, `hostIPC`, `docker.sock`, and
   added capabilities are rejected before a VM slot is taken.
 - Image cache directories are `0700`.
+- Explicit flags win over `DARWIN_NODE_*` environment variables. The
+  stock launchd plist sets `--listen-address`. That flag is the kubelet
+  bind address. `DARWIN_NODE_LISTEN_ADDRESS` applies only when the flag
+  is omitted. A value the process cannot parse is an error at startup,
+  before `--help`.
+- Named caches are read-only unless `--cache-writers`
+  (`DARWIN_NODE_CACHE_WRITERS`, default empty) names the pod's namespace
+  or `namespace/serviceaccount` and the pod sets
+  `cache-write.darwin.node/<name>: "true"`. The store is replaced only
+  after exit 0, by cloning to a temporary directory and renaming it
+  into place. A write annotation outside the list emits `CacheReadOnly`
+  and the share stays read-only. A graceful delete of a pod that is
+  still running does not replace the cache. See
+  [docs/cache-volumes.md](docs/cache-volumes.md). Confirming that a
+  booted guest cannot write through the read-only virtio-fs mount is
+  hardware-pending.
+- `kubectl attach` returns an error and does not start a shell. Use
+  `kubectl exec` or `kubectl logs -f`.
+- hostPort listeners and spliced connections close when the pod is
+  deleted or fails. There is no flag for that lifecycle.
 - A warm VM adopted by a pod gets a fresh agent token. The pod's own
   pull credentials are checked again before that adoption when a
   committed image cache exists. See [docs/security.md](docs/security.md).

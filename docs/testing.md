@@ -13,7 +13,9 @@ make test-short
 - Image config parse (Darwin-Node + Agoda media types)
 - Node capacity math (reserved CPU/memory)
 - Fake runtime lifecycle (create/start/stop/IP)
-- hostPort conflict detection, and loopback tests for half-close, linger, release, dial timeout, and connection caps (no Apple networking)
+- hostPort conflict detection, and loopback tests for half-close, linger, release on pod teardown, dial timeout, and connection caps (no Apple networking)
+- `kubectl attach` returns an error for the VM container and for a sidecar, and does not start a shell
+- Named-cache write-back only after exit 0, including the `CacheReadOnly` event when the write annotation is outside `--cache-writers`
 - Adopt/delete soak on the fake runtime (`pkg/soak`): both VM slots, cache
   snapshot after exit 0 and restore, fd/dir/slot drift, a refused third VM,
   recovery after an injected start failure
@@ -46,6 +48,10 @@ make soak IMAGE=out/macos-15
 
 `make soak` with no `IMAGE`, and `go test` on Linux, stay green without
 that checklist. They do not mark it done.
+
+The virtio-fs read-only bit on a named cache is set in unit tests. A
+booted macOS guest has not been used to confirm the guest cannot write
+through that mount. That check is hardware-pending.
 
 Host-side checks that Linux does run:
 

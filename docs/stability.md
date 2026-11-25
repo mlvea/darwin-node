@@ -8,7 +8,7 @@ word "alpha" in the README has a precise meaning.
 
 | Tier | What it covers | Status |
 |---|---|---|
-| Unit + race (`make test`) | Engine lifecycle, warm pool, caches, drain, agent protocol, image format, deltas | Linux CI and hosted macOS CI run this on every push and pull request, with `-race`. A hosted macOS job can be cancelled when GitHub has no runner ("not acquired by runner"), so a push is not guaranteed a finished macOS result. When the job runs, the race detector is part of it |
+| Unit + race (`make test`) | Engine lifecycle, warm pool, caches (write-back only after exit 0), drain, hostPort proxy lifecycle (half-close, release on pod teardown, dial timeout, connection caps), attach refusal, agent protocol, image format, deltas | Linux CI and hosted macOS CI run this on every push and pull request, with `-race`. A hosted macOS job can be cancelled when GitHub has no runner ("not acquired by runner"), so a push is not guaranteed a finished macOS result. When the job runs, the race detector is part of it |
 | Leak discipline (`internal/leakcheck`) | No module goroutines survive engine/guest lifecycle tests | Enforced continuously |
 | Failure injection (`pkg/engine/inject_test.go`) | Runtime Create/Start/Dial failures: fail closed, slots freed, state reclaimed, node reusable | Green |
 | Adversarial protocol (`pkg/guest/adversarial_test.go`) | Garbage bytes, oversized frames, wrong versions, stray stream frames, unknown methods | Green |
@@ -65,7 +65,10 @@ Without IMAGE set it prints SKIP and exits zero, so CI can invoke it
 unconditionally; pass `--strict` to fail instead. A boot of about 48s
 fits in the default `--agent-ready-timeout` of 2m. A dial that still
 fails is retried; the pod stays Pending until it succeeds or the error
-is permanent.
+is permanent. This gate does not boot a guest to confirm that a
+read-only named-cache mount rejects writes. That check is still
+hardware-pending. The snapshot gate itself (commit only after exit 0)
+is covered by the unit tier.
 
 ## Running the soak
 

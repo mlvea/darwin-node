@@ -179,41 +179,79 @@ period, or launchd kills the process before that commit runs.
 
 ## Configuration
 
-Precedence is defaults, then environment variables, then explicit flags. `MergeEnv` runs before the flags are registered, so an omitted flag keeps the environment value and a flag on the command line replaces it. A malformed `DARWIN_NODE_*` value is an error before flags are parsed.
+Precedence is defaults (`config.Default()` in `pkg/config/config.go`), then environment variables (`MergeEnv` in `pkg/config/env.go`), then explicit flags (`buildCommand` in `cmd/darwin-node/main.go`). `MergeEnv` runs before the flags are registered, so an omitted flag keeps the environment value and a flag on the command line replaces it. `--help` prints those flag defaults after the environment has been applied.
 
-Host keep-away is subtracted from Allocatable. The defaults are 2 CPUs, 4Gi of memory, and 20Gi of ephemeral storage. Set them with `DARWIN_NODE_RESERVED_CPU`, `DARWIN_NODE_RESERVED_MEMORY`, and `DARWIN_NODE_RESERVED_EPHEMERAL`, or with `--reserved-cpu`, `--reserved-memory`, and `--reserved-ephemeral`. Values are Kubernetes quantities (`500m`, `6Gi`). Notable:
+A value `MergeEnv` cannot parse is an error before flags are parsed, including before `--help`. That is a bad integer, duration, Kubernetes quantity, or graphics string, and `DARWIN_NODE_IMAGE_GC` set to anything other than `true`, `1`, `false`, or `0`. A value that parses and then fails `Validate` (`pkg/config/validate.go`) is an error when the command runs. The flag is already applied, so it can stand in for an environment value that would not validate. `Validate` rejects max VMs outside 1 or 2, warm slots outside 0–2, an unknown runtime or network mode, bridged mode with no interface, a negative duration, image GC thresholds out of range, a metrics address that is not `host:port` while metrics are on, a cache-writer entry that is not a namespace or `namespace/serviceaccount`, and any non-empty `DARWIN_NODE_SSH_PASSWORD` or `VZ_SSH_PASSWORD`.
+
+`DARWIN_NODE_ALLOW_NAT_WORKLOADS`, `DARWIN_NODE_SERIAL_CONSOLE`, and `DARWIN_NODE_ENABLE_SSH_FALLBACK` turn on only for `true` or `1`. Any other non-empty value leaves them off and is not a parse error. An empty variable leaves the current value, except `DARWIN_NODE_METRICS_ADDRESS`: setting that variable to empty turns metrics off. `DARWIN_NODE_AGENT_TCP_FALLBACK` is read and ignored.
+
+Host keep-away is subtracted from Allocatable. The defaults are 2 CPUs, 4Gi of memory, and 20Gi of ephemeral storage. Set them with `DARWIN_NODE_RESERVED_CPU`, `DARWIN_NODE_RESERVED_MEMORY`, and `DARWIN_NODE_RESERVED_EPHEMERAL`, or with `--reserved-cpu`, `--reserved-memory`, and `--reserved-ephemeral`. Values are Kubernetes quantities (`500m`, `6Gi`).
+
+`MergeEnv` reads every variable below. The flag column is the matching `buildCommand` flag. Where that column is empty, there is no flag.
+
+| Variable | Default | Flag | Meaning |
+|---|---|---|---|
+| `DARWIN_NODE_NAME` | lower-cased hostname | `--nodename` | Kubernetes node name |
+| `DARWIN_NODE_RUNTIME` | `vz` | `--runtime` | `vz` (hardware) or `fake` (tests/CI) |
+| `DARWIN_NODE_MAX_VMS` | `2` | `--max-vms` | Concurrent VMs. Must be 1 or 2 |
+| `DARWIN_NODE_RESERVED_CPU` | `2` | `--reserved-cpu` | CPUs withheld from Allocatable |
+| `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | `--reserved-memory` | Memory withheld from Allocatable |
+| `DARWIN_NODE_RESERVED_EPHEMERAL` | `20Gi` | `--reserved-ephemeral` | Ephemeral storage withheld from Allocatable |
+| `DARWIN_NODE_WARM_SLOTS` | `0` | `--warm-slots` | Pre-booted idle VMs in free slots. Must be 0, 1, or 2 |
+| `DARWIN_NODE_WARM_IMAGE` | empty | `--warm-image` | Image pre-booted into warm slots. Empty uses the most recently used image |
+| `DARWIN_NODE_NETWORK_MODE` | `nat` | `--network-mode` | `nat` or `bridged`. `disabled` passes `Validate` and the VM still gets a NAT device unless the mode is `bridged` with an interface |
+| `DARWIN_NODE_BRIDGE_INTERFACE` | empty | `--bridge-interface` | Required when the mode is bridged. Setting this while the mode is `nat` selects bridged. `VZ_BRIDGE_INTERFACE` is used only when this variable is empty, and it also selects bridged |
+| `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | `--allow-nat-workloads` | `true` or `1` skips the `nat-only` taint. The default still applies that taint |
+| `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | `--cache-dir` | Images, overlays, and named-cache stores |
+| `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | `--cache-writers` | Comma-separated namespaces or `namespace/serviceaccount` allowed to write named caches back after exit 0. A pod must also set `cache-write.darwin.node/<name>: "true"`. See [cache-volumes.md](cache-volumes.md) |
+| `DARWIN_NODE_ALLOWED_HOST_PATHS` | empty (deny all) | `--allowed-host-paths` | Comma-separated hostPath prefixes guests may use |
+| `DARWIN_NODE_GRAPHICS` | `1920x1200@80` |  | `WxH@PPI`. `none` disables Metal |
+| `DARWIN_NODE_LISTEN_ADDRESS` | `127.0.0.1` | `--listen-address` | Kubelet HTTP bind address. The flag wins. An empty address binds every interface |
+| `KUBELET_PORT` | `10250` |  | Kubelet HTTP port. There is no flag |
+| `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | `--shutdown-grace-period` | Total drain budget on SIGTERM. launchd `ExitTimeOut` must be larger; see Shutdown behavior |
+| `DARWIN_NODE_AGENT_READY_TIMEOUT` | `2m` | `--agent-ready-timeout` | Budget for each guest-agent dial and ready check |
+| `DARWIN_NODE_SERIAL_CONSOLE` | `false` | `--serial-console` | `true` or `1` attaches break-glass serial ports |
+| `DARWIN_NODE_IMAGE_GC` | `true` | `--image-gc` | Delete unused images and cache stores under disk pressure. Only `true`, `1`, `false`, and `0` parse |
+| `DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD` | `85` | `--image-gc-high-threshold` | Percent used at which GC starts. Must be 1–100 while GC is on |
+| `DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD` | `80` | `--image-gc-low-threshold` | Percent used at which GC stops. Must be below the high threshold |
+| `DARWIN_NODE_IMAGE_GC_INTERVAL` | `5m` | `--image-gc-interval` | How often GC evaluates the cache filesystem |
+| `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | `--metrics-address` | Prometheus bind. `off`, `disabled`, `-`, or empty disables it. Unset keeps the default. Not node_exporter's 9100 |
+| `DARWIN_NODE_INSECURE_REGISTRIES` | empty | `--insecure-registry` | Comma-separated registries allowed over plain HTTP. Loopback is always allowed |
+| `DARWIN_NODE_MAX_IMAGE_BYTES` | 256GiB | `--max-image-bytes` | Maximum declared or decompressed image size (`256 << 30` bytes) |
+| `DARWIN_NODE_MAX_IMAGE_COMPRESSED_BYTES` | 256GiB | `--max-image-compressed-bytes` | Maximum compressed blob size (`256 << 30` bytes) |
+| `DARWIN_NODE_IMAGE_DISK_HEADROOM` | 10GiB | `--image-disk-headroom` | Free bytes that must remain on the cache filesystem after an image write (`10 << 30` bytes) |
+| `DARWIN_NODE_IMAGE_PULL_TIMEOUT` | `30m` | `--image-pull-timeout` | Deadline for one image pull |
+| `DARWIN_NODE_IMAGE_READ_STALL` | `2m` | `--image-read-stall` | Fail a pull when a registry read makes no progress for this long |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty |  | Turns on OpenTelemetry trace export |
+| `DARWIN_NODE_ENABLE_SSH_FALLBACK` | `false` |  | `true` or `1` turns on SSH for images with no agent |
+| `DARWIN_NODE_SSH_USER` | empty |  | SSH user. `VZ_SSH_USER` is used when this is empty |
+| `DARWIN_NODE_SSH_PRIVATE_KEY_PATH` | empty |  | Key path. `VZ_SSH_PRIVATE_KEY_PATH` is used when this is empty |
+| `DARWIN_NODE_SSH_PRIVATE_KEY_BASE64` | empty |  | Key bytes. `VZ_SSH_PRIVATE_KEY_BASE64` is used when this is empty |
+| `DARWIN_NODE_SSH_KNOWN_HOSTS` | empty |  | known_hosts file for the SSH fallback |
+| `DARWIN_NODE_SSH_HOST_KEY` | empty |  | OpenSSH authorized_keys line that pins the guest host key |
+| `DARWIN_NODE_SSH_PASSWORD` | empty |  | Rejected at `Validate`, as is `VZ_SSH_PASSWORD`. Password auth is not a fallback |
+| `DARWIN_NODE_AGENT_TCP_FALLBACK` | ignored |  | Setting it does nothing. The guest agent is reached only over vsock |
+
+Kubernetes connection (same names Virtual Kubelet reads, plus the listen address above):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DARWIN_NODE_MAX_VMS` | `2` | Must be 1 or 2 |
-| `DARWIN_NODE_RESERVED_CPU` | `2` | CPUs withheld from Allocatable. Same as `--reserved-cpu` |
-| `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | Memory withheld from Allocatable. Same as `--reserved-memory` |
-| `DARWIN_NODE_RESERVED_EPHEMERAL` | `20Gi` | Ephemeral storage withheld from Allocatable. Same as `--reserved-ephemeral` |
-| `DARWIN_NODE_NETWORK_MODE` | `nat` | `nat` or `bridged` |
-| `DARWIN_NODE_BRIDGE_INTERFACE` | empty | Required for bridged |
-| `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Do not taint NAT nodes |
-| `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Images + overlays |
-| `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Comma-separated namespaces or `namespace/serviceaccount` allowed to write named caches back. A pod must also set `cache-write.darwin.node/<name>: "true"`. Used when `--cache-writers` is omitted. An explicit `--cache-writers` wins |
-| `DARWIN_NODE_GRAPHICS` | `1920x1200@80` | `none` disables Metal |
-| `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM. launchd `ExitTimeOut` must be larger; see Shutdown behavior |
-| `DARWIN_NODE_AGENT_READY_TIMEOUT` | `2m` | Budget for each guest-agent dial and ready check |
-| `DARWIN_NODE_SERIAL_CONSOLE` | `false` | Attach break-glass serial ports |
-| `DARWIN_NODE_IMAGE_GC` | `true` | Delete unused images and cache stores under disk pressure from the thresholds below |
-| `DARWIN_NODE_IMAGE_GC_HIGH_THRESHOLD` | `85` | Percent used at which GC starts |
-| `DARWIN_NODE_IMAGE_GC_LOW_THRESHOLD` | `80` | Percent used at which GC stops. Must be below the high threshold |
-| `DARWIN_NODE_IMAGE_GC_INTERVAL` | `5m` | How often GC evaluates the cache filesystem |
-| `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus bind. `off`, `disabled`, `-`, or empty disables it. Not node_exporter's 9100 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables traces |
+| `KUBECONFIG` | `~/.kube/config` | Kubeconfig path. Same as `--kubeconfig`. User should be `system:node:<nodename>` in group `system:nodes` |
+| `APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION` | empty | Kubelet server cert and key. Required in cluster mode. No flag |
+| `APISERVER_CA_CERT_LOCATION` | empty | Kubelet client CA. Required in cluster mode. No flag |
 
-Kubernetes connection (same as Virtual Kubelet):
+### Flags with no environment variable
 
-| Variable | Meaning |
-|---|---|
-| `KUBECONFIG` | kubeconfig path. User should be `system:node:<nodename>` in group `system:nodes` |
-| `APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION` | kubelet server cert and key. Required in cluster mode |
-| `APISERVER_CA_CERT_LOCATION` | kubelet client CA. Required in cluster mode |
-| `KUBELET_PORT` | default `10250` |
-| `DARWIN_NODE_LISTEN_ADDRESS` | kubelet HTTP bind address. Default `127.0.0.1`. Used when `--listen-address` is omitted. An explicit `--listen-address` wins |
+These are registered in `buildCommand` and are not read from the environment. `--startup-timeout` is the zero duration: `config.Default()` does not set it.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--provider-id` | empty | Provider ID reported to the API server |
+| `--disable-taint` | `false` | Do not taint the node |
+| `--log-level` | `info` | `debug`, `info`, `warn`, or `error`. The stock plist passes this flag |
+| `--standalone` | `false` | Run the engine without joining a cluster |
+| `--startup-timeout` | `0` | Passed to virtual-kubelet `Node.WaitReady`. `0` adds no deadline: the call waits until the node is Ready, the controller exits, or the process context ends |
+| `--init-timeout` | `2m` | Maximum wait for each init container |
 
 ## Helm (optional skeleton)
 

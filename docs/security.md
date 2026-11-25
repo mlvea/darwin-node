@@ -47,7 +47,9 @@
   need this set to the address that server dials, which is the node's
   InternalIP. `0.0.0.0` or an empty value binds every interface. Use that
   only when every interface on the Mac is trusted. `DARWIN_NODE_LISTEN_ADDRESS`
-  overrides the flag when it is set.
+  applies when `--listen-address` is omitted. An explicit flag wins,
+  including the `--listen-address` in the stock launchd plist. A value
+  `MergeEnv` cannot parse is an error before that flag is read.
 
 ## API-server auth test
 
@@ -279,7 +281,12 @@ is not subject to these checks.
   An arbitrary pod cannot replace a named cache: the share is read-only
   unless `cache-write.darwin.node/<name>` is `true` and `--cache-writers`
   names that namespace or ServiceAccount, and the commit runs only after
-  exit 0.
+  exit 0, by cloning to `<store>.tmp` and renaming it into place. A write
+  annotation outside the list emits `CacheReadOnly` and the share stays
+  read-only. A graceful delete of a pod that is still running leaves the
+  previous store. See [cache-volumes.md](cache-volumes.md). The virtio-fs
+  read-only bit is what the guest mount is given; confirming a booted
+  macOS guest cannot write through it still needs Apple hardware.
   APFS snapshots taken while secret files still exist on disk may retain
   those bytes until the snapshot is dropped.
 
