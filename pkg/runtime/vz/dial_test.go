@@ -38,7 +38,7 @@ func TestAgentDialContextCapsWhenNoDeadline(t *testing.T) {
 	}
 }
 
-func TestVsockAttemptLeavesTCPReserve(t *testing.T) {
+func TestVsockAttemptUsesFullBudget(t *testing.T) {
 	parent, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	ctx, cancel2 := vsockAttemptContext(parent)
@@ -49,12 +49,14 @@ func TestVsockAttemptLeavesTCPReserve(t *testing.T) {
 	}
 	parentDL, _ := parent.Deadline()
 	gap := parentDL.Sub(dl)
-	if gap < 4*time.Second || gap > 6*time.Second {
-		t.Fatalf("vsock deadline is %v before parent, want ~5s", gap)
+	// TCP fallback is gone. Holding back part of the dial budget left a
+	// slow guest with less than AgentReadyTimeout to connect.
+	if gap > 50*time.Millisecond {
+		t.Fatalf("vsock deadline is %v before parent; the dial budget was reserved for TCP", gap)
 	}
 }
 
-func TestVsockAttemptSplitsShortBudget(t *testing.T) {
+func TestVsockAttemptUsesShortBudget(t *testing.T) {
 	parent, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	ctx, cancel2 := vsockAttemptContext(parent)
@@ -64,8 +66,9 @@ func TestVsockAttemptSplitsShortBudget(t *testing.T) {
 		t.Fatal("expected deadline")
 	}
 	parentDL, _ := parent.Deadline()
-	if !dl.Before(parentDL) {
-		t.Fatal("short budget must still leave time after the vsock attempt")
+	gap := parentDL.Sub(dl)
+	if gap > 50*time.Millisecond {
+		t.Fatalf("vsock deadline is %v before parent; the dial budget was reserved for TCP", gap)
 	}
 }
 

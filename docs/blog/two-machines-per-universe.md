@@ -321,13 +321,10 @@ The transport hierarchy is short and strict:
 
 ```
   ┌──────────────────────────────────────────────────────────────┐
-  │ 1. vsock        device-bus socket, host↔guest, point-to-point│  preferred
+  │ 1. vsock        device-bus socket, host↔guest, point-to-point│  only agent path
   │                 not routed, not reachable from other VMs     │
   ├──────────────────────────────────────────────────────────────┤
-  │ 2. TCP          plaintext, opt-in (--agent-tcp-fallback),    │  escape hatch
-  │                 off by default, token+nonce gated            │
-  ├──────────────────────────────────────────────────────────────┤
-  │ 3. SSH          opt-in, key-only, pinned host key, argv-     │  last resort
+  │ 2. SSH          opt-in, key-only, pinned host key, argv-     │  last resort
   │                 quoted, for images without the agent baked in│
   └──────────────────────────────────────────────────────────────┘
 ```
@@ -386,8 +383,8 @@ Note the middle case, because it is the whole security posture in six lines.
 The original sin of this codebase's ancestor was `if h.Token != "" && req.Token
 != h.Token` — an empty token accepted everyone. The fix wasn't adding a check;
 it was *inverting the default*. An agent that cannot prove which pod it
-belongs to serves nothing, and the TCP listener doesn't even open until a
-non-empty token appears on the control share. A missing virtio-fs mount
+belongs to serves nothing. The agent does not listen on TCP, so a
+missing token cannot fall open onto a plaintext socket. A missing virtio-fs mount
 degrades to "unreachable," never to "unauthenticated."
 
 The per-pod token itself is 32 random bytes generated at admission, written
@@ -469,10 +466,12 @@ sticky, the ARP-cache fallback stays meaningful, and a liveness-triggered VM
 restart doesn't look like new hardware to the network.
 
 The second is the **dial discipline**. Early versions tried transports
-sequentially — vsock accept to completion, then connect, then TCP — which
-meant a wedged vsock consumed the whole boot budget before the fallback ever
-got its turn, silently, while the user stared at `Pending`. Today the dial is
-capped at 45 seconds regardless of caller context, progress is narrated as
+sequentially — vsock accept to completion, then connect, then plaintext
+TCP — which meant a wedged vsock consumed the whole boot budget before
+the fallback ever got its turn. That TCP path is gone: over the shared
+NAT the other VM could read the token or stall the dial. Today the
+vsock attempt uses the whole caller deadline (45 seconds when the caller
+set none), progress is narrated as
 events (`Created → Starting → VMDialing → Started`) so `kubectl describe`
 reads like a story instead of a shrug, and the host is strictly an
 *acceptor*: on timeout the listener closes and any late guest connection is
@@ -631,10 +630,12 @@ later somewhere confusing. Every one of those was, at some point, a bug that
 failed open — which is why the rule is phrased as a search-and-destroy
 mission rather than a design principle.
 
-**The escape hatches are loud.** Dev-only insecure token acceptance, TCP
-fallback, and SSH each require an explicit flag, and SSH additionally demands
-a pinned host key and refuses passwords outright. A fallback that activates
-silently isn't a fallback; it's a second, unaudited product.
+**The escape hatches are loud.** Dev-only insecure token acceptance and
+SSH each require an explicit flag, and SSH additionally demands a pinned
+host key and refuses passwords outright. The plaintext TCP guest-agent
+fallback was removed rather than left as a flag: a path that sends the
+pod token across the shared NAT is not an escape hatch. A fallback that
+activates silently isn't a fallback; it's a second, unaudited product.
 
 **Anything that can write the cache can rewrite reality** — hence `0700`, and
 hence provenance anchored at pull time rather than reconstructed from local
@@ -654,10 +655,12 @@ poisoned autoscaling signals for the whole cluster.
 So the reporting layer is built on one negative rule: **never fabricate a
 number you did not measure.**
 
-- Node CPU/memory usage comes from host measurement, pod CPU/memory from the
-  guest agent's own sampler over vsock. If the agent doesn't answer, that
-  pod's stats are *omitted* — a gap metrics-server tolerates — rather than
-  replaced with capacity-as-usage, which it does not.
+- Node CPU/memory usage comes from host measurement. Pod CPU/memory comes
+  from the guest agent's own sampler over vsock when that agent advertises
+  the `metrics` capability. Those figures are untrusted telemetry from a
+  root guest, not a scheduling input. If the agent doesn't answer, or
+  doesn't advertise the capability, the series fall back to the configured
+  VM size (`source=allocation`) rather than publishing zeros.
 - Per-container stats exist because `kubectl top pods` renders containers,
   not just pods; a summary missing them is technically valid and practically
   broken.

@@ -577,6 +577,10 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		if err := h.checkNonce(req.Nonce); err != nil {
 			return reply(nil, err), nil
 		}
+		chosen, perr := selectProtocol(req.MinProtocol, req.MaxProtocol)
+		if perr != nil {
+			return reply(nil, &CallError{Code: "protocol", Message: perr.Error()}), nil
+		}
 		handshook.Store(true)
 		host, _ := os.Hostname()
 		metal := false
@@ -590,10 +594,11 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			AgentVersion:   h.AgentVersion,
 			Hostname:       host,
 			OSVersion:      runtime.GOOS + "/" + runtime.GOARCH,
-			Protocol:       ProtocolVersion,
+			Protocol:       chosen,
 			MetalAvailable: metal,
 			IdleMS:         int(h.idleTimeout() / time.Millisecond),
 			StdinWindow:    DefaultStdinWindow,
+			Capabilities:   GuestCapabilities(),
 		}, nil), nil
 
 	case MethodHealth:

@@ -36,11 +36,8 @@ const (
 	TaintProviderVal = "darwin-node"
 )
 
-// Well-known guest-agent ports.
-const (
-	GuestVsockPort = 50051
-	GuestTCPPort   = 1050
-)
+// GuestVsockPort is the virtio-vsock port the guest agent dials.
+const GuestVsockPort = 50051
 
 // Pod annotation prefix for persistent CoW cache volumes. Each annotation
 // "cache.darwin.node/<name>: <absolute-guest-path>" declares one cache: the

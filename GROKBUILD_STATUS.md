@@ -9,6 +9,18 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — guest-agent trust boundary (batch J)
+
+- **Items:** S-12, workload exit clamp and guest text bound, 64 KiB control frames, handshake capabilities, B-13, B-26.
+- **S-12:** the host dialed plaintext TCP to port 1050 whenever vsock failed and sent the pod token on that socket. `AgentTCPFallback` was never read, so the setting in SECURITY.md did not match the code. The TCP dial, the guest-agent listener, `--agent-tcp-fallback`, `--listen`, `DARWIN_NODE_AGENT_TCP_FALLBACK`, and `GuestTCPPort` are removed. vsock uses the caller's full dial deadline. SSH fallback is unchanged.
+- **Exit and text:** guest workload exit codes are stored in 0..255 (below 0 becomes 0, above 255 becomes 255). A guest can still report 0. Guest text written to PodStatus or an event is truncated to 1024 printable UTF-8 characters. Exit reasons still have to be CamelCase of at most 128 characters.
+- **Frames:** handshake, health, probe, exit, and the other non-stream RPCs are capped at 64 KiB. Stream and materialize frames stay at 16 MiB. An over-limit frame, or JSON nested deeper than 32, closes the session. Unknown JSON fields are still accepted.
+- **Handshake:** the host sends `minProtocol`, `maxProtocol`, and its capability list. The guest replies with the selected protocol, its version, and its own list. The session exposes the intersection (`Protocol`, `HasCapability`, `Capabilities`). An older agent that omits the list keeps working with an empty set. `PodMetrics` returns false without the `metrics` capability so `kubectl top` uses the VM allocation instead of zeros.
+- **B-13:** `ExecInVM` returns an error that implements `k8s.io/utils/exec.ExitError`, which virtual-kubelet maps to the exec exit code. Exit 0 is nil. A transport error stays a plain error. The SSH fallback in the same function does this too. Sidecar `docker exec` still returns a plain `exit code N` error; that package was left alone.
+- **B-26:** an `httpGet` or `tcpSocket` probe whose port is a name is resolved from that container's ports, including sidecars. An unknown name stays port 0 and the probe fails. The guest agent samples CPU and memory with gopsutil (working set is total minus available; CPU is the busy fraction of the aggregate times the logical core count). The first CPU sample is 0. Linux CI runs that path. The numbers are untrusted telemetry, not a scheduling input.
+- **Open risks:** a guest that reports exit 0 is still treated as success. Guest metrics can lie; they only affect `kubectl top`. Real vsock on a booted VM is not covered here. Sidecar exec exit codes are still a plain error.
+- **Next priority:** map sidecar exec's non-zero status the same way, then a hardware pass of vsock handshake and guest metrics on a booted VM.
+
 ### 2026-11-25 (Asia/Singapore) — client Close stops the host heartbeat
 
 - The macOS `-race` push run of `c7ce7e5` failed `TestHybridSidecarStaysReadyWhileRunning` with one `(*Client).heartbeatLoop` goroutine still parked after the test. The pull_request run of the same SHA passed. `Close` only closed the connection, so the loop waited on `Session.closed`, which the read loop closes after `Read` returns. `Close` now cancels the loop itself and waits for it to leave. `TestClientCloseStopsHeartbeat` fails if the loop is still on the stack when `Close` returns.

@@ -132,9 +132,21 @@ func TestTCPFallbackAfterExhaustedVsockBudget(t *testing.T) {
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	p := waitPhase(t, e, "default", "fb", corev1.PodRunning)
-	if p.Status.Phase != corev1.PodRunning {
-		t.Fatalf("phase %s (%s)", p.Status.Phase, p.Status.Message)
+	// The guest is not reachable on vsock. A plaintext TCP dial would
+	// accept here and send the pod token. That path is removed.
+	deadline := time.Now().Add(700 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		accepted.Lock()
+		n := len(conns)
+		accepted.Unlock()
+		if n > 0 {
+			t.Fatal("host dialed the guest agent over plaintext TCP")
+		}
+		p, err := e.Get("default", "fb")
+		if err == nil && p.Status.Phase == corev1.PodRunning {
+			t.Fatalf("pod became Running without vsock (%s)", p.Status.Message)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	_ = e.Delete(context.Background(), "default", "fb", 0)
 }
