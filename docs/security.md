@@ -182,6 +182,60 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
   allowlist.
 - `HostPathType` is enforced: Directory, File, Socket, CharDevice,
   BlockDevice, plus DirectoryOrCreate / FileOrCreate (those two may create).
+- A sidecar bind resolves the path again (`EvalSymlinks`) and checks the
+  allowlist on that result. Docker receives the resolved path. A symlink
+  whose target leaves the allowlist, or whose final path is `docker.sock`,
+  is rejected. Replacing the original symlink after that check does not
+  change the mount. Replacing the resolved directory itself is still a
+  host-root race.
+
+## Sidecars
+
+Linux sidecars and init containers run in host Docker. The VM container
+is not subject to these checks.
+
+- Each pod gets its own bridge network (`darwin-node-<uid>`). Containers
+  in that pod share it. The bridge is not `--internal`: the daemon's
+  gateway can still reach the host network. A pod's network is removed
+  with the pod, and a network labeled `darwin-node=pod` with that name
+  prefix is removed if the process finds it still there at startup.
+- `runAsUser`, `runAsGroup`, `readOnlyRootFilesystem`, and capability
+  drops are applied. `no-new-privileges` is always set. `privileged`,
+  `allowPrivilegeEscalation: true`, added capabilities, `hostNetwork`,
+  `hostPID`, and `hostIPC` are rejected at admission, before a VM slot
+  is taken. `runAsNonRoot` requires an explicit non-zero `runAsUser`.
+  The image `USER` is not inspected. `supplementalGroups`, `fsGroup`,
+  seccomp, and AppArmor are not applied.
+- A mount of `docker.sock`, including a symlink that resolves to a file
+  of that name, is rejected.
+- HTTP and TCP probes dial the container address from Docker inspect.
+  An empty host, `localhost`, or a loopback address means that container
+  address. Any other host is rejected and is not dialed. Loopback,
+  unspecified, link-local, and multicast inspect results are refused, so
+  a probe cannot target the node's own addresses. A named port is
+  resolved from that container's ports before the dial. An unknown name
+  stays port 0, the probe fails, and nothing is dialed. The HTTP client does
+  not use `HTTP_PROXY` and does not follow redirects. A failure message
+  is `HTTP <code>`, `probe dial failed`, `probe timed out`, or
+  `probe canceled`. Response bodies are discarded and are not written
+  to pod events or conditions. On a Mac where the host cannot route to
+  the Docker bridge, the probe fails with `probe dial failed`.
+- `valueFrom` (`configMapKeyRef`, `secretKeyRef`, `fieldRef`,
+  `resourceFieldRef`) is resolved for the sidecar. `envFrom` is
+  rejected. A missing non-optional key fails the container. The error
+  does not include the secret value.
+- Sidecar image pulls use the pod's `imagePullSecrets`, matched to the
+  image registry the same way VM pulls are. A secret for one registry
+  is not sent to another.
+- CPU and memory limits are the container's hard cap (`NanoCPUs`,
+  `Memory`). Requests set shares and memory reservation, and they are
+  the cap when no limit is set.
+- `subPath` is the file or directory inside the volume, after symlink
+  resolution, and it must stay inside that volume. `subPathExpr` is
+  rejected. The runtime does not create missing `subPath` directories.
+- An exec probe's stream is closed when its context ends, so a probe
+  that never returns does not hold pod delete or the VM slot. `kubectl
+  exec` copies stdin. `kubectl logs` with no tail reads the whole log.
 
 ## Secrets and ConfigMaps
 

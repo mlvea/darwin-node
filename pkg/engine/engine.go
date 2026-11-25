@@ -886,7 +886,7 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 			e.fail(rec, err)
 			return
 		}
-		if err := e.sidecar.Create(ctx, pod, pod.Spec.Containers[i], volRoot); err != nil {
+		if err := e.sidecar.Create(sidecar.WithCreateOptions(ctx, e.sidecarCreateOptions(creds)), pod, pod.Spec.Containers[i], volRoot); err != nil {
 			e.fail(rec, err)
 			return
 		}
@@ -1926,7 +1926,7 @@ func (e *Engine) runInitContainers(ctx context.Context, rec *podRecord, pod *cor
 			return err
 		}
 		e.events.Normal(ctx, event.ReasonInitStarted, "init container "+ic.Name)
-		if err := e.sidecar.Create(ctx, pod, ic, volRoot); err != nil {
+		if err := e.sidecar.Create(sidecar.WithCreateOptions(ctx, e.sidecarCreateOptions(creds)), pod, ic, volRoot); err != nil {
 			return err
 		}
 		st, err := e.waitSidecarExit(ctx, pod.Namespace, pod.Name, ic.Name)

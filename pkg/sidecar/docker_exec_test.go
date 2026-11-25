@@ -23,6 +23,9 @@ type execDocker struct {
 	running    bool
 	inspectErr error
 	inspected  int
+	block      net.Conn
+	stdinConn  net.Conn
+	attached   chan struct{}
 }
 
 func (f *execDocker) ContainerExecCreate(context.Context, string, types.ExecConfig) (types.IDResponse, error) {
@@ -30,6 +33,19 @@ func (f *execDocker) ContainerExecCreate(context.Context, string, types.ExecConf
 }
 
 func (f *execDocker) ContainerExecAttach(context.Context, string, types.ExecStartCheck) (types.HijackedResponse, error) {
+	if f.attached != nil {
+		select {
+		case <-f.attached:
+		default:
+			close(f.attached)
+		}
+	}
+	if f.block != nil {
+		return types.HijackedResponse{Conn: f.block, Reader: bufio.NewReader(f.block)}, nil
+	}
+	if f.stdinConn != nil {
+		return types.HijackedResponse{Conn: f.stdinConn, Reader: bufio.NewReader(strings.NewReader(f.stdout))}, nil
+	}
 	left, right := net.Pipe()
 	_ = right.Close()
 	return types.HijackedResponse{Conn: left, Reader: bufio.NewReader(strings.NewReader(f.stdout))}, nil
