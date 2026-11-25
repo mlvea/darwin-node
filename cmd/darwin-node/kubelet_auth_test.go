@@ -25,7 +25,7 @@ import (
 )
 
 func TestClusterStartupRefusesMissingClientCA(t *testing.T) {
-	b, err := os.ReadFile("main.go")
+	b, err := os.ReadFile("run.go")
 	if err != nil {
 		t.Fatal(err)
 	}
