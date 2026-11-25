@@ -3,12 +3,16 @@ package provider
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mlvea/darwin-node/internal/leakcheck"
 	"github.com/mlvea/darwin-node/pkg/capacity"
 	"github.com/mlvea/darwin-node/pkg/config"
 	"github.com/mlvea/darwin-node/pkg/engine"
@@ -20,6 +24,7 @@ import (
 	"github.com/mlvea/darwin-node/pkg/types"
 
 	dto "github.com/prometheus/client_model/go"
+	api "github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -649,4 +654,79 @@ func labelsMatch(m *dto.Metric, want map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// discardAttach is the kubectl attach stdio set. Stdout is non-nil so a
+// handler that shells out takes the interactive path.
+type discardAttach struct{}
+
+func (discardAttach) Stdin() io.Reader            { return nil }
+func (discardAttach) Stdout() io.WriteCloser      { return nopWriteCloser{io.Discard} }
+func (discardAttach) Stderr() io.WriteCloser      { return nopWriteCloser{io.Discard} }
+func (discardAttach) TTY() bool                   { return true }
+func (discardAttach) Resize() <-chan api.TermSize { return nil }
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
+func TestAttachToContainerDoesNotStartAShell(t *testing.T) {
+	leakcheck.Check(t)
+	var mu sync.Mutex
+	var argv [][]string
+	rt := rtfake.New()
+	rt.ExecFn = func(_ context.Context, req guest.ExecReq, _ io.Reader, _, _ io.Writer) (int, error) {
+		mu.Lock()
+		argv = append(argv, append([]string(nil), req.Argv...))
+		mu.Unlock()
+		return 0, nil
+	}
+	slots, err := capacity.New(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CacheDir = t.TempDir()
+	cfg.Runtime = types.RuntimeFake
+	cfg.AgentReadyTimeout = 5 * time.Second
+	cfg.AllowNATWorkloads = true
+	eng := engine.New(cfg, slots, rt, sidecar.None{}, event.Nop{}, "10.0.0.8")
+	t.Cleanup(func() { _ = eng.Close() })
+	p := New(cfg, eng, node.Inventory{Host: node.Host{LogicalCPUs: 8, MemoryBytes: 16 << 30}, Cfg: cfg}, event.Nop{})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "macos", Namespace: "default", UID: k8stypes.UID("attach-1")},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "macos", Image: "local/macos:test"}}},
+	}
+	if err := p.CreatePod(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.DeletePod(context.Background(), pod) })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st, err := p.GetPodStatus(context.Background(), "default", "macos")
+		if err == nil && st.Phase == corev1.PodRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pod never running: %+v %v", st, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	const want = "attach is not supported; use kubectl exec or kubectl logs -f"
+	for _, ctr := range []string{"macos", "sidecar"} {
+		err := p.AttachToContainer(context.Background(), "default", "macos", ctr, discardAttach{})
+		if err == nil || err.Error() != want {
+			t.Fatalf("AttachToContainer %s error = %v, want %q", ctr, err, want)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, a := range argv {
+		for _, s := range a {
+			if strings.Contains(s, "zsh") {
+				t.Fatalf("attach started a shell: %q", a)
+			}
+		}
+	}
 }

@@ -13,7 +13,7 @@ make test-short
 - Image config parse (Darwin-Node + Agoda media types)
 - Node capacity math (reserved CPU/memory)
 - Fake runtime lifecycle (create/start/stop/IP)
-- hostPort conflict detection (no real bind in short tests)
+- hostPort conflict detection, and loopback tests for half-close, linger, release, dial timeout, and connection caps (no Apple networking)
 - Adopt/delete soak on the fake runtime (`pkg/soak`): both VM slots, cache
   snapshot/restore, fd/dir/slot drift, a refused third VM, recovery after
   an injected start failure
