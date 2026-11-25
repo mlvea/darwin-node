@@ -316,9 +316,11 @@ adopted guest gets a new agent token. The slot is taken immediately before
 ## Configuration
 
 Every flag below comes from `cmd/darwin-node/main.go`, and every default from
-`config.Default()` in `pkg/config/config.go`. **Environment variables are read
-after flags, so a set variable overrides the matching flag.**
-`darwin-node --help` is the authoritative list.
+`config.Default()` in `pkg/config/config.go`. **Precedence is defaults, then
+environment variables, then explicit flags.** An omitted flag keeps the
+environment value. A flag on the command line replaces it. `darwin-node
+--help` lists the flags, and the default it prints is the value after the
+environment has been applied.
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
@@ -327,6 +329,9 @@ after flags, so a set variable overrides the matching flag.**
 | `--runtime` | `DARWIN_NODE_RUNTIME` | `vz` | `vz` (hardware) or `fake` (tests/CI) |
 | `--standalone` | – | `false` | Run the engine without joining a cluster (dev) |
 | `--max-vms` | `DARWIN_NODE_MAX_VMS` | `2` | Concurrent VMs, 1 or 2 |
+| `--reserved-cpu` | `DARWIN_NODE_RESERVED_CPU` | `2` | Host CPUs withheld from Allocatable (`500m` is half a CPU) |
+| `--reserved-memory` | `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | Host memory withheld from Allocatable |
+| `--reserved-ephemeral` | `DARWIN_NODE_RESERVED_EPHEMERAL` | `20Gi` | Host ephemeral-storage withheld from Allocatable |
 | `--warm-slots` | `DARWIN_NODE_WARM_SLOTS` | `0` | Pre-booted idle VMs kept in free slots (0–2) |
 | `--warm-image` | `DARWIN_NODE_WARM_IMAGE` | most recently used | Image pre-booted into warm slots |
 | `--serial-console` | `DARWIN_NODE_SERIAL_CONSOLE` | `false` | Attach a serial port for `darwin-node console` |
@@ -336,11 +341,11 @@ after flags, so a set variable overrides the matching flag.**
 | `--allow-nat-workloads` | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Don't apply the `nat-only` taint |
 | `--disable-taint` | – | `false` | Don't taint the node at all |
 | `--cache-dir` | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Image and overlay cache |
-| `--cache-writers` | `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Namespaces or `namespace/serviceaccount` allowed to write named caches back after exit 0 |
+| `--cache-writers` | `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Namespaces or `namespace/serviceaccount` allowed to write named caches back after exit 0. The flag wins when both are set |
 | `--allowed-host-paths` | `DARWIN_NODE_ALLOWED_HOST_PATHS` | empty (deny all) | hostPath prefixes guests may use |
 | `--log-level` | – | `info` | `debug`, `info`, `warn` or `error` |
 | `--kubeconfig` | `KUBECONFIG` | `~/.kube/config` | Kubeconfig path |
-| `--listen-address` | `DARWIN_NODE_LISTEN_ADDRESS` | `127.0.0.1` | Kubelet HTTPS bind address (port `10250`, `KUBELET_PORT` to change) |
+| `--listen-address` | `DARWIN_NODE_LISTEN_ADDRESS` | `127.0.0.1` | Kubelet HTTPS bind address (port `10250`, `KUBELET_PORT` to change). The flag wins when both are set |
 | `--startup-timeout` | – | `0` (not set in `Default()`) | Passed to virtual-kubelet `Node.WaitReady`. A value of `0` adds no deadline: the call waits until the node is Ready, the controller exits, or the process context ends |
 | `--init-timeout` | – | `2m` | Maximum wait for each init container |
 | `--agent-ready-timeout` | `DARWIN_NODE_AGENT_READY_TIMEOUT` | `2m` | Budget for each guest-agent dial and ready check |

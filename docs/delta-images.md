@@ -100,7 +100,11 @@ the base clone. Ship a full artifact when aux changes.
 - The base must be present on every applying host, pinned by content:
   hosts keep their existing cache entry and the delta rides on top.
 - Deltas compose by replacement: re-running `delta-create` for the same
-  target name updates that entry in `delta.json`. Chained deltas
+  file name replaces that entry in `delta.json`. A second run does not
+  append another patch for that name, whether the from/to pair is unchanged
+  or the target was baked again. A manifest that already lists that name
+  twice keeps the entry just written and drops the extra copy.
+  `delta-apply` therefore still sees one entry per file. Chained deltas
   (patch-on-patch) are intentionally not supported; bake the new full
   image, cut one delta from whatever base your fleet holds.
 - The output of `delta-apply` is an ordinary image dir. It feeds the

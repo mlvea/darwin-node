@@ -46,8 +46,8 @@ The share is read-only unless both of these are true:
 A write annotation on a pod outside the list leaves the share
 read-only and emits a `CacheReadOnly` warning. One allowlist entry can
 cover a whole namespace; `namespace/serviceaccount` covers one account.
-The two forms are a comma-separated list. A set environment variable
-overrides the flag.
+The two forms are a comma-separated list. An omitted `--cache-writers`
+keeps `DARWIN_NODE_CACHE_WRITERS`. A flag on the command line replaces it.
 
 ## Lifecycle
 
