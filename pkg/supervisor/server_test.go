@@ -29,9 +29,21 @@ type harness struct {
 	err    error
 }
 
+// socketRunDir is a short directory. macOS sun_path holds 103 bytes, and
+// t.TempDir under /var/folders plus a long test name does not fit.
+func socketRunDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "dn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func newHarness(t *testing.T, dead time.Duration, opt func(*Server)) *harness {
 	t.Helper()
-	dir := t.TempDir()
+	dir := socketRunDir(t)
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +64,8 @@ func newHarness(t *testing.T, dead time.Duration, opt func(*Server)) *harness {
 		h.err = srv.Serve(ctx)
 		close(h.done)
 	}()
-	h.waitReady()
 	t.Cleanup(h.stop)
+	h.waitReady()
 	return h
 }
 
@@ -383,7 +395,9 @@ func TestDeadmanHoldsWhileConnectedAndResetsOnHeartbeat(t *testing.T) {
 }
 
 func TestRunDirSymlinkRejected(t *testing.T) {
-	dir := t.TempDir()
+	// The path check runs before the symlink check. t.TempDir on macOS
+	// already overflows sun_path once slot-0.sock is appended.
+	dir := socketRunDir(t)
 	real := filepath.Join(dir, "real")
 	if err := os.MkdirAll(real, 0o700); err != nil {
 		t.Fatal(err)
@@ -396,6 +410,15 @@ func TestRunDirSymlinkRejected(t *testing.T) {
 	err := srv.Serve(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlink run dir error %v", err)
+	}
+}
+
+func TestSocketPathTooLong(t *testing.T) {
+	dir := strings.Repeat("p", maxSocketPathLen())
+	srv := &Server{Slot: 0, RunDir: dir, RT: fake.New(), Deadman: time.Hour}
+	err := srv.Serve(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "socket path") {
+		t.Fatalf("got %v", err)
 	}
 }
 

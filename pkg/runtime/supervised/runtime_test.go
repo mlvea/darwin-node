@@ -31,9 +31,21 @@ type slotd struct {
 	done   chan struct{}
 }
 
+// socketRunDir is a short directory. macOS sun_path holds 103 bytes, and
+// t.TempDir under /var/folders plus a long test name does not fit.
+func socketRunDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "dn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func startSlot(t *testing.T, bridge bool) *slotd {
 	t.Helper()
-	dir := t.TempDir()
+	dir := socketRunDir(t)
 	rt := fake.New()
 	rt.SetBridgeGuest(bridge)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,8 +57,9 @@ func startSlot(t *testing.T, bridge bool) *slotd {
 		Deadman:       time.Hour,
 	}
 	s := &slotd{t: t, rt: rt, dir: dir, cancel: cancel, done: make(chan struct{})}
+	var serveErr error
 	go func() {
-		_ = srv.Serve(ctx)
+		serveErr = srv.Serve(ctx)
 		close(s.done)
 	}()
 	path := supervisor.SocketPath(dir, 0)
@@ -54,7 +67,7 @@ func startSlot(t *testing.T, bridge bool) *slotd {
 	for time.Now().Before(deadline) {
 		select {
 		case <-s.done:
-			t.Fatal("supervisor exited before the socket appeared")
+			t.Fatalf("supervisor exited before the socket appeared: %v", serveErr)
 		default:
 		}
 		if _, err := os.Stat(path); err == nil {
