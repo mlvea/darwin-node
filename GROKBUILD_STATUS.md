@@ -9,6 +9,12 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — merge origin/main through PR #48
+
+- **HEAD:** `cursor/named-cache-volumes-713c`. Merged `origin/main` at `98581197` (PR #47) and then `9857a12` (PR #48). `main` was not pushed. No rebase, no force-push.
+- **Conflicts:** `GROKBUILD_STATUS.md` keeps the Batch N entry, the Batch O entry, and the S-16/B-15 entry. `pkg/config/config.go` keeps reserved-resource parsing and reads `DARWIN_NODE_CACHE_WRITERS` in `MergeEnv`. `Validate` checks both reserved quantities and cache-writer entries. Docs that said the cache-writers environment overrode the flag now say an explicit `--cache-writers` wins.
+- **Verification (Linux):** `golangci-lint` 2.12.2 reported 0 issues. `go test ./... -short -count=1 -race -timeout 600s` passed (`pkg/engine` 166.814s, `cmd/darwin-node` 13.985s, `pkg/provider` 13.430s, `pkg/guest` 12.628s, `pkg/image` 3.217s, `pkg/hostport` 2.448s, `pkg/soak` 1.974s).
+
 ### 2026-11-25 (Asia/Singapore) — S-16 and B-15 named cache write-back
 
 - **HEAD:** `cursor/named-cache-volumes-713c`, branched from `origin/main` at `c4a6b677`. `main` was not pushed. No force-push.
@@ -20,6 +26,17 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 - **Hardware-pending:** the virtio-fs `ReadOnly` bit is what `Share.ReadOnly` already passes into the runtime, and the share flag is unit-tested. A booted macOS guest was not used to confirm the guest cannot write through that mount. `vz.go` was not edited. The poison fix itself is the snapshot gate and is covered on Linux.
 - **Open risks:** a guest on the allowlist can still report exit 0 and commit. The allowlist is the operator control. The exit-callback snapshot runs on the guest read loop. On APFS that clone is metadata. On a copy it holds that read until the tree is committed. `e2e (self-hosted)` stays skipped. govulncheck findings from earlier entries are unchanged.
 - **Incidental:** removed scratch notes that commit `51014337` had left in `docs/stability.md` above the soak section.
+
+### 25 Nov 2026 — Batch O: hostPort proxy close and kubectl attach
+
+- **HEAD:** `cursor/hostport-proxy-attach-021b`, branched from `main` at `c4a6b67`. `main` was not pushed. No rebase, no force-push.
+- **T-18 (confirmed, then fixed):** `pkg/hostport` copied both ways and waited for both copies to finish. Closing or resetting one side left the other open, `Release` closed the listener and left accepted connections up, `net.Dial` had no deadline, and nothing capped concurrency. These tests failed on that code before the fix: `TestHalfCloseLetsGuestFinishResponse` (client read timed out; the guest never saw EOF), `TestSilentPeerClosesAfterLinger` (client still open after the linger), `TestGuestResetClosesClient` (client stayed open after a RST), `TestPipeCloseUnblocksTheOtherSide` (pipe peer still open), `TestReleaseClosesLiveConnections` (both sides still open after `Release`), `TestGuestDialTimesOut` (host side still open after 3s; dial timeout is 300ms), `TestPerPodConnectionCap` and `TestGlobalConnectionCap` (the connection over the cap stayed open and reached the guest).
+- **T-18 fix:** when one direction hits EOF or an error, the proxy half-closes the other (`CloseWrite`) and fully closes both after the linger if that direction is still open. `Release` (called from `Engine.teardown` on delete and failure; that call site was not edited) closes the listeners and every connection tracked for the pod, and cancels an in-flight guest dial. Guest dials use a 5s context deadline. A pod may hold 256 connections and the node 512, including a dial that has not finished; the next accepted connection is closed and is not dialed. Closing a splice frees its slot. `New` takes options (`WithDialTimeout`, `WithIdleLinger`, `WithMaxConns`) so tests can tighten the bounds; a non-positive value keeps the default. No process flag.
+- **B-14 (confirmed, then fixed):** `AttachToContainer` called `RunInContainer` with `/bin/zsh`. The guest agent has Exec, Logs, and Workload, and no RPC that joins the running workload's stdio. `TestAttachToContainerDoesNotStartAShell` failed on the old code with `AttachToContainer macos error = <nil>` after the fake guest recorded `/bin/zsh`. The handler now returns `attach is not supported; use kubectl exec or kubectl logs -f` for the VM container and for a sidecar, and does not exec.
+- **Operator-visible:** `kubectl attach` returns that error instead of a shell. hostPort dials give up after 5s. After one side ends, the other is half-closed and both are closed after 5s. Pod delete or failure closes live hostPort connections. Caps are 256 per pod and 512 per node. There is no flag or environment variable for these bounds.
+- **Hardware-pending:** none. The proxy tests use `net.Pipe` and loopback listeners. Attach is refused in the provider and does not need a booted VM.
+- **Left alone:** `pkg/engine` other than the existing `teardown` call to `hostports.Release`. `pkg/guest` was not edited.
+- **Verification (Linux):** `go vet ./pkg/hostport/ ./pkg/provider/` passed. `golangci-lint` 2.12.2 reported 0 issues. `go test ./pkg/hostport/ -count=1 -race -timeout 180s` passed (2.452s). `go test ./pkg/provider/ -count=1 -race -timeout 180s` passed (13.452s). `go test ./pkg/engine/ -short -count=1 -race -timeout 300s -run HostPort` passed (1.112s). No Apple hardware was available.
 
 ### 25 Nov 2026 — Batch N: config precedence, launchd log rotation, delta-create
 

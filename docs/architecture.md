@@ -158,7 +158,7 @@ still skips the stop; the next process reclaims leftover pod directories.
 | `pkg/image` | OCI pull/cache/verify, clonefile overlay |
 | `pkg/volume` | Materialize emptyDir/hostPath/ConfigMap/Secret/projected |
 | `pkg/net` | NAT/bridged, IP, MAC |
-| `pkg/hostport` | Userspace hostPort proxy |
+| `pkg/hostport` | Userspace hostPort proxy (half-close, 5s dial and linger, 256/512 connection caps) |
 | `pkg/sidecar` | Host containers |
 | `pkg/node` | Capacity, allocatable, conditions, labels |
 | `pkg/event` | Kubernetes events |

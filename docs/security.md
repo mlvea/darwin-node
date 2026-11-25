@@ -133,6 +133,20 @@ references, and may create that pod's service account token. The
 ServiceAccount identity may get Secrets and ConfigMaps, and may create
 `serviceaccounts/token`, in `rbac.namespaces` only.
 
+## hostPort
+
+- The proxy is a userspace TCP splice on the host. It is not a CNI plugin.
+- A dial to the guest stops after 5 seconds. One pod may hold 256
+  connections and the node 512, including a dial that has not finished.
+  The next connection is closed and is not dialed. When one side ends,
+  the other is half-closed and both are fully closed after 5 seconds.
+  Deleting or failing the pod closes the listeners and the live
+  connections. There is no flag for these bounds.
+- `kubectl attach` does not start a shell. The guest agent has no RPC
+  that joins the running workload's stdio. The handler returns
+  `attach is not supported; use kubectl exec or kubectl logs -f` for
+  the VM container and for a sidecar.
+
 ## Guest agent
 
 - launchd, root inside the *guest*, not on the host. The host treats
