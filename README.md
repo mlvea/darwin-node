@@ -216,10 +216,13 @@ kubectl get node -o jsonpath='{.items[*].status.capacity}'
 
 To run it as a service, use the launchd plist at
 [deploy/launchd/io.darwin-node.node.plist](deploy/launchd/io.darwin-node.node.plist)
-(edit `CHANGE_ME`, the paths and the environment first). See
-[docs/installation.md](docs/installation.md) for launchd, shutdown, upgrades
-and Homebrew. The Homebrew formula is a sketch until notarized release
-archives exist.
+(edit `CHANGE_ME`, the paths and the environment first). Copy
+[deploy/launchd/darwin-node.conf](deploy/launchd/darwin-node.conf) to
+`/etc/newsyslog.d/darwin-node.conf` so `/var/log/darwin-node/stdout.log`
+and `stderr.log` rotate. See
+[docs/installation.md](docs/installation.md) for launchd, log rotation,
+shutdown, upgrades and Homebrew. The Homebrew formula is a sketch until
+notarized release archives exist.
 
 ### 5. Cluster-side RBAC (Helm, optional)
 
@@ -299,7 +302,7 @@ See [docs/scheduling.md](docs/scheduling.md).
 |---|---|---|
 | Warm VM pool: pods adopt a pre-booted guest | `--warm-slots`, `--warm-image` | [docs/warm-pool.md](docs/warm-pool.md) |
 | Cache volumes that outlive a successful pod (CoW restore; write-back is opt-in) | `cache.darwin.node/<name>: <guest-path>` plus `cache-write.darwin.node/<name>: "true"` and `--cache-writers` | [docs/cache-volumes.md](docs/cache-volumes.md) |
-| Interactive exec, `logs -f` | `kubectl exec -it`, `kubectl logs -f` | [docs/architecture.md](docs/architecture.md) |
+| Interactive exec, `logs -f` | `kubectl exec -it`, `kubectl logs -f`. `kubectl attach` returns an error and does not start a shell | [docs/architecture.md](docs/architecture.md) |
 | Break-glass serial console | `--serial-console`, then `darwin-node console -n <ns> -p <pod>` | [docs/console.md](docs/console.md) |
 | Delta image updates | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
 | Debug snapshot without a cluster | `darwin-node debug-dump -o debug-snapshot.json` | [docs/testing.md](docs/testing.md) |
@@ -320,7 +323,12 @@ Every flag below comes from `cmd/darwin-node/main.go`, and every default from
 environment variables, then explicit flags.** An omitted flag keeps the
 environment value. A flag on the command line replaces it. `darwin-node
 --help` lists the flags, and the default it prints is the value after the
-environment has been applied.
+environment has been applied. A value `MergeEnv` cannot parse is an error
+before that help text runs. A value that parses and then fails `Validate`
+is an error when the command runs. The flag is already applied by then, so
+it can stand in for an environment value that would not validate.
+[docs/installation.md](docs/installation.md) lists every variable
+`MergeEnv` reads and the flags that have no environment variable.
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
@@ -336,8 +344,8 @@ environment has been applied.
 | `--warm-image` | `DARWIN_NODE_WARM_IMAGE` | most recently used | Image pre-booted into warm slots |
 | `--serial-console` | `DARWIN_NODE_SERIAL_CONSOLE` | `false` | Attach a serial port for `darwin-node console` |
 | `--shutdown-grace-period` | `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total budget for draining pods on SIGTERM/SIGINT |
-| `--network-mode` | `DARWIN_NODE_NETWORK_MODE` | `nat` | `nat` or `bridged` |
-| `--bridge-interface` | `DARWIN_NODE_BRIDGE_INTERFACE` (or `VZ_BRIDGE_INTERFACE`) | empty | Host interface; required for bridged mode |
+| `--network-mode` | `DARWIN_NODE_NETWORK_MODE` | `nat` | `nat` or `bridged`. `disabled` passes validation and the VM still gets a NAT device unless the mode is `bridged` with an interface |
+| `--bridge-interface` | `DARWIN_NODE_BRIDGE_INTERFACE` (or `VZ_BRIDGE_INTERFACE` when the `DARWIN_NODE_` variable is empty) | empty | Host interface; required for bridged mode. Setting it while the mode is `nat` selects bridged |
 | `--allow-nat-workloads` | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Don't apply the `nat-only` taint |
 | `--disable-taint` | – | `false` | Don't taint the node at all |
 | `--cache-dir` | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Image and overlay cache |
@@ -358,7 +366,7 @@ environment has been applied.
 | `--image-gc` | `DARWIN_NODE_IMAGE_GC` | `true` | Delete unused images and cache stores above the high threshold |
 | `--image-gc-high-threshold` / `--image-gc-low-threshold` | `DARWIN_NODE_IMAGE_GC_{HIGH,LOW}_THRESHOLD` | `85` / `80` | Disk usage (%) at which GC starts and stops |
 | `--image-gc-interval` | `DARWIN_NODE_IMAGE_GC_INTERVAL` | `5m` | How often GC runs |
-| `--metrics-address` | `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus `/metrics`; `off` disables it |
+| `--metrics-address` | `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus `/metrics`. `off`, `disabled`, `-`, or empty disables it. An unset variable keeps the default |
 
 Variables with no flag:
 
@@ -495,6 +503,13 @@ matter most:
   then 20s, doubling to 5m, and that wait resets to 10s after 10 minutes
   without a restart. The phase stays `Running` and the slot stays held.
   There is no lifetime cap.
+- **`kubectl attach` is an error.** The message is
+  `attach is not supported; use kubectl exec or kubectl logs -f`, for the
+  VM container and for a sidecar. Attach does not start a shell.
+- **hostPort closes with the pod.** Deleting or failing the pod closes
+  the listeners and every live splice. One side ending half-closes the
+  other; both close after 5s. A dial to the guest gives up after 5s.
+  The caps are 256 connections per pod and 512 per node. There is no flag.
 - **No real hardware run yet.** See the status table at the top.
 
 ## Hardware validation
@@ -523,8 +538,9 @@ to beta.
    bridge, `no-new-privileges`, admission rejects for privileged and host
    namespaces, and container-address probes. Still open on that path: an
    `--internal` bridge, plus seccomp, AppArmor, `fsGroup`, and
-   `supplementalGroups`, and the remaining stability items (hostPort
-   connection lifecycle, among others). `darwin.node/vm-slot` scheduling,
+   `supplementalGroups`. hostPort connection lifecycle is in place:
+   splices half-close, and pod delete or failure closes the listeners
+   and the live connections. `darwin.node/vm-slot` scheduling,
    warm-pool image and size matching, and liveness backoff are in place.
 3. **Pod networking:** an in-process L2→L3 router that gives VMs
    cluster-routable IPs, compatible with the cluster CNI. The design is chosen;
@@ -559,12 +575,16 @@ docs/                user docs + docs/adr/ decision records
 examples/            pod manifests
 ```
 
+Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md).
+`engine.go`, `fake.go`, `config.go`, and `main.go` stay the entry points.
+
 ## Documentation
 
 | Doc | What it covers |
 |---|---|
 | [docs/installation.md](docs/installation.md) | Build, sign, launchd, upgrades, Helm |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit together |
+| [docs/code-layout.md](docs/code-layout.md) | Where a new file goes, so `engine.go`, `fake.go`, `config.go`, and `main.go` stay the entry points |
 | [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
 | [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle and adoption rules |
 | [docs/cache-volumes.md](docs/cache-volumes.md) | Cache annotations and snapshot store |
