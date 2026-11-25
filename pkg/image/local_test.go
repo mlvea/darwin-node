@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/digest"
 )
 
 func TestCacheKeySeparatesSlashFromUnderscore(t *testing.T) {

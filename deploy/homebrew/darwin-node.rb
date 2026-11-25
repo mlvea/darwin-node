@@ -1,12 +1,12 @@
 # Sketch. Not published. Build notarized darwin/arm64 binaries first.
 class DarwinNode < Formula
   desc "Kubernetes node agent for native macOS VMs on Apple Silicon"
-  homepage "https://github.com/darwin-node/darwin-node"
+  homepage "https://github.com/mlvea/darwin-node"
   url "https://example.com/darwin-node-0.1.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "Apache-2.0"
 
-  depends_on :macos
+  depends_on macos: :ventura
   depends_on arch: :arm64
 
   def install

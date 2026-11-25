@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/Code-Hex/vz/v3"
-	"github.com/darwin-node/darwin-node/internal/netutil"
-	"github.com/darwin-node/darwin-node/pkg/guest"
-	"github.com/darwin-node/darwin-node/pkg/runtime"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/internal/netutil"
+	"github.com/mlvea/darwin-node/pkg/guest"
+	"github.com/mlvea/darwin-node/pkg/runtime"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 // Runtime is the production Virtualization.framework backend.
@@ -32,6 +32,9 @@ func New(opts runtime.Options) *Runtime { return &Runtime{Opts: opts} }
 func (r *Runtime) Name() types.RuntimeName { return types.RuntimeVZ }
 
 func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machine, error) {
+	if err := Available(); err != nil {
+		return nil, err
+	}
 	if spec.CPU == 0 {
 		spec.CPU = 2
 	}

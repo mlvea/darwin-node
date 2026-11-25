@@ -14,7 +14,7 @@ That nested layout is gone. This project is now a sibling of any local
 Agoda clone, not a folder inside it.
 
 - Repo root: this folder (`go.mod`, `LICENSE`, `NOTICE`, `cmd/`, `pkg/`)
-- Go module: `github.com/darwin-node/darwin-node`
+- Go module: `github.com/mlvea/darwin-node`
 - CI: `.github/workflows/ci.yml` at **this** root
 - Agoda lineage (separate project, read-only comparison):
   https://github.com/agoda-com/macOS-vz-kubelet

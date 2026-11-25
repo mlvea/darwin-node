@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/digest"
 
 	ocidigest "github.com/opencontainers/go-digest"
 )

@@ -226,7 +226,7 @@ func moduleStacks() map[string]int {
 	}
 	out := map[string]int{}
 	for _, g := range strings.Split(string(buf), "\n\n") {
-		if !strings.Contains(g, stackMarker) && !strings.Contains(g, "github.com/darwin-node/") {
+		if !strings.Contains(g, stackMarker) && !strings.Contains(g, "github.com/mlvea/darwin-node/") {
 			continue
 		}
 		if self != "" && strings.HasPrefix(g, "goroutine "+self+" ") {
@@ -256,7 +256,7 @@ func stackSignature(goroutine string) string {
 	var frames []string
 	for _, line := range strings.Split(goroutine, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "github.com/darwin-node/") && !strings.Contains(line, stackMarker) {
+		if !strings.HasPrefix(line, "github.com/mlvea/darwin-node/") && !strings.Contains(line, stackMarker) {
 			continue
 		}
 		frames = append(frames, line)

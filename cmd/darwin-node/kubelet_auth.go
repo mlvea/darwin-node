@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	dnconfig "github.com/darwin-node/darwin-node/pkg/config"
+	dnconfig "github.com/mlvea/darwin-node/pkg/config"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 )
 

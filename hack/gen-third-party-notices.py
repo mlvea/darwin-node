@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "THIRD_PARTY_NOTICES"
-MAIN = "github.com/darwin-node/darwin-node"
+MAIN = "github.com/mlvea/darwin-node"
 
 LICENSE_PREFIXES = ("LICENSE", "COPYING", "LICENCE")
 NOTICE_PREFIXES = ("NOTICE",)

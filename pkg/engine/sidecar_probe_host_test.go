@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/darwin-node/darwin-node/pkg/sidecar"
+	"github.com/mlvea/darwin-node/pkg/sidecar"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"

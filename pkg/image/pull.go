@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
-	"github.com/darwin-node/darwin-node/internal/disk"
+	"github.com/mlvea/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/disk"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"

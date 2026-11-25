@@ -8,7 +8,7 @@ word "alpha" in the README has a precise meaning.
 
 | Tier | What it covers | Status |
 |---|---|---|
-| Unit + race (`make test`) | Engine lifecycle, warm pool, caches, drain, agent protocol, image format, deltas | Green on every push; race detector clean |
+| Unit + race (`make test`) | Engine lifecycle, warm pool, caches, drain, agent protocol, image format, deltas | Linux CI and hosted macOS CI run this on every push and pull request, with `-race`. A hosted macOS job can be cancelled when GitHub has no runner ("not acquired by runner"), so a push is not guaranteed a finished macOS result. When the job runs, the race detector is part of it |
 | Leak discipline (`internal/leakcheck`) | No module goroutines survive engine/guest lifecycle tests | Enforced continuously |
 | Failure injection (`pkg/engine/inject_test.go`) | Runtime Create/Start/Dial failures: fail closed, slots freed, state reclaimed, node reusable | Green |
 | Adversarial protocol (`pkg/guest/adversarial_test.go`) | Garbage bytes, oversized frames, wrong versions, stray stream frames, unknown methods | Green |

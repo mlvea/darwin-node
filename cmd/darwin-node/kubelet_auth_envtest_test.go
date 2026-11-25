@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/config"
+	"github.com/mlvea/darwin-node/pkg/config"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"

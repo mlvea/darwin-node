@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/capacity"
+	"github.com/mlvea/darwin-node/pkg/capacity"
 )
 
 const (

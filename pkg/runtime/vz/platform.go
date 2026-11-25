@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/Code-Hex/vz/v3"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 // attachPlatformAndDisk wires hardware model, machine identifier, auxiliary
@@ -93,17 +93,28 @@ func attachInput(cfg *vz.VirtualMachineConfiguration) error {
 		return err
 	}
 	pointing := []vz.PointingDeviceConfiguration{pointer}
-	if trackpad, err := vz.NewMacTrackpadConfiguration(); err == nil {
-		pointing = append(pointing, trackpad)
+	// macOS 13 guests use the trackpad. Skipping a failed constructor was
+	// the macOS 12 reservation; the host floor is 13, so this is fatal.
+	trackpad, err := vz.NewMacTrackpadConfiguration()
+	if err != nil {
+		return err
 	}
+	pointing = append(pointing, trackpad)
 	cfg.SetPointingDevicesVirtualMachineConfiguration(pointing)
 	return nil
 }
 
-// Available reports whether Virtualization.framework can size a VM.
-// A zero CPU window means the framework is missing or the OS is too old.
-// It does not start a VM.
+// MinimumHostDarwin is the oldest host release this runtime will boot.
+// MacOSGuestAutomountTag and guest AF_VSOCK both start at macOS 13.
+const MinimumHostDarwin = 13
+
+// Available reports whether this host can boot a darwin-node VM.
+// It refuses a host older than MinimumHostDarwin, and a host whose
+// Virtualization.framework cannot size a VM. It does not start a VM.
 func Available() error {
+	if _, err := vz.MacOSGuestAutomountTag(); err != nil {
+		return fmt.Errorf("darwin-node requires host macOS %d or newer (virtio-fs automount and guest vsock): %w", MinimumHostDarwin, err)
+	}
 	min := vz.VirtualMachineConfigurationMinimumAllowedCPUCount()
 	max := vz.VirtualMachineConfigurationMaximumAllowedCPUCount()
 	if min == 0 || max == 0 || min > max {

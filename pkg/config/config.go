@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/types"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 )

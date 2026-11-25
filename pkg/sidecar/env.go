@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/darwin-node/darwin-node/pkg/image"
 	"github.com/docker/docker/api/types/registry"
+	"github.com/mlvea/darwin-node/pkg/image"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )

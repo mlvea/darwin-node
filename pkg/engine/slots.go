@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/darwin-node/darwin-node/pkg/capacity"
-	"github.com/darwin-node/darwin-node/pkg/event"
-	"github.com/darwin-node/darwin-node/pkg/image"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/capacity"
+	"github.com/mlvea/darwin-node/pkg/event"
+	"github.com/mlvea/darwin-node/pkg/image"
+	"github.com/mlvea/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
 )

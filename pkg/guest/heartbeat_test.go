@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/internal/leakcheck"
+	"github.com/mlvea/darwin-node/internal/leakcheck"
 )
 
 // A session with no probes and no exec is idle. The guest closes it after

@@ -1,6 +1,6 @@
 package engine
 
-import "github.com/darwin-node/darwin-node/pkg/sidecar"
+import "github.com/mlvea/darwin-node/pkg/sidecar"
 
 func (e *Engine) sidecarCreateOptions(creds Credentials) sidecar.CreateOptions {
 	return sidecar.CreateOptions{

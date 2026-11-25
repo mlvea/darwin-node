@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/event"
-	"github.com/darwin-node/darwin-node/pkg/sidecar"
+	"github.com/mlvea/darwin-node/pkg/event"
+	"github.com/mlvea/darwin-node/pkg/sidecar"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

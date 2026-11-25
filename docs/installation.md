@@ -2,7 +2,9 @@
 
 ## Requirements
 
-- Apple Silicon Mac (arm64). Host macOS that supports Virtualization.framework.
+- Apple Silicon Mac (arm64). Host macOS **13** or newer, and a guest
+  image of macOS **13** or newer. The README Requirements section names
+  the Virtualization.framework APIs that set that floor.
 - A Kubernetes cluster (the Mac joins as a node).
 - A macOS VM image in Darwin-Node (or Agoda-compatible) OCI format, **or**
   an IPSW to bake one with `darwin-image`.
@@ -30,7 +32,9 @@ Binaries land in `./bin/`:
 
 - `darwin-node`, host agent
 - `darwin-guest-agent`, injected into images
-- `darwin-image`, bake / pack / pull
+- `darwin-image`, bake / pack / pull / verify
+- `darwin-hwtest`, hardware release gate
+- `darwin-soak`, adopt/delete soak harness
 
 To stage a redistributable directory (binaries plus `LICENSE`,
 `NOTICE`, and `THIRD_PARTY_NOTICES`):
@@ -159,7 +163,7 @@ snapshot does not run.
 
 Precedence: `ApplyEnv` runs after flag parsing, so a set environment variable overrides the matching flag. Defaults apply when neither is set.
 
-Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
+Environment variables use the `DARWIN_NODE_` prefix (see `--help`). `ApplyEnv` does not read `DARWIN_NODE_RESERVED_CPU` or `DARWIN_NODE_RESERVED_MEMORY`. Host keep-away stays at the `config.Default` values (2 CPUs and 4Gi). Notable:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -167,8 +171,6 @@ Environment variables use the `DARWIN_NODE_` prefix (see `--help`). Notable:
 | `DARWIN_NODE_NETWORK_MODE` | `nat` | `nat` or `bridged` |
 | `DARWIN_NODE_BRIDGE_INTERFACE` | empty | Required for bridged |
 | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Do not taint NAT nodes |
-| `DARWIN_NODE_RESERVED_CPU` | `2` | Host keep-away |
-| `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | Host keep-away |
 | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Images + overlays |
 | `DARWIN_NODE_GRAPHICS` | `1920x1200@80` | `none` disables Metal |
 | `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM. launchd `ExitTimeOut` must be larger; see Shutdown behavior |

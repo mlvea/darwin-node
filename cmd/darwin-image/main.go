@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/darwin-node/darwin-node/pkg/image"
+	"github.com/mlvea/darwin-node/pkg/image"
 
 	"github.com/spf13/cobra"
 )

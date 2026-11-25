@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/runtime"
-	"github.com/darwin-node/darwin-node/pkg/runtime/fake"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/runtime"
+	"github.com/mlvea/darwin-node/pkg/runtime/fake"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 func TestShortSoakNoDrift(t *testing.T) {

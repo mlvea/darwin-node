@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 func TestNewRejectsOutOfRange(t *testing.T) {
