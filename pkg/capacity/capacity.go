@@ -84,6 +84,31 @@ func (s *Slots) TryAcquire(uid string) error {
 	return nil
 }
 
+// Transfer moves the slot held by from onto to without a gap and without
+// admitting a third VM. If to already holds a slot, from is dropped. If
+// from does not hold one, to is acquired when a slot is free.
+func (s *Slots) Transfer(from, to string) error {
+	if to == "" {
+		return fmt.Errorf("empty pod uid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.held[to]; ok {
+		delete(s.held, from)
+		return nil
+	}
+	if _, ok := s.held[from]; ok {
+		delete(s.held, from)
+		s.held[to] = struct{}{}
+		return nil
+	}
+	if len(s.held) >= s.max {
+		return ErrVMCapacityExhausted
+	}
+	s.held[to] = struct{}{}
+	return nil
+}
+
 // Release frees the slot. Missing uid is not an error (delete is idempotent).
 func (s *Slots) Release(uid string) {
 	s.mu.Lock()

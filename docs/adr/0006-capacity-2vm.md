@@ -1,8 +1,40 @@
 # ADR 0006: The 2-VM limit, capacity, and scheduling
 
-- Status: Accepted
+- Status: Accepted, amended 25 Nov 2026
 - Date: 2026-08-23
 - Phase: 0 / 1
+
+## Amendment (25 Nov 2026)
+
+The dynamic taint below is no longer published. `slots.Full()` used to add
+`darwin.node/vm-full=true:NoSchedule` on the next heartbeat. That lands
+after kube-scheduler has already bound more pods than the host can run,
+and a cluster autoscaler cannot model a taint that appears only when the
+node is already full.
+
+The scheduler contract is the extended resource `darwin.node/vm-slot`.
+Capacity and allocatable are both the configured maximum (1 or 2).
+`darwin.node/vm` and `darwin.node/metal` stay at that same count so older
+manifests still bind. The scheduler accounts each extended resource on
+its own: requesting only `darwin.node/vm` does not consume
+`darwin.node/vm-slot`. Pods should request `darwin.node/vm-slot: 1`.
+The provider still rejects a create when every slot is held by a running
+VM and no warm VM can be reclaimed. The error wraps
+`ErrVMCapacityExhausted` and names `darwin.node/vm-slot`. The pod is not
+queued.
+
+`Apply` drops a stale `darwin.node/vm-full` taint. `VMCapacity` remains
+an informational condition. It is not a scheduler gate.
+
+The slot is not held during image pull or during VM-boot backoff. It is
+acquired immediately before the VM is created and released before that
+backoff sleeps. A guest-agent dial retry keeps the slot because the VM
+is running. A pod that was accepted and then loses the race stays
+`Pending` / `BackOff` and retries the acquire.
+
+The original decision text below is the 2026-08-23 record. Where it
+says the node taints itself when full, or that `TryAcquire` runs at the
+start of `CreatePod`, the amendment wins.
 
 ## Context
 

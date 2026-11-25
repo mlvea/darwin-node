@@ -338,6 +338,8 @@ func TestHybridSidecarRestartFailureReleasesSlot(t *testing.T) {
 	if err := e.Create(context.Background(), samplePod("hy-cap", "uid-hy-cap"), Credentials{}); err != nil {
 		t.Fatalf("second slot not free: %v", err)
 	}
+	waitPhase(t, e, "default", "hy-next", corev1.PodRunning)
+	waitPhase(t, e, "default", "hy-cap", corev1.PodRunning)
 	err := e.Create(context.Background(), samplePod("hy-over", "uid-hy-over"), Credentials{})
 	if !errors.Is(err, capacity.ErrVMCapacityExhausted) {
 		if err == nil {

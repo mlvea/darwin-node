@@ -53,16 +53,20 @@ type vzNamed struct{ *fake.Runtime }
 func (vzNamed) Name() types.RuntimeName { return types.RuntimeVZ }
 
 type scriptPuller struct {
-	mu    sync.Mutex
-	img   image.LocalImage
-	errs  []error
-	calls int
+	mu      sync.Mutex
+	img     image.LocalImage
+	errs    []error
+	failRef string
+	calls   int
 }
 
-func (p *scriptPuller) Pull(context.Context, string, image.RegistryCreds, bool) (image.LocalImage, error) {
+func (p *scriptPuller) Pull(_ context.Context, ref string, _ image.RegistryCreds, _ bool) (image.LocalImage, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	if p.failRef != "" && ref == p.failRef {
+		return image.LocalImage{}, errors.New("dial tcp: i/o timeout")
+	}
 	if len(p.errs) > 0 {
 		err := p.errs[0]
 		p.errs = p.errs[1:]
@@ -129,7 +133,7 @@ func clockedEngine(t *testing.T, rt runtime.Runtime, rec event.Recorder) (*Engin
 	return e, clk
 }
 
-func awaitBackoff(t *testing.T, e *Engine, clk *manualClock, name string) *corev1.Pod {
+func awaitBackoff(t *testing.T, e *Engine, clk *manualClock, name string, slots int) *corev1.Pod {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -138,8 +142,8 @@ func awaitBackoff(t *testing.T, e *Engine, clk *manualClock, name string) *corev
 			t.Fatalf("transient start error failed the pod: %s", p.Status.Message)
 		}
 		if clk.armed() {
-			if e.slots.Used() != 1 {
-				t.Fatalf("VM slot released while backing off: used=%d", e.slots.Used())
+			if e.slots.Used() != slots {
+				t.Fatalf("VM slots while backing off: used=%d want %d", e.slots.Used(), slots)
 			}
 			return p
 		}
@@ -167,7 +171,7 @@ func TestTransientImagePullIsRetriedWithoutFailing(t *testing.T) {
 		t.Fatal(err)
 	}
 	wall := time.Now()
-	p := awaitBackoff(t, e, clk, "pull")
+	p := awaitBackoff(t, e, clk, "pull", 0)
 	if p.Status.Reason != "BackOff" && !rec.has(event.ReasonBackOff) {
 		t.Fatalf("retry was not visible: reason %q events %v", p.Status.Reason, rec.warns)
 	}
@@ -196,7 +200,7 @@ func TestTransientBootFailureIsRetried(t *testing.T) {
 	if err := e.Create(context.Background(), samplePod("boot", "uid-boot"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	awaitBackoff(t, e, clk, "boot")
+	awaitBackoff(t, e, clk, "boot", 0)
 	clk.Advance(time.Second)
 	if !clk.WaitArmed(2 * time.Second) {
 		t.Fatal("second boot failure did not back off")
@@ -250,7 +254,7 @@ func TestTransientAgentDialIsRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	wall := time.Now()
-	awaitBackoff(t, e, clk, "dial")
+	awaitBackoff(t, e, clk, "dial", 1)
 	clk.Advance(time.Second)
 	waitPhase(t, e, "default", "dial", corev1.PodRunning)
 	if time.Since(wall) > time.Second {
@@ -365,7 +369,7 @@ func TestPullTimeoutAndReadStallAreRetried(t *testing.T) {
 			if err := e.Create(context.Background(), samplePod("stall", "uid-stall"), Credentials{}); err != nil {
 				t.Fatal(err)
 			}
-			awaitBackoff(t, e, clk, "stall")
+			awaitBackoff(t, e, clk, "stall", 0)
 			clk.Advance(time.Second)
 			waitPhase(t, e, "default", "stall", corev1.PodRunning)
 			if got := puller.Calls(); got != 2 {
@@ -382,7 +386,7 @@ func TestDeleteDuringStartBackoffReleasesSlot(t *testing.T) {
 	if err := e.Create(context.Background(), samplePod("hold", "uid-hold"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	awaitBackoff(t, e, clk, "hold")
+	awaitBackoff(t, e, clk, "hold", 0)
 	if err := e.Delete(context.Background(), "default", "hold", 0); err != nil {
 		t.Fatal(err)
 	}

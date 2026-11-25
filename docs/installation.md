@@ -81,7 +81,9 @@ kubectl get nodes
 # madushan-mac     Ready    macOS 15.x        Darwin 24.x      vz://15.x
 ```
 
-Capacity must show `pods: 2` and `darwin.node/vm: 2`.
+Capacity must show `pods: 2`, `darwin.node/vm-slot: 2`, and `darwin.node/vm: 2`.
+`darwin.node/vm-slot` is what macOS pods should request. See
+[scheduling](scheduling.md).
 
 ## launchd (production)
 
@@ -136,13 +138,16 @@ Job is not failed by the upgrade and an Always pod is not killed mid-run.
 
 Image pull, VM boot, and the guest-agent dial are retried until they
 succeed, the error is permanent, or the pod is deleted. The wait starts
-at 1s, doubles, and is capped at 30s, with jitter. The VM slot stays
-held and the pod stays `Pending` with reason `BackOff`, so a ReplicaSet
-does not create a replacement and a second VM is not admitted into that
-slot. Auth denied, an invalid image, a size or cycle limit, and a delta
-whose base is itself a delta fail the pod and release the slot. A pull
-deadline or a registry read stall is retried. Each dial attempt uses
-`--agent-ready-timeout` (default 2m), which covers a boot of about 48s.
+at 1s, doubles, and is capped at 30s, with jitter. Image pull and VM
+boot do not hold a slot during that wait: the slot is acquired
+immediately before the VM is created, and a boot failure releases it
+before the sleep. The guest-agent dial keeps the slot, because the VM
+is already running. The pod stays `Pending` with reason `BackOff`, so a
+ReplicaSet does not create a replacement. Auth denied, an invalid
+image, a size or cycle limit, and a delta whose base is itself a delta
+fail the pod and release the slot. A pull deadline or a registry read
+stall is retried. Each dial attempt uses `--agent-ready-timeout`
+(default 2m), which covers a boot of about 48s.
 
 `Stop` polls the VM and returns when it has halted. It does not sit
 out the rest of `terminationGracePeriodSeconds` after the guest is
@@ -190,9 +195,15 @@ Kubernetes connection (same as Virtual Kubelet):
 
 ## Helm (optional skeleton)
 
-`deploy/helm/darwin-node` installs RBAC for the Mac fleet. The agent
-itself still runs on the Mac via launchd, not as a Linux pod. The chart
-does not start VMs.
+`deploy/helm/darwin-node` (chart 0.3.0) installs RBAC for the Mac fleet.
+The agent itself still runs on the Mac via launchd, not as a Linux pod.
+The chart does not start VMs.
+
+`runtimeClass.enabled` (default `false`) installs a RuntimeClass named
+`darwin-vm`. Its scheduling block carries the static tolerations and
+`kubernetes.io/os=darwin`. `admission.slotRequest` (default `false`,
+Kubernetes 1.32+) adds `darwin.node/vm-slot: "1"` on container 0 when
+that runtime class is set. See [scheduling](scheduling.md).
 
 The default `rbac.identity` is `node`. Install the chart for the notes,
 and authenticate each Mac as `system:node:<nodename>` in group

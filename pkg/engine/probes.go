@@ -597,14 +597,26 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 		policy = corev1.RestartPolicyAlways
 	}
 	if policy == corev1.RestartPolicyAlways || policy == corev1.RestartPolicyOnFailure {
+		// Kubelet CrashLoopBackOff: 10s, doubling, capped at 5m, reset
+		// after 10m without a restart. The count is not a lifetime cap.
+		delay := e.nextLivenessDelay(rec)
+		msg := fmt.Sprintf("back-off %s restarting the failed container", delay)
 		rec.mu.Lock()
-		rec.restartCount++
-		n := rec.restartCount
+		if rec.phase == corev1.PodPending || rec.phase == corev1.PodRunning {
+			rec.reason = "CrashLoopBackOff"
+			rec.message = msg
+		}
 		rec.mu.Unlock()
-		if n > 5 {
-			e.fail(rec, fmt.Errorf("liveness probe failed (restarts=%d): %s", n, probeMsg(res, err)))
+		e.events.Warn(ctx, event.ReasonBackOff, msg)
+		if werr := e.sleepBackoff(ctx, delay); werr != nil {
 			return false
 		}
+		if ctx.Err() != nil || !podActive(rec) {
+			return false
+		}
+		rec.mu.Lock()
+		rec.restartCount++
+		rec.mu.Unlock()
 		if rerr := e.restartVM(ctx, rec); rerr != nil {
 			if ctx.Err() != nil || !podActive(rec) {
 				return false
@@ -612,12 +624,48 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 			e.fail(rec, fmt.Errorf("liveness restart: %w", rerr))
 			return false
 		}
+		e.noteLivenessRestarted(rec, delay)
 		*probes = vmProbeState{}
 		*sched = vmProbeSched{}
 		return true
 	}
 	e.fail(rec, fmt.Errorf("liveness probe failed: %s", probeMsg(res, err)))
 	return false
+}
+
+const (
+	livenessBackoffInitial = 10 * time.Second
+	livenessBackoffMax     = 5 * time.Minute
+	livenessBackoffReset   = 10 * time.Minute
+)
+
+// nextLivenessDelay is the wait before the next liveness restart. The
+// first restart waits 10s. Each later restart doubles that, up to 5m.
+// Ten minutes since the previous restart resets it to 10s.
+func (e *Engine) nextLivenessDelay(rec *podRecord) time.Duration {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.liveBackoff < livenessBackoffInitial {
+		return livenessBackoffInitial
+	}
+	if !rec.liveBackoffAt.IsZero() && e.now().Sub(rec.liveBackoffAt) >= livenessBackoffReset {
+		return livenessBackoffInitial
+	}
+	if rec.liveBackoff > livenessBackoffMax {
+		return livenessBackoffMax
+	}
+	return rec.liveBackoff
+}
+
+func (e *Engine) noteLivenessRestarted(rec *podRecord, delay time.Duration) {
+	next := delay * 2
+	if next > livenessBackoffMax || next <= 0 {
+		next = livenessBackoffMax
+	}
+	rec.mu.Lock()
+	rec.liveBackoff = next
+	rec.liveBackoffAt = e.now()
+	rec.mu.Unlock()
 }
 
 func hasStartupProbe(c corev1.Container) bool {

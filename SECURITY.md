@@ -51,5 +51,8 @@ tab and choose **Report a vulnerability**.
   `privileged`, `hostNetwork`, `hostPID`, `hostIPC`, `docker.sock`, and
   added capabilities are rejected before a VM slot is taken.
 - Image cache directories are `0700`.
+- A warm VM adopted by a pod gets a fresh agent token. The pod's own
+  pull credentials are checked again before that adoption when a
+  committed image cache exists. See [docs/security.md](docs/security.md).
 
 Operational notes: [docs/security.md](docs/security.md).

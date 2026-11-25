@@ -85,8 +85,16 @@ func TestApplyLabelsAndTaints(t *testing.T) {
 			foundNAT = true
 		}
 	}
-	if !foundFull || !foundNAT {
+	// A full slot table must not publish darwin.node/vm-full. That taint
+	// lands after kube-scheduler has already bound more pods. Capacity is
+	// the extended resource darwin.node/vm-slot.
+	if foundFull || !foundNAT {
 		t.Fatalf("taints %+v", n.Spec.Taints)
+	}
+	slot := n.Status.Capacity[corev1.ResourceName("darwin.node/vm-slot")]
+	allocSlot := n.Status.Allocatable[corev1.ResourceName("darwin.node/vm-slot")]
+	if slot.Value() != 2 || allocSlot.Value() != 2 {
+		t.Fatalf("vm-slot capacity %s allocatable %s, want 2 and 2", slot.String(), allocSlot.String())
 	}
 	var vmCond *corev1.NodeCondition
 	for i := range n.Status.Conditions {
@@ -99,6 +107,46 @@ func TestApplyLabelsAndTaints(t *testing.T) {
 	}
 	if !strings.HasPrefix(n.Status.NodeInfo.KubeletVersion, "v1.35.6") {
 		t.Fatalf("kubelet version %s", n.Status.NodeInfo.KubeletVersion)
+	}
+}
+
+func TestApplyDropsStaleVMFullTaint(t *testing.T) {
+	n := &corev1.Node{Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+		Key: types.TaintVMFullKey, Value: types.TaintVMFullValue, Effect: corev1.TaintEffectNoSchedule,
+	}}}}
+	inv := Inventory{
+		Host: Host{LogicalCPUs: 4, MemoryBytes: 8 << 30, DiskBytes: 100 << 30, Arch: "arm64"},
+		Cfg:  config.Default(),
+	}
+	if err := Apply(context.Background(), n, inv); err != nil {
+		t.Fatal(err)
+	}
+	for _, taint := range n.Spec.Taints {
+		if taint.Key == types.TaintVMFullKey {
+			t.Fatalf("stale vm-full taint survived Apply: %+v", n.Spec.Taints)
+		}
+	}
+}
+
+func TestVMSlotCapacityFollowsConfiguredMax(t *testing.T) {
+	slots, err := capacity.New(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := Inventory{
+		Host:  Host{LogicalCPUs: 8, MemoryBytes: 16 << 30, DiskBytes: 100 << 30},
+		Cfg:   config.Config{MaxVMs: 1},
+		Slots: slots,
+	}
+	capList, alloc, err := Capacity(inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, list := range []corev1.ResourceList{capList, alloc} {
+		q := list[corev1.ResourceName("darwin.node/vm-slot")]
+		if q.Value() != 1 {
+			t.Fatalf("vm-slot %s, want 1 (configured max)", q.String())
+		}
 	}
 }
 

@@ -488,9 +488,14 @@ pre.code .win i{width:9px;height:9px;border-radius:50%;background:var(--line3)}
 
   <div class="prose">
     <p>Refusing pods is only half of honesty. The other half is telling the
-    scheduler to <em>stop asking</em>. When both slots fill, the node gains a
-    <code>NoSchedule</code> taint and a <code>VMCapacity</code> condition, pushed
-    to the API server on a 15-second heartbeat. Try it:</p>
+    scheduler to <em>stop asking</em>. The first cut added a
+    <code>darwin.node/vm-full</code> taint when both slots filled, pushed
+    on a 15-second heartbeat. That lost the race: kube-scheduler had already
+    bound the extra pods, and a cluster autoscaler cannot model a taint that
+    appears only when the node is full. The contract is the extended resource
+    <code>darwin.node/vm-slot</code>, advertised at the configured maximum.
+    <code>VMCapacity</code> stays informational. A stale
+    <code>vm-full</code> taint is removed on the next status publish.</p>
   </div>
 
   <div class="breakout reveal">
@@ -498,14 +503,14 @@ pre.code .win i{width:9px;height:9px;border-radius:50%;background:var(--line3)}
       <div class="ctrlrow" style="margin:0 0 1rem">
         <button class="btn primary" id="slotApply">kubectl apply pod</button>
         <button class="btn" id="slotDelete">kubectl delete</button>
-        <span class="stat" style="margin-left:auto">capacity pods=<b>2</b> · darwin.node/vm=<b>2</b></span>
+        <span class="stat" style="margin-left:auto">capacity pods=<b>2</b> · darwin.node/vm-slot=<b>2</b></span>
       </div>
       <div class="slotsgrid">
         <div class="nodecard">
           <div class="nc-title"><h4>node: studio-m4-max</h4><span class="chip ok" id="slotCond"><i></i>VMCapacity=False</span></div>
           <div id="slot1" class="slotcard"><span>slot 1 — free</span><span class="st">—</span></div>
           <div id="slot2" class="slotcard"><span>slot 2 — free</span><span class="st">—</span></div>
-          <div id="slotTaint" style="visibility:hidden"><span class="taint">darwin.node/vm-full=true:NoSchedule</span></div>
+          <div id="slotTaint" style="visibility:hidden"><span class="taint">darwin.node/vm-slot fully allocated</span></div>
         </div>
         <div>
           <div class="evlog" id="slotLog"><div class="dim">$ watching darwin-node events…</div></div>
@@ -1030,9 +1035,10 @@ f.<span class="f">Truncate</span>(off)   <span class="c">// trailing zeros becom
     <p>The reporting layer follows from that one negative rule. Node CPU and memory
     come from host measurement; pod CPU and memory come from the guest's own sampler
     across vsock, mirrored into per-container stats because <code>kubectl top pods</code>
-    renders containers, not pods. Conditions and taints recompute from the live slot
-    table on a heartbeat — <code>vm-full</code> appears when the second slot fills,
-    not when the node rebooted. Events narrate the lifecycle in vocabulary operators
+    renders containers, not pods. Conditions recompute from the live slot
+    table on a heartbeat. <code>darwin.node/vm-slot</code> is the scheduler
+    contract; capacity and allocatable equal the configured maximum.
+    <code>vm-full</code> is not published. Events narrate the lifecycle in vocabulary operators
     already know (<code>Pulling</code>, <code>Starting</code>, <code>VMDialing</code>,
     <code>Started</code>, <code>Killing</code>, <code>ProbeFailed</code>) so
     <code>kubectl describe pod</code> tells the same story the engine is living.</p>
@@ -1198,7 +1204,7 @@ Object.keys(map).forEach(function(id){var el=document.getElementById(id); if(el)
   $("#slotApply").addEventListener("click",function(){
     if(held.length>=MAX){
       line("VMCapacityExhausted: this host allows at most 2 concurrent macOS VMs","err");
-      line("event Warning · scheduler will see the vm-full taint within 15s","dim");
+      line("event Warning · darwin.node/vm-slot is fully allocated; the pod is not queued","dim");
       return;
     }
     seq++;

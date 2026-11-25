@@ -69,15 +69,19 @@ func Capacity(inv Inventory) (capList, alloc corev1.ResourceList, err error) {
 	diskCap := *resource.NewQuantity(h.DiskBytes, resource.BinarySI)
 	pods := *resource.NewQuantity(int64(maxVMs), resource.DecimalSI)
 	vms := *resource.NewQuantity(int64(maxVMs), resource.DecimalSI)
+	// vm-slot is the scheduler contract: one per concurrent macOS VM.
+	// darwin.node/vm stays at the same count so older manifests still bind.
+	slot := *resource.NewQuantity(int64(maxVMs), resource.DecimalSI)
 	metal := *resource.NewQuantity(int64(maxVMs), resource.DecimalSI)
 
 	capList = corev1.ResourceList{
-		corev1.ResourceCPU:                       cpuCap,
-		corev1.ResourceMemory:                    memCap,
-		corev1.ResourceEphemeralStorage:          diskCap,
-		corev1.ResourcePods:                      pods,
-		corev1.ResourceName(types.ResourceVM):    vms,
-		corev1.ResourceName(types.ResourceMetal): metal,
+		corev1.ResourceCPU:                        cpuCap,
+		corev1.ResourceMemory:                     memCap,
+		corev1.ResourceEphemeralStorage:           diskCap,
+		corev1.ResourcePods:                       pods,
+		corev1.ResourceName(types.ResourceVM):     vms,
+		corev1.ResourceName(types.ResourceVMSlot): slot,
+		corev1.ResourceName(types.ResourceMetal):  metal,
 	}
 
 	resCPU := inv.Cfg.ReservedCPU.DeepCopy()
@@ -101,12 +105,13 @@ func Capacity(inv Inventory) (capList, alloc corev1.ResourceList, err error) {
 	}
 
 	alloc = corev1.ResourceList{
-		corev1.ResourceCPU:                       allocCPU,
-		corev1.ResourceMemory:                    allocMem,
-		corev1.ResourceEphemeralStorage:          allocDisk,
-		corev1.ResourcePods:                      pods,
-		corev1.ResourceName(types.ResourceVM):    vms,
-		corev1.ResourceName(types.ResourceMetal): metal,
+		corev1.ResourceCPU:                        allocCPU,
+		corev1.ResourceMemory:                     allocMem,
+		corev1.ResourceEphemeralStorage:           allocDisk,
+		corev1.ResourcePods:                       pods,
+		corev1.ResourceName(types.ResourceVM):     vms,
+		corev1.ResourceName(types.ResourceVMSlot): slot,
+		corev1.ResourceName(types.ResourceMetal):  metal,
 	}
 	return capList, alloc, nil
 }
@@ -196,20 +201,25 @@ func Taints(inv Inventory) []corev1.Taint {
 			Key: types.TaintNATKey, Value: types.TaintNATValue, Effect: corev1.TaintEffectNoSchedule,
 		})
 	}
-	if inv.Slots != nil && inv.Slots.Full() {
-		out = append(out, corev1.Taint{
-			Key: types.TaintVMFullKey, Value: types.TaintVMFullValue, Effect: corev1.TaintEffectNoSchedule,
-		})
-	}
+	// Slot exhaustion is darwin.node/vm-slot, not a taint. A taint lands
+	// after kube-scheduler has already bound more pods than the host can run.
 	return out
 }
 
 func mergeTaints(existing, extra []corev1.Taint) []corev1.Taint {
 	idx := map[string]corev1.Taint{}
 	for _, t := range existing {
+		// Drop a vm-full taint left by an older process. Publishing it again
+		// would put the dynamic gate back.
+		if t.Key == types.TaintVMFullKey {
+			continue
+		}
 		idx[t.Key] = t
 	}
 	for _, t := range extra {
+		if t.Key == types.TaintVMFullKey {
+			continue
+		}
 		idx[t.Key] = t
 	}
 	out := make([]corev1.Taint, 0, len(idx))

@@ -17,3 +17,10 @@ service account token from this node.
 This release does not bind a ServiceAccount. Do not point the Mac's
 kubeconfig at a ServiceAccount token. Use the system:node credential above.
 {{ end }}
+{{ if .Values.runtimeClass.enabled }}
+
+RuntimeClass {{ .Values.runtimeClass.name }} is installed. Set
+spec.runtimeClassName to that name so the pod tolerates this node.
+Request darwin.node/vm-slot: "1" on the macOS container, or set
+admission.slotRequest so the MutatingAdmissionPolicy adds it.
+{{ end }}

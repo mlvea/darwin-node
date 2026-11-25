@@ -4,7 +4,10 @@
 // Invariants:
 //   - A warm VM holds a real slot from the same fail-closed table as pods;
 //     the pool only ever fills capacity pods do not need right now.
-//   - Real demand evicts warm entries before any pod is rejected.
+//   - A real pod preempts an in-flight warm boot and evicts a pooled VM
+//     that it cannot adopt.
+//   - Only a warm VM whose image and size match, and whose image the pod
+//     is allowed to pull, is adopted. The adopted guest gets a new token.
 //   - Only pods whose primary container mounts nothing can adopt: virtio-fs
 //     shares are fixed at VM creation and cannot be attached post hoc.
 package engine
@@ -51,11 +54,26 @@ type warmEntry struct {
 // warmTickInterval balances adoption latency against per-tick work.
 const warmTickInterval = time.Second
 
+const (
+	warmBootBackoffInitial = time.Second
+	warmBootBackoffMax     = 30 * time.Second
+)
+
+// warmFlight is one bootWarm that has not finished. Real pods cancel it
+// so a warm boot cannot pin the only slot.
+type warmFlight struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 type warmPool struct {
-	mu      sync.Mutex
-	entries []*warmEntry
-	seq     int
-	closed  bool
+	mu        sync.Mutex
+	entries   []*warmEntry
+	seq       int
+	closed    bool
+	flights   []*warmFlight
+	nextBoot  time.Time
+	failDelay time.Duration
 }
 
 func (p *warmPool) len() int {
@@ -64,13 +82,38 @@ func (p *warmPool) len() int {
 	return len(p.entries)
 }
 
-// takeLIFO removes and returns the newest entry matching ref, or nil.
-func (p *warmPool) take(ref string) *warmEntry {
+// hasSized reports whether a pooled VM matches the image and the size.
+func (p *warmPool) hasSized(ref string, cpu uint, mem uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.entries {
+		if e.imgRef == ref && e.cpu == cpu && e.mem == mem {
+			return true
+		}
+	}
+	return false
+}
+
+// takeSized removes the newest entry matching ref and size, or nil.
+func (p *warmPool) takeSized(ref string, cpu uint, mem uint64) *warmEntry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i := len(p.entries) - 1; i >= 0; i-- {
-		if p.entries[i].imgRef == ref {
-			e := p.entries[i]
+		e := p.entries[i]
+		if e.imgRef == ref && e.cpu == cpu && e.mem == mem {
+			p.entries = append(p.entries[:i], p.entries[i+1:]...)
+			return e
+		}
+	}
+	return nil
+}
+
+// drop removes the entry with slotID. nil means it was already taken.
+func (p *warmPool) drop(slotID string) *warmEntry {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, e := range p.entries {
+		if e.slotID == slotID {
 			p.entries = append(p.entries[:i], p.entries[i+1:]...)
 			return e
 		}
@@ -157,10 +200,16 @@ func (e *Engine) noteImageRef(ref string) {
 	}
 }
 
-// fillWarm tops the pool up while free slots and the configured budget allow.
+// fillWarm drops crashed warm VMs, then tops the pool up while free slots
+// and the configured budget allow. A failed boot waits, doubling from 1s
+// to 30s. Capacity and cancellation do not count as failures.
 func (e *Engine) fillWarm(ctx context.Context) {
 	if e.draining.Load() {
 		return // freed slots during a drain belong to departing pods, not the pool
+	}
+	e.sweepCrashedWarm()
+	if !e.bootAllowed() {
+		return
 	}
 	ref := e.warmImageRef()
 	if ref == "" {
@@ -168,17 +217,109 @@ func (e *Engine) fillWarm(ctx context.Context) {
 	}
 	for ctx.Err() == nil {
 		// WarmSlots is fixed at New. Production never writes it again;
-		// the replenisher reads the field with no lock.
+		// the replenisher reads the field with no lock. Tests that drive
+		// fillWarm themselves set it before the call.
 		budget := min(e.cfg.WarmSlots-e.warm.len(), e.slots.Free())
 		if budget <= 0 {
 			return
 		}
 		if err := e.bootWarm(ctx, ref); err != nil {
 			if !errors.Is(err, capacity.ErrVMCapacityExhausted) && !errors.Is(err, context.Canceled) {
+				e.noteBootFailure()
 				slog.Warn("warm pool", "boot", err)
 			}
 			return
 		}
+		e.noteBootSuccess()
+	}
+}
+
+func (e *Engine) bootAllowed() bool {
+	e.warm.mu.Lock()
+	defer e.warm.mu.Unlock()
+	if e.warm.nextBoot.IsZero() {
+		return true
+	}
+	return !e.now().Before(e.warm.nextBoot)
+}
+
+func (e *Engine) noteBootFailure() {
+	e.warm.mu.Lock()
+	defer e.warm.mu.Unlock()
+	d := e.warm.failDelay
+	if d < warmBootBackoffInitial {
+		d = warmBootBackoffInitial
+	}
+	e.warm.nextBoot = e.now().Add(d)
+	next := d * 2
+	if next > warmBootBackoffMax {
+		next = warmBootBackoffMax
+	}
+	e.warm.failDelay = next
+}
+
+func (e *Engine) noteBootSuccess() {
+	e.warm.mu.Lock()
+	defer e.warm.mu.Unlock()
+	e.warm.nextBoot = time.Time{}
+	e.warm.failDelay = 0
+}
+
+func (e *Engine) warmBooting() int {
+	e.warm.mu.Lock()
+	defer e.warm.mu.Unlock()
+	return len(e.warm.flights)
+}
+
+func (e *Engine) addFlight(f *warmFlight) {
+	e.warm.mu.Lock()
+	e.warm.flights = append(e.warm.flights, f)
+	e.warm.mu.Unlock()
+}
+
+func (e *Engine) removeFlight(f *warmFlight) {
+	e.warm.mu.Lock()
+	defer e.warm.mu.Unlock()
+	for i, g := range e.warm.flights {
+		if g == f {
+			e.warm.flights = append(e.warm.flights[:i], e.warm.flights[i+1:]...)
+			return
+		}
+	}
+}
+
+// preemptOneWarmBoot cancels the oldest in-flight warm boot and waits until
+// its slot has been released.
+func (e *Engine) preemptOneWarmBoot() bool {
+	e.warm.mu.Lock()
+	if len(e.warm.flights) == 0 {
+		e.warm.mu.Unlock()
+		return false
+	}
+	f := e.warm.flights[0]
+	e.warm.flights = e.warm.flights[1:]
+	e.warm.mu.Unlock()
+	f.cancel()
+	<-f.done
+	return true
+}
+
+// sweepCrashedWarm removes pooled VMs that have stopped or failed. A warm
+// boot still in Starting is left alone; a real pod preempts that separately.
+func (e *Engine) sweepCrashedWarm() {
+	for _, entry := range e.warm.snapshot() {
+		if entry == nil || entry.machine == nil {
+			continue
+		}
+		st := entry.machine.Status()
+		if st.State != types.VMStopped && st.State != types.VMFailed {
+			continue
+		}
+		if e.warm.drop(entry.slotID) == nil {
+			continue
+		}
+		slog.Info("warm pool: removing crashed VM", "slot", entry.slotID, "state", st.State)
+		e.stopWarmEntry(entry)
 	}
 }
 
@@ -202,6 +343,17 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 	}
 	defer e.warmBootWG.Done()
 
+	// Registered before Create so a real pod can cancel a boot that is
+	// already inside the runtime.
+	bootCtx, cancel := context.WithCancel(ctx)
+	flight := &warmFlight{cancel: cancel, done: make(chan struct{})}
+	e.addFlight(flight)
+	defer func() {
+		cancel()
+		e.removeFlight(flight)
+		close(flight.done)
+	}()
+
 	e.warm.mu.Lock()
 	if e.warm.closed {
 		e.warm.mu.Unlock()
@@ -219,15 +371,24 @@ func (e *Engine) bootWarm(ctx context.Context, ref string) error {
 	defer e.untrackBoot(slotID)
 	root := filepath.Join(e.cfg.CacheDir, "warm", fmt.Sprint(seq))
 	diskDir := podMACDir(e.cfg.CacheDir, slotID)
-	token, mac, cpu, mem, machine, probe, err := e.bootWarmMachine(ctx, slotID, ref, root)
+	token, mac, cpu, mem, machine, probe, err := e.bootWarmMachine(bootCtx, slotID, ref, root)
 	entry := &warmEntry{
 		seq: seq, slotID: slotID, imgRef: ref, root: root, diskDir: diskDir,
 		token: token, mac: mac, cpu: cpu, mem: mem, machine: machine, probe: probe,
 	}
 	if err != nil {
 		// bootWarmMachine stops a VM that Create/Start left running.
+		// Clear it so stopWarmEntry does not stop twice, then release
+		// the slot before flight.done is closed. A preempting pod waits
+		// on that close and then acquires.
+		if machine != nil {
+			_ = machine.Stop(context.Background(), 0)
+		}
 		entry.machine = nil
 		e.stopWarmEntry(entry)
+		if errors.Is(bootCtx.Err(), context.Canceled) && ctx.Err() == nil {
+			return context.Canceled
+		}
 		return err
 	}
 	if !e.warm.addIfOpen(entry) {
@@ -348,20 +509,6 @@ func (e *Engine) bootWarmMachine(ctx context.Context, slotID, ref, root string) 
 	return token, mac, cpu, mem, mach, cli, nil
 }
 
-// takeWarm adopts a pre-booted VM for pod's image, or returns nil. The warm
-// slot is released here: from this point the pod's own slot (already
-// acquired in Create) covers the machine, and the entry leaves the pool.
-func (e *Engine) takeWarm(imageRef string) *warmEntry {
-	entry := e.warm.take(imageRef)
-	if entry == nil {
-		return nil
-	}
-	e.slots.Release(entry.slotID)
-	e.events.Normal(context.Background(), event.ReasonWarmAdopted,
-		fmt.Sprintf("pod adopted pre-booted VM %s (no cold boot)", entry.slotID))
-	return entry
-}
-
 // canAdopt reports whether a pod can run on a pre-booted VM: virtio-fs
 // shares are fixed at creation, so container[0] must mount nothing and
 // declare no cache volumes.
@@ -374,28 +521,6 @@ func canAdopt(pod *corev1.Pod) bool {
 	}
 	caches, err := ParseCacheAnnotations(pod)
 	return err == nil && len(caches) == 0
-}
-
-// reclaimWarmForPod frees capacity for real demand. It prefers a warm entry
-// matching ref and returns it alive for direct adoption; otherwise it stops
-// the oldest entry to make room. ok reports whether a slot was freed.
-func (e *Engine) reclaimWarmForPod(ref string, adoptable bool) (entry *warmEntry, ok bool) {
-	if adoptable {
-		if entry = e.warm.take(ref); entry != nil {
-			e.events.Normal(context.Background(), event.ReasonWarmAdopted,
-				fmt.Sprintf("pending pod will adopt pre-booted VM %s", entry.slotID))
-			return entry, true
-		}
-	}
-	if entry = e.warm.popOldest(); entry != nil {
-		slog.Info("warm pool: evicting for pod demand", "slot", entry.slotID)
-		id := entry.slotID
-		e.stopWarmEntry(entry)
-		e.events.Normal(context.Background(), event.ReasonWarmEvicted,
-			"reclaimed slot "+id+" for a pending pod")
-		return nil, true
-	}
-	return nil, false
 }
 
 // shutdownWarmPool stops all warm VMs and releases their slots. It waits for

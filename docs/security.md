@@ -142,6 +142,11 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
   independently). There is no TCP listener and no TCP dial. The pod
   token stays in the 0600 file on the control share and is sent only
   on the vsock handshake. It is generated at CreatePod and never logged.
+  A pod that adopts a warm VM gets a new token, written with a temp file
+  and rename, before the pod dials. The warm-boot token is not reused.
+  The supplied guest watches that file about every 2s. The fake runtime
+  used in tests is told the new token directly. A dial retry covers the
+  watch interval on a real guest.
 - Control frames are capped at 64 KiB. Stream and materialize frames
   may be up to 16 MiB. A frame over its cap, or JSON nested deeper
   than 32, closes the session. Unknown JSON fields are ignored.
@@ -277,6 +282,12 @@ is not subject to these checks.
   credentials. Anonymous success is a public image. `imagePullPolicy:
   Always` pulls again. `IfNotPresent` and `Never` still do the manifest
   check, so a registry that is down refuses the cache.
+- Adopting a warm VM for a private image uses that same check, with the
+  pod's own pull credentials. A committed pull cache that this pod cannot
+  authorize is not adopted; the pod cold-boots. A warm image with no
+  committed cache (a local bake the fake runtime never pulled) is not
+  sent to the registry. An authorization failure does not fail the pod
+  by itself.
 - The cache directory name is the sha256 of the full reference. Older
   names (`:` rewritten to `--`, `/` to `_`) are deleted on startup and
   are not renamed onto the new key. The next start pulls again.

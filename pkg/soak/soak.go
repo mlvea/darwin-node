@@ -295,6 +295,15 @@ func (r *runner) cycle(ctx context.Context, n int) error {
 		}
 		r.live = append(r.live, name)
 	}
+	for slot := 0; slot < r.width; slot++ {
+		name := podName(slot)
+		if err := r.waitRunning(ctx, name); err != nil {
+			return fmt.Errorf("cycle %d: %w", n, err)
+		}
+	}
+	// The synchronous reject fires once the running VMs hold every slot.
+	// A create during image pull or boot backoff is accepted: those steps
+	// do not hold a slot, and the pod retries the acquire.
 	if r.width == r.max {
 		const overflow = "soak-overflow"
 		err := r.eng.Create(ctx, r.pod(overflow, fmt.Sprintf("soak-overflow-%d", n), 0), engine.Credentials{})
@@ -306,12 +315,6 @@ func (r *runner) cycle(ctx context.Context, n int) error {
 			return driftf(driftSlot, n, "create past %d VMs: %v", r.max, err)
 		}
 		r.capRejects++
-	}
-	for slot := 0; slot < r.width; slot++ {
-		name := podName(slot)
-		if err := r.waitRunning(ctx, name); err != nil {
-			return fmt.Errorf("cycle %d: %w", n, err)
-		}
 	}
 	if err := checkSlots(r.eng.Slots().Used(), r.width, r.max, n); err != nil {
 		return err

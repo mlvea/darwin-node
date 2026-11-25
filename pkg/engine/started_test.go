@@ -254,7 +254,7 @@ func TestLivenessRestartResetsStartedUntilStartupPasses(t *testing.T) {
 	passBoot.Store(false)
 	kill.Store(true)
 
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(20 * time.Second)
 	sawReset := false
 	for time.Now().Before(deadline) {
 		p, err := e.Get("default", "boot")

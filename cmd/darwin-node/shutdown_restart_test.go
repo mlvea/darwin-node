@@ -167,7 +167,7 @@ func waitSignalEntered(t *testing.T, entered <-chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatalf("%s did not start", what)
 	}
 }

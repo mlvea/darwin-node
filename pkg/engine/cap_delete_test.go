@@ -123,20 +123,39 @@ func TestDeleteDuringInFlightCreateDoesNotAdmitAThirdVM(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	usedAtWait := e.slots.Used()
+	if usedAtWait != 1 {
+		t.Fatalf("pod a released its slot while Runtime.Create was still running: used=%d", usedAtWait)
+	}
 
+	// Create admits before the slot is taken, so b fits in the free slot.
+	// b's start can acquire that slot before c is created. c is then
+	// rejected. That rejection is the cap. c is admitted only when b has
+	// not acquired yet. Either way the blocked Create must not let a
+	// third VM become running.
 	errB := e.Create(context.Background(), samplePod("b", "uid-b"), Credentials{})
+	if errB != nil {
+		t.Fatalf("second pod while one slot is free: %v", errB)
+	}
 	errC := e.Create(context.Background(), samplePod("c", "uid-c"), Credentials{})
-	if errB == nil && errC == nil {
-		t.Fatalf("admitted two pods while pod a was still inside Runtime.Create (slots at Delete wait: %d)", usedAtWait)
+	if errC != nil && !errors.Is(errC, capacity.ErrVMCapacityExhausted) {
+		t.Fatalf("third pod: %v", errC)
 	}
-	if (errB == nil) == (errC == nil) {
-		t.Fatalf("want exactly one of the two pods admitted into the remaining slot, b=%v c=%v slots=%d", errB, errC, e.slots.Used())
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && e.slots.Used() < 2 {
+		time.Sleep(time.Millisecond)
 	}
-	rejected := errB
-	if errB == nil {
-		rejected = errC
+	if used := e.slots.Used(); used != 2 {
+		t.Fatalf("slots=%d, want both slots held while Runtime.Create has not returned", used)
 	}
-	if !errors.Is(rejected, capacity.ErrVMCapacityExhausted) {
-		t.Fatalf("rejection: %v", rejected)
+	if got := rt.Running(); got != 0 {
+		t.Fatalf("running=%d before Runtime.Create returned", got)
+	}
+	letCreateReturn()
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := rt.Running(); got > 2 {
+			t.Fatalf("running VMs %d exceed the 2-slot cap", got)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

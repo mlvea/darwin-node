@@ -176,6 +176,16 @@ type oneSessionMachine struct {
 	open int
 }
 
+func (m *oneSessionMachine) SetAgentToken(token string) {
+	m.mu.Lock()
+	m.token = token
+	m.mu.Unlock()
+	m.h.SetToken(token)
+	if setter, ok := m.Machine.(interface{ SetAgentToken(string) }); ok {
+		setter.SetAgentToken(token)
+	}
+}
+
 func (m *oneSessionMachine) Stop(ctx context.Context, grace time.Duration) error {
 	m.cancel()
 	return m.Machine.Stop(ctx, grace)

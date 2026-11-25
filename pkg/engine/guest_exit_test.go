@@ -240,6 +240,13 @@ func TestLivenessRestartDropsGuestExit(t *testing.T) {
 	waitGuestExit(t, e, "default/lv", 137)
 	fail.Store(true)
 	clk.Advance(5 * time.Second)
+	if !clk.WaitArmed(2 * time.Second) {
+		t.Fatal("liveness failure did not arm the restart backoff")
+	}
+	if rt.Starts() != 1 {
+		t.Fatalf("liveness restarted before the 10s backoff: starts=%d", rt.Starts())
+	}
+	clk.Advance(10 * time.Second)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		e.mu.RLock()

@@ -17,11 +17,12 @@ import (
 
 // Start retries. The delay is bounded. The attempt count is not: a pull,
 // boot, or dial keeps going until it works, the error is permanent, or the
-// pod context is cancelled (delete or shutdown). The VM slot acquired in
-// Create stays held the whole time. Releasing it would admit another VM on
-// a 2-VM host while this pod is about to retry, and failing the pod would
-// make a ReplicaSet create the next Failed pod. The pod stays Pending with
-// reason BackOff.
+// pod context is cancelled (delete or shutdown). Image pull and VM boot
+// release the slot before this sleep, so a pod stuck pulling or backing
+// off does not pin a VM. Guest-agent dial keeps the slot: the VM is
+// already running and the Apple cap counts running VMs. Failing the pod
+// would make a ReplicaSet create the next Failed pod. The pod stays
+// Pending with reason BackOff.
 const (
 	startRetryInitial = time.Second
 	startRetryMax     = 30 * time.Second

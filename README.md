@@ -88,10 +88,13 @@ flowchart TD
 
 - **Pods.** `containers[0]` is the macOS VM. `containers[1..]` are Docker
   sidecars on the host. Init containers run on the host only.
-- **Capacity.** Each VM takes one slot in a table that fails closed at two
-  (Apple's macOS EULA and the XNU `hv_apple_isa_vm_quota` limit). If both slots
-  are held, the next pod is **rejected** with `VMCapacityExhausted`. It is not
-  queued.
+- **Capacity.** Each VM takes one `darwin.node/vm-slot`. The node advertises
+  that extended resource at the configured maximum (1 or 2) and fails closed
+  there (Apple's macOS EULA and the XNU `hv_apple_isa_vm_quota` limit). If
+  every slot is held and no warm VM can be reclaimed, the next pod is
+  **rejected** with `VMCapacityExhausted`. It is not queued. The node does
+  not publish `darwin.node/vm-full`; a stale taint is removed on the next
+  status update.
 - **Guest agent.** `darwin-guest-agent` is baked into every image and runs
   under launchd. Exec (stdin, PTY, resize), logs, probes, metrics and shutdown
   all go to it over **vsock**. There is no TCP path to the agent. SSH is an
@@ -208,8 +211,7 @@ export APISERVER_CA_CERT_LOCATION=$HOME/.kube/ca.crt
   --allow-nat-workloads
 
 kubectl get node -o jsonpath='{.items[*].status.capacity}'
-# main today:          pods=2, darwin.node/vm=2, darwin.node/metal=2
-# [pending #44] adds:  darwin.node/vm-slot=2
+# pods=2, darwin.node/vm=2, darwin.node/vm-slot=2, darwin.node/metal=2
 ```
 
 To run it as a service, use the launchd plist at
@@ -233,10 +235,10 @@ helm install darwin-node deploy/helm/darwin-node -n darwin-node --create-namespa
 |---|---|---|
 | `rbac.identity` | `node` | `node`: use a `system:node:<nodename>` credential, so the Node authorizer and NodeRestriction apply (preferred). `serviceaccount`: bind a ServiceAccount and list every allowed namespace in `rbac.namespaces`. |
 | `rbac.namespaces` | `[]` | Only used with `identity: serviceaccount` |
-| `runtimeClass.enabled` | `false` | [pending #44] Installs RuntimeClass `darwin-vm`, which carries the node's static tolerations and `kubernetes.io/os=darwin` |
-| `admission.slotRequest` | `false` | [pending #44] MutatingAdmissionPolicy (Kubernetes 1.32+) that sets `darwin.node/vm-slot: "1"` on container 0 |
+| `runtimeClass.enabled` | `false` | Installs RuntimeClass `darwin-vm`, which carries the node's static tolerations and `kubernetes.io/os=darwin` |
+| `admission.slotRequest` | `false` | MutatingAdmissionPolicy (Kubernetes 1.32+) that sets `darwin.node/vm-slot: "1"` on container 0 |
 
-The chart is version **0.2.0** on main. [pending #44] brings it to **0.3.0**.
+The chart is version **0.3.0**.
 
 ## Scheduling a macOS pod
 
@@ -248,7 +250,13 @@ off with `--disable-taint` / `--allow-nat-workloads`:
 | `virtual-kubelet.io/provider=darwin-node:NoSchedule` | Always (unless `--disable-taint`) |
 | `darwin.node/macos=true:NoSchedule` | Always (unless `--disable-taint`) |
 | `darwin.node/nat-only=true:NoSchedule` | NAT mode without `--allow-nat-workloads` |
-| `darwin.node/vm-full=true:NoSchedule` | **main today:** while both slots are held. [pending #44] Removed. Capacity is then expressed only through the `darwin.node/vm-slot` extended resource, and a stale taint is stripped. |
+
+`darwin.node/vm-full` is not published. Capacity is the extended resource
+`darwin.node/vm-slot` (capacity and allocatable equal the configured maximum).
+A stale `vm-full` taint is stripped on the next status update. `darwin.node/vm`
+and `darwin.node/metal` stay at the same count so older manifests still bind.
+The scheduler accounts each extended resource on its own, so a pod should
+request `darwin.node/vm-slot: "1"`.
 
 Minimal pod (from [examples/pod.yaml](examples/pod.yaml)):
 
@@ -271,7 +279,7 @@ spec:
         requests:
           cpu: "4"
           memory: 8Gi
-          darwin.node/vm-slot: "1"   # [pending #44] the scheduler contract
+          darwin.node/vm-slot: "1"   # the scheduler contract
           darwin.node/vm: "1"        # kept so older manifests still bind
           darwin.node/metal: "1"
       readinessProbe:
@@ -281,9 +289,9 @@ spec:
 ```
 
 More examples: [hybrid pod with sidecars](examples/pod-hybrid.yaml) and
-[cache volumes](examples/pod-cache.yaml). [pending #44] With
-`runtimeClass.enabled` and `admission.slotRequest` on, you only need
-`runtimeClassName: darwin-vm`. See `docs/scheduling.md` (added by #44).
+[cache volumes](examples/pod-cache.yaml). With `runtimeClass.enabled` and
+`admission.slotRequest` on, you only need `runtimeClassName: darwin-vm`.
+See [docs/scheduling.md](docs/scheduling.md).
 
 **Features beyond basic pods**
 
@@ -296,11 +304,14 @@ More examples: [hybrid pod with sidecars](examples/pod-hybrid.yaml) and
 | Delta image updates | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
 | Debug snapshot without a cluster | `darwin-node debug-dump -o debug-snapshot.json` | [docs/testing.md](docs/testing.md) |
 
-Warm-pool adoption today needs a matching image. [pending #44] It also needs a
-matching vCPU/memory size (the pool boots 2 vCPU / 4 GiB). A real pod cancels
-an in-progress warm boot or evicts a warm guest before it is rejected. Adopting
+Warm-pool adoption needs a matching image and a matching vCPU and memory
+size. The pool boots 2 vCPU and 4 GiB, which is the default request, so a
+pod that omits resources still matches. A mismatch cold-boots and leaves
+the warm VM in the pool when another slot is free. A real pod cancels an
+in-progress warm boot or evicts a warm guest before it is rejected. Adopting
 a cached private image checks the pod's own pull credentials again, and every
-adopted guest gets a new agent token.
+adopted guest gets a new agent token. The slot is taken immediately before
+`Create`/`Start`; image pull and boot backoff do not hold one.
 
 ## Configuration
 
@@ -462,8 +473,8 @@ The full list is in [docs/limitations.md](docs/limitations.md). The ones that
 matter most:
 
 - **At most two macOS VMs per Mac.** This comes from Apple's licence and XNU and
-  can't be changed. A third pod fails with `VMCapacityExhausted` and is not
-  queued.
+  can't be changed. A pod that would exceed that, with nothing warm to reclaim,
+  fails with `VMCapacityExhausted` and is not queued.
 - **No Intel Macs, nested virtualization or GPU passthrough.** Metal is shared
   and paravirtual.
 - **No PVC/CSI.** Cache volumes cover the main need (persistent DerivedData).
@@ -474,9 +485,10 @@ matter most:
   container's bridge address. Docker Desktop and Colima often do not route
   that subnet to the Mac, and the probe then fails closed with
   `probe dial failed`.
-- **Liveness restarts.** Main today fails the pod after 6 restarts. [pending
-  #44] Kubelet-style backoff (10 s doubling to 5 m, reset after 10 m healthy),
-  with the pod kept `Running` and its slot held.
+- **Liveness restarts.** After `failureThreshold` failures the VM waits 10s,
+  then 20s, doubling to 5m, and that wait resets to 10s after 10 minutes
+  without a restart. The phase stays `Running` and the slot stays held.
+  There is no lifetime cap.
 - **No real hardware run yet.** See the status table at the top.
 
 ## Hardware validation
@@ -505,9 +517,9 @@ to beta.
    bridge, `no-new-privileges`, admission rejects for privileged and host
    namespaces, and container-address probes. Still open on that path: an
    `--internal` bridge, plus seccomp, AppArmor, `fsGroup`, and
-   `supplementalGroups`. [pending #44] covers `vm-slot` scheduling,
-   warm-pool safety, and liveness backoff. After that, the remaining
-   stability items (hostPort connection lifecycle, among others).
+   `supplementalGroups`, and the remaining stability items (hostPort
+   connection lifecycle, among others). `darwin.node/vm-slot` scheduling,
+   warm-pool image and size matching, and liveness backoff are in place.
 3. **Pod networking:** an in-process L2→L3 router that gives VMs
    cluster-routable IPs, compatible with the cluster CNI. The design is chosen;
    it needs CNI confirmation.
@@ -547,7 +559,7 @@ examples/            pod manifests
 |---|---|
 | [docs/installation.md](docs/installation.md) | Build, sign, launchd, upgrades, Helm |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit together |
-| `docs/scheduling.md` [pending #44] | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
+| [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
 | [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle and adoption rules |
 | [docs/cache-volumes.md](docs/cache-volumes.md) | Cache annotations and snapshot store |
 | [docs/delta-images.md](docs/delta-images.md) | Delta format and apply algorithm |
