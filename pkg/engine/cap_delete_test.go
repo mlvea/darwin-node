@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"sync"
@@ -126,13 +127,18 @@ func TestDeleteDuringInFlightCreateDoesNotAdmitAThirdVM(t *testing.T) {
 		t.Fatalf("pod a released its slot while Runtime.Create was still running: used=%d", usedAtWait)
 	}
 
-	// Both may be accepted: one free slot remains, and the slot is taken
-	// inside start rather than in Create. The third VM must not enter
-	// Runtime.Create while a and one of these hold the two slots.
+	// Create admits before the slot is taken, so b fits in the free slot.
+	// b's start can acquire that slot before c is created. c is then
+	// rejected. That rejection is the cap. c is admitted only when b has
+	// not acquired yet. Either way the blocked Create must not let a
+	// third VM become running.
 	errB := e.Create(context.Background(), samplePod("b", "uid-b"), Credentials{})
+	if errB != nil {
+		t.Fatalf("second pod while one slot is free: %v", errB)
+	}
 	errC := e.Create(context.Background(), samplePod("c", "uid-c"), Credentials{})
-	if errB != nil || errC != nil {
-		t.Fatalf("admission while one slot is free: b=%v c=%v", errB, errC)
+	if errC != nil && !errors.Is(errC, capacity.ErrVMCapacityExhausted) {
+		t.Fatalf("third pod: %v", errC)
 	}
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && e.slots.Used() < 2 {

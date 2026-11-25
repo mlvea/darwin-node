@@ -9,6 +9,10 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — cap test follows slot timing
+
+- **HEAD:** `cursor/node-capacity-warm-pool-adf5`. The pull_request run of `0b26097` failed `test (linux)` in `TestDeleteDuringInFlightCreateDoesNotAdmitAThirdVM`: `b=<nil> c=rejected: darwin.node/vm-slot capacity exhausted (2/2 in use)`. The push run of the same SHA passed. `Create` admits a pod before it takes a slot, so pod b can acquire the free slot before pod c is created. The test required both admissions. It now accepts c being rejected with `ErrVMCapacityExhausted` in that window, and still requires both slots held with `Running()==0` until the blocked `Runtime.Create` returns, then `Running()` never above 2.
+
 ### 2026-11-25 (Asia/Singapore) — B-16 vm-slot; slot timing; warm-pool safety; B-18 liveness backoff
 
 - **HEAD:** `cursor/node-capacity-warm-pool-adf5`, rebased onto `main` at `0ba597a` (merge of PR #42, guest-agent trust; plaintext TCP fallback removed). `main` was not pushed. No force-push. The guest-agent dial is vsock only. It still holds the VM slot, because the VM is running.
