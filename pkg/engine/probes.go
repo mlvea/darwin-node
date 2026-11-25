@@ -317,12 +317,26 @@ func (e *Engine) watch(ctx context.Context, rec *podRecord) {
 			}
 			// recoverAgent returns without a new client when the VM is
 			// already down. Selecting the same closed session again would
-			// spin. The death path on the next tick owns the restart.
+			// spin. Note the death here: the next timer is ProbeInterval
+			// once the agent is gone, and a stopped VM would sit Running
+			// until that interval elapsed.
 			rec.mu.Lock()
-			if rec.agent == sessionCli {
+			cleared := rec.agent == sessionCli
+			if cleared {
 				rec.agent = nil
 			}
 			rec.mu.Unlock()
+			if !cleared {
+				continue
+			}
+			restarted, keep := e.noteVMDeath(ctx, rec)
+			if !keep {
+				return
+			}
+			if restarted {
+				probes = vmProbeState{}
+				sched = vmProbeSched{}
+			}
 		}
 	}
 }

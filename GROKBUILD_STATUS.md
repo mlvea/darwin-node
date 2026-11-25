@@ -9,6 +9,14 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — fake Stop joins guest Serves
+
+- **HEAD:** `cursor/node-capacity-warm-pool-adf5`. The macOS push run of `f6a49ce` failed `test` in `TestHybridSidecarRestartsWhenPolicySaysSo/always-nonzero`: one `(*Handler).idleWatchdog` was still in select after the test. The pull_request run of the same SHA passed. `main` then merged PR #44 at `9644996`, which includes that commit. This branch was merged with `origin/main`. `main` was not pushed. No force-push.
+- **Fix:** `Handler.Close` closes the shared live state every `Serve` selects on (`dfa55b8`). `fake.Stop` also closes each server connection and waits for those Serves to return. The wait is a generation, so a `Start` that races it Adds to a new set. A stopped VM is recorded when its agent session ends, so the watch applies that exit immediately. `docs/limitations.md` says so. Test machines that serve their own guest (`reportMachine`, `oneSessionMachine`) cancel and join those Serves.
+- **Verification (Linux):** `go vet ./...` passed. `golangci-lint` 2.12.2 reported 0 issues. `go test ./... -short -count=1 -race -timeout 600s -p 2` passed (`pkg/engine` 165.965s, `cmd/darwin-node` 13.981s, `pkg/provider` 13.413s, `pkg/guest` 12.355s, `pkg/image` 3.015s, `pkg/soak` 2.077s, `pkg/runtime/fake` 1.020s).
+- **Open risks:** the real Virtualization.framework stop path was not changed. The guest token-file watch and cancelling a real warm boot stay hardware-pending, as in the B-16 entry. govulncheck findings from the T-16 entry are unchanged.
+- **Next priority:** the macOS `-race` job on this follow-up. Sidecar `docker exec` still returns a plain `exit code N` error.
+
 ### 2026-11-25 (Asia/Singapore) — cap test follows slot timing
 
 - **HEAD:** `cursor/node-capacity-warm-pool-adf5`. The pull_request run of `0b26097` failed `test (linux)` in `TestDeleteDuringInFlightCreateDoesNotAdmitAThirdVM`: `b=<nil> c=rejected: darwin.node/vm-slot capacity exhausted (2/2 in use)`. The push run of the same SHA passed. `Create` admits a pod before it takes a slot, so pod b can acquire the free slot before pod c is created. The test required both admissions. It now accepts c being rejected with `ErrVMCapacityExhausted` in that window, and still requires both slots held with `Running()==0` until the blocked `Runtime.Create` returns, then `Running()` never above 2.
