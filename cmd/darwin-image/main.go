@@ -170,10 +170,9 @@ func cmdDeltaCreate() *cobra.Command {
 		Use:   "delta-create --base <image-dir> --target <image-dir> --out <delta-dir>",
 		Short: "Write a verifiable delta that turns the base image into the target",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			man, err := image.ReadDeltaManifest(outDir)
-			if err != nil {
-				man = image.DeltaManifest{}
-			}
+			// CreatePatch replaces an existing manifest entry for this
+			// file name. Appending here wrote that entry a second time,
+			// and delta-apply then rejected the duplicate.
 			ref, err := image.CreatePatch(
 				filepath.Join(base, "disk.img"),
 				filepath.Join(target, "disk.img"),
@@ -181,12 +180,14 @@ func cmdDeltaCreate() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			man.Patches = append(man.Patches, ref)
-			if err := image.WriteDeltaManifest(outDir, man); err != nil {
+			// CreatePatch replaces the first entry of this name and leaves
+			// any older duplicate behind. Drop those so a directory written
+			// by a previous double-append still applies.
+			if err := keepFirstPatchPerName(outDir); err != nil {
 				return err
 			}
-			fmt.Printf("wrote %s (%s -> %s)\n", filepath.Join(outDir, ref.Name+".patch"), shortSHA(ref.BaseSHA), shortSHA(ref.DestSHA))
-			return nil
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (%s -> %s)\n", filepath.Join(outDir, ref.Name+".patch"), shortSHA(ref.BaseSHA), shortSHA(ref.DestSHA))
+			return err
 		},
 	}
 	c.Flags().StringVar(&base, "base", "", "base image dir (must be present on every applying host)")
@@ -216,8 +217,8 @@ func cmdDeltaApply() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("applied %d patches -> %s (disk %s)\n", len(man.Patches), out, img.DiskPath)
-			return nil
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "applied %d patches -> %s (disk %s)\n", len(man.Patches), out, img.DiskPath)
+			return err
 		},
 	}
 	c.Flags().StringVar(&baseDir, "base", "", "verified base image dir")
@@ -227,6 +228,29 @@ func cmdDeltaApply() *cobra.Command {
 	_ = c.MarkFlagRequired("delta")
 	_ = c.MarkFlagRequired("out")
 	return c
+}
+
+func keepFirstPatchPerName(outDir string) error {
+	man, err := image.ReadDeltaManifest(outDir)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(man.Patches))
+	kept := make([]image.PatchRef, 0, len(man.Patches))
+	dup := false
+	for _, p := range man.Patches {
+		if _, ok := seen[p.Name]; ok {
+			dup = true
+			continue
+		}
+		seen[p.Name] = struct{}{}
+		kept = append(kept, p)
+	}
+	if !dup {
+		return nil
+	}
+	man.Patches = kept
+	return image.WriteDeltaManifest(outDir, man)
 }
 
 func shortSHA(sha string) string {
