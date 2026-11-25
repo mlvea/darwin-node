@@ -41,6 +41,7 @@ func newCommand() *cobra.Command {
 	f.StringVar(&token, "token", os.Getenv("DARWIN_NODE_AGENT_TOKEN"), "shared handshake token")
 	f.StringVar(&tokenFile, "token-file", defaultTokenFile(), "token file (virtio-fs control share)")
 	f.BoolVar(&insecure, "insecure-no-token", false, "allow empty token (development only)")
+	registerUnixListen(cmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "run -- command [args...]",
 		Short: "Run the main workload, report its exit code, then halt",
@@ -103,10 +104,17 @@ func serve(ctx context.Context, token, tokenFile string, insecure bool, workload
 	// it is stopped. `run` supervises the main process and, when it
 	// exits, writes an Exit notify before halting. See guest.ExitReport.
 	// Shutdown syncs and halts so a pod stop flushes shared volumes.
+	// --unix-listen is the SimVZ stand-in and stays off unless set.
 	h := newHandler(token, insecure, nil)
+	if err := applyUnixListen(h); err != nil {
+		return err
+	}
 	h.Init()
 	if tokenFile != "" {
 		go h.WatchTokenFile(ctx, tokenFile, 2*time.Second)
+	}
+	if path := unixListenPath(); path != "" {
+		return serveOnUnixSocket(ctx, h, path, workload)
 	}
 	go dialHostVsock(ctx, h)
 
