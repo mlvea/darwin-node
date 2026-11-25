@@ -96,6 +96,26 @@ Documented failure: a third pod must become Failed `VMCapacityExhausted`.
 
 ## CI
 
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push
+and pull request. `workflow_dispatch` runs it by hand. `make test` is the
+same `go test` line as the two test jobs.
+
+| Check | Runner | What it runs |
+|---|---|---|
+| `test` | `macos-latest` | `go vet ./...`, `go test ./... -short -count=1 -race -timeout 600s`, license-file checks, `make dist` |
+| `test (linux)` | `ubuntu-latest` | `go vet ./...`, `go test ./... -short -count=1 -race -timeout 600s` |
+| `kubelet auth envtest` | `ubuntu-latest` | `make test-kubelet-auth` |
+| `lint` | `ubuntu-latest` | golangci-lint v2.12.2 with [`.golangci.yml`](../.golangci.yml) |
+| `govulncheck` | `ubuntu-latest` | govulncheck v1.7.0. It reports findings. On Go 1.25 the job stays green for the known standard-library and dependency issues whose published fixes need Go 1.26. |
+| `e2e (self-hosted)` | `[self-hosted, macOS, ARM64, darwin-node-e2e]` | `go test ./... -count=1 -timeout 120s`, including clonefile. Only on `workflow_dispatch`. No runner is attached, so the job does not run. |
+
+Hosted macOS runners are themselves VMs and cannot boot a macOS guest, so
+they never run the hardware gate. A hosted macOS job is sometimes cancelled
+with "not acquired by runner" when GitHub has no free runner. Re-run it.
+That cancellation is a missing runner, not a failed test. The hardware
+gate still needs a bare-metal Mac
+([HARDWARE_VALIDATION.md](HARDWARE_VALIDATION.md)).
+
 ## Visual debug (no cluster)
 
 ```bash
@@ -108,13 +128,3 @@ open web/debug.html   # or open the copies written next to snapshot.js
 Embed source of truth is `pkg/debug/assets/` (`go:embed`). Top-level `web/` is a
 gitignored local convenience for `file://` browsing. The page uses plain
 `<script src>` (not ES modules) so `file://` works.
-
-`.github/workflows/ci.yml` at this repository root:
-
-- `go test ./... -short` on `macos-latest` (compile + unit)
-- `go test ./... -short -race` on `ubuntu-latest` (same suite under the race detector)
-- `go vet` on both
-- `make test-kubelet-auth` on `ubuntu-latest`
-- No VM boot on GitHub-hosted runners (Virtualization.framework is not a
-  reliable nested target). Real e2e is `workflow_dispatch` on a self-hosted
-  `macos-arm64` runner labelled `darwin-node-e2e`.

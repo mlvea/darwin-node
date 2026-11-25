@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/darwin-node/darwin-node/pkg/runtime"
-	"github.com/darwin-node/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/runtime"
+	"github.com/mlvea/darwin-node/pkg/types"
 )
 
 // Runtime is a stub on non-Apple-Silicon platforms.

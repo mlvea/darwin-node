@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/config"
+	"github.com/mlvea/darwin-node/pkg/config"
 )
 
 func TestLaunchdPlistPinsClientCAAndListenAddress(t *testing.T) {

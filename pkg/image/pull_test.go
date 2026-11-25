@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/digest"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )

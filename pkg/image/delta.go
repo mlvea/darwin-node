@@ -27,8 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/darwin-node/darwin-node/internal/clonefile"
-	"github.com/darwin-node/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/clonefile"
+	"github.com/mlvea/darwin-node/internal/digest"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/internal/digest"
 
 	ocidigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"

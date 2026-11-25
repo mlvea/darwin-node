@@ -93,7 +93,7 @@ func signature(goroutine string) string {
 	var frames []string
 	for _, line := range strings.Split(goroutine, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "github.com/darwin-node/") &&
+		if !strings.HasPrefix(line, "github.com/mlvea/darwin-node/") &&
 			!strings.Contains(line, marker) {
 			continue
 		}

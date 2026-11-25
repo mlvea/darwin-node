@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/darwin-node/darwin-node/internal/digest"
-	"github.com/darwin-node/darwin-node/pkg/image"
+	"github.com/mlvea/darwin-node/internal/digest"
+	"github.com/mlvea/darwin-node/pkg/image"
 
 	corev1 "k8s.io/api/core/v1"
 )

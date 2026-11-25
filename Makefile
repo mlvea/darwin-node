@@ -13,7 +13,7 @@ PYTHON    ?= python3
 ENTITLEMENTS := $(ROOT_DIR)resources/entitlements/darwin-node.entitlements
 
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS  := -X github.com/darwin-node/darwin-node/pkg/config.Version=$(VERSION)
+LDFLAGS  := -X github.com/mlvea/darwin-node/pkg/config.Version=$(VERSION)
 
 .PHONY: all build build-node build-agent build-image build-hwtest build-soak test test-short lint fmt vet tidy sign licenses dist clean help check test-hardware test-kubelet-auth soak
 
@@ -76,7 +76,7 @@ soak: build-soak ## Adopt/delete soak (fake runtime, or 24h vz when IMAGE is set
 	fi
 	"$(BINDIR)/darwin-soak" $(if $(IMAGE),--image "$(IMAGE)") $(if $(SOAK_CYCLES),--cycles $(SOAK_CYCLES)) $(if $(SOAK_DURATION),--duration $(SOAK_DURATION))
 
-check: fmt vet test build ## Everything CI runs on every push
+check: fmt vet test build ## Format, vet, the CI test command, and build
 
 licenses: ## Regenerate THIRD_PARTY_NOTICES from the Go module graph
 	$(PYTHON) "$(ROOT_DIR)hack/gen-third-party-notices.py"
@@ -89,8 +89,8 @@ dist: build ## Stage binaries plus LICENSE, NOTICE, THIRD_PARTY_NOTICES
 	cp "$(BINDIR)/darwin-node" "$(BINDIR)/darwin-guest-agent" "$(BINDIR)/darwin-image" "$(BINDIR)/darwin-hwtest" "$(BINDIR)/darwin-soak" "$(DISTDIR)/" 2>/dev/null || cp "$(BINDIR)/darwin-node" "$(BINDIR)/darwin-guest-agent" "$(BINDIR)/darwin-image" "$(DISTDIR)/"
 	cp "$(ROOT_DIR)LICENSE" "$(ROOT_DIR)NOTICE" "$(ROOT_DIR)THIRD_PARTY_NOTICES" "$(DISTDIR)/"
 
-test: ## Run all unit tests
-	$(GOTEST) $(GOFLAGS) -count=1 -race -timeout 120s $(PKG)
+test: ## Run the CI unit tests (-short -race, 600s)
+	$(GOTEST) $(PKG) $(GOFLAGS) -short -count=1 -race -timeout 600s
 
 test-short: ## Run tests that never need hardware
 	$(GOTEST) $(GOFLAGS) -count=1 -short -timeout 60s $(PKG)

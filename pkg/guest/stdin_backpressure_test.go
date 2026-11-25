@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/darwin-node/darwin-node/internal/leakcheck"
+	"github.com/mlvea/darwin-node/internal/leakcheck"
 )
 
 // A slow exec must receive every stdin byte and then EOF. The upstream

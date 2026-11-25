@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/darwin-node/darwin-node/pkg/engine"
-	"github.com/darwin-node/darwin-node/pkg/node"
+	"github.com/mlvea/darwin-node/pkg/engine"
+	"github.com/mlvea/darwin-node/pkg/node"
 
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"

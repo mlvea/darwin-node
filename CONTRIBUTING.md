@@ -2,6 +2,16 @@
 
 Issues and focused pull requests are welcome.
 
+## Workflow
+
+Everything lands through a pull request against `main`. Do not push to
+`main`, and do not force-push a shared branch. When `main` moves, update
+the branch with a merge commit. CI has to be green on the PR's head
+commit (`test` on macOS, `test (linux)`, `kubelet auth envtest`, and
+`lint`) before a maintainer merges. A hosted macOS job cancelled with
+"not acquired by runner" is a missing runner, not a red test: push an
+empty commit or re-run the job so the head is actually green.
+
 This project is **alpha**: much of the code was produced with coding
 agents and still needs review and hardware testing. Treat every PR as
 an audit, not a rubber stamp, especially `pkg/engine`, `pkg/guest`,
