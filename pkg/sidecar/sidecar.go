@@ -21,6 +21,13 @@ type Runtime interface {
 	Exec(ctx context.Context, namespace, name, container string, cmd []string, attach api.AttachIO) error
 }
 
+// Endpoint is the sidecar container's own address, from the runtime.
+// Probes dial this address. They do not dial the node's loopback when
+// the probe host is empty.
+type Endpoint interface {
+	Endpoint(ctx context.Context, namespace, name, container string) (string, error)
+}
+
 // ContainerStopper stops one container and leaves it in place. A startup
 // probe that has exhausted its failure threshold uses this so the pod
 // restart policy can start the container again. List then reports the

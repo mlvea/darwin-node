@@ -206,7 +206,7 @@ Kubernetes API
 | Graceful drain on SIGTERM/SIGINT | Yes (`--shutdown-grace-period`) |
 | Hardware release gate | Manual: `make test-hardware IMAGE=<dir>` ([docs/stability.md](docs/stability.md)) |
 | Adopt/delete soak | Short: `make soak`. 24h: `make soak IMAGE=<dir>` ([docs/stability.md](docs/stability.md)) |
-| Hybrid sidecars (mounts + resource requests) | Yes |
+| Hybrid sidecars (per-pod network, securityContext, limits, container-IP probes) | Yes |
 | Host-side init containers | Yes |
 | In-guest probes (exec / httpGet / tcpSocket) | Yes |
 | Image pull secrets, digest verify, clonefile CoW | Yes |

@@ -30,7 +30,13 @@ advisory if this project is on GitHub.
   for that path exists.
 - SSH fallback is **off** and never uses password auth.
 - `hostPath` is **denied** unless `--allowed-host-paths` is set. `/`
-  is never shared.
+  is never shared. A symlink is resolved again when the path is handed
+  to Docker, and a target outside the allowlist is rejected.
+- Sidecar probes dial the container's own address. An empty host is not
+  the node's loopback, and probe events do not include response bodies.
+- Sidecars run on a per-pod Docker network with `no-new-privileges`.
+  `privileged`, `hostNetwork`, `hostPID`, `hostIPC`, `docker.sock`, and
+  added capabilities are rejected before a VM slot is taken.
 - Image cache directories are `0700`.
 
 Operational notes: [docs/security.md](docs/security.md).

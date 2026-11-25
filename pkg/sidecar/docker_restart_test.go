@@ -32,18 +32,34 @@ type scriptedDocker struct {
 	removes     int
 	kills       int
 	started     []string
+	pullRef     string
+	pullAuth    string
+	pullAuths   []string
+	lastCfg     *container.Config
+	lastHost    *container.HostConfig
+	lastNet     *network.NetworkingConfig
+	netCreates  []string
+	netRemoves  []string
+	inspectIP   string
+	inspectNet  string
 }
 
-func (f *scriptedDocker) ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error) {
+func (f *scriptedDocker) ImagePull(_ context.Context, ref string, opts image.PullOptions) (io.ReadCloser, error) {
 	f.mu.Lock()
 	f.pulls++
+	f.pullRef = ref
+	f.pullAuth = opts.RegistryAuth
+	f.pullAuths = append(f.pullAuths, opts.RegistryAuth)
 	f.mu.Unlock()
 	return io.NopCloser(bytes.NewReader(nil)), nil
 }
 
-func (f *scriptedDocker) ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error) {
+func (f *scriptedDocker) ContainerCreate(_ context.Context, cfg *container.Config, host *container.HostConfig, netCfg *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
 	f.mu.Lock()
 	f.creates++
+	f.lastCfg = cfg
+	f.lastHost = host
+	f.lastNet = netCfg
 	f.mu.Unlock()
 	return container.CreateResponse{ID: "new-id"}, nil
 }
@@ -81,10 +97,20 @@ func (f *scriptedDocker) ContainerInspect(_ context.Context, id string) (types.C
 	if f.inspectErr != nil {
 		return types.ContainerJSON{}, f.inspectErr
 	}
-	return types.ContainerJSON{ContainerJSONBase: &types.ContainerJSONBase{
+	base := &types.ContainerJSONBase{
 		ID:    id,
 		State: &types.ContainerState{Running: f.running, ExitCode: 1},
-	}}, nil
+	}
+	var settings *types.NetworkSettings
+	if f.inspectIP != "" {
+		settings = &types.NetworkSettings{
+			NetworkSettingsBase: types.NetworkSettingsBase{},
+			Networks: map[string]*network.EndpointSettings{
+				f.inspectNet: {IPAddress: f.inspectIP},
+			},
+		}
+	}
+	return types.ContainerJSON{ContainerJSONBase: base, NetworkSettings: settings}, nil
 }
 
 func (f *scriptedDocker) ContainerList(context.Context, container.ListOptions) ([]types.Container, error) {
@@ -101,6 +127,24 @@ func (f *scriptedDocker) ContainerExecAttach(context.Context, string, types.Exec
 }
 func (f *scriptedDocker) ContainerExecInspect(context.Context, string) (types.ContainerExecInspect, error) {
 	return types.ContainerExecInspect{}, errors.New("unused")
+}
+
+func (f *scriptedDocker) NetworkCreate(_ context.Context, name string, _ types.NetworkCreate) (types.NetworkCreateResponse, error) {
+	f.mu.Lock()
+	f.netCreates = append(f.netCreates, name)
+	f.mu.Unlock()
+	return types.NetworkCreateResponse{ID: "net-" + name}, nil
+}
+
+func (f *scriptedDocker) NetworkRemove(_ context.Context, networkID string) error {
+	f.mu.Lock()
+	f.netRemoves = append(f.netRemoves, networkID)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *scriptedDocker) NetworkList(context.Context, types.NetworkListOptions) ([]types.NetworkResource, error) {
+	return nil, nil
 }
 
 func restartPod() (*corev1.Pod, corev1.Container) {

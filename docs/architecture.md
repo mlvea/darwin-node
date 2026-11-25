@@ -159,3 +159,4 @@ directly. The provider stays the Kubernetes *Pod* API.
 - Guest agent runs as root *inside* the VM, not on the host.
 - vsock is host-process-only. TCP fallback is token-authenticated.
 - Secrets exist on the host disk under a 0700 pod directory for the pod lifetime.
+- Sidecars run on a per-pod Docker bridge with `no-new-privileges`. Probes dial that container's address, and the response body is not published on the pod.

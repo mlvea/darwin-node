@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/darwin-node/darwin-node/pkg/sidecar"
 	"github.com/darwin-node/darwin-node/pkg/volume"
 
 	corev1 "k8s.io/api/core/v1"
@@ -37,6 +38,19 @@ func ValidatePod(pod *corev1.Pod, allowedHostPaths []string) error {
 	}
 	if pod.Spec.Containers[0].Image == "" {
 		return fmt.Errorf("container[0] (macOS VM) has no image")
+	}
+	if err := sidecar.ValidatePodIsolation(pod); err != nil {
+		return err
+	}
+	for _, ic := range pod.Spec.InitContainers {
+		if err := sidecar.ValidateContainerIsolation(pod, ic); err != nil {
+			return err
+		}
+	}
+	for i := 1; i < len(pod.Spec.Containers); i++ {
+		if err := sidecar.ValidateContainerIsolation(pod, pod.Spec.Containers[i]); err != nil {
+			return err
+		}
 	}
 	for _, ic := range pod.Spec.InitContainers {
 		if LooksLikeVMImage(ic.Image) {
