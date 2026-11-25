@@ -1,0 +1,7 @@
+{"seq":1,"op":"meta","order":"kvo_before_stop_completion","source":"derived","note":"derived, not hardware-recorded: third Start fails with VZErrorDomain code 6, not code 9"}
+{"seq":2,"op":"create","vm":"a"}
+{"seq":3,"op":"create","vm":"b"}
+{"seq":4,"op":"create","vm":"c"}
+{"seq":5,"op":"start","vm":"a","pre_state":"Stopped","events":[{"kind":"state_change","state":"Starting"},{"kind":"state_change","state":"Running"},{"kind":"completion_handler","err":null}]}
+{"seq":6,"op":"start","vm":"b","pre_state":"Stopped","events":[{"kind":"state_change","state":"Starting"},{"kind":"state_change","state":"Running"},{"kind":"completion_handler","err":null}]}
+{"seq":7,"op":"start","vm":"c","pre_state":"Stopped","events":[{"kind":"state_change","state":"Error"},{"kind":"completion_handler","err":{"domain":"VZErrorDomain","code":6,"name":"VZErrorVirtualMachineLimitExceeded"}}]}

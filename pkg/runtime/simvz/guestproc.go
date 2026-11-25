@@ -96,6 +96,9 @@ func (m *machine) spawnGuest(startCtx context.Context) error {
 		proc.kill()
 		return err
 	}
+	m.mu.Lock()
+	m.agentReady = true
+	m.mu.Unlock()
 	return nil
 }
 

@@ -44,7 +44,10 @@ func mustMachine(t *testing.T, rt *Runtime, name string) *machine {
 	if !ok {
 		t.Fatalf("%T", m)
 	}
-	t.Cleanup(func() { _ = mm.Stop(context.Background(), 0) })
+	t.Cleanup(func() {
+		_ = mm.Stop(context.Background(), 0)
+		mm.shutdown()
+	})
 	return mm
 }
 

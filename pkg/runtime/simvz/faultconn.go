@@ -2,6 +2,7 @@ package simvz
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -17,11 +18,13 @@ import (
 // the sleep. Mid-frame EOF is applied to reads.
 type faultConn struct {
 	net.Conn
-	clock    Clock
-	ctx      context.Context
-	dial     context.Context
-	stall    time.Duration
-	eofAfter int
+	clock      Clock
+	ctx        context.Context
+	dial       context.Context
+	stall      time.Duration
+	idle       time.Duration
+	eofAfter   int
+	idleClosed atomic.Bool
 
 	once sync.Once
 	used atomic.Int64
@@ -37,8 +40,19 @@ func (c *faultConn) Write(p []byte) (int, error) {
 		}
 		ctx, cancel := mergeCancel(c.ctx, c.dial)
 		defer cancel()
+		// A manual clock does not move wall time, so pkg/guest's idle
+		// watchdog (real ticker, blocked in a socket read) cannot fire.
+		// Close after the logical idle instead of delivering the handshake.
+		if c.clock.Wall(c.stall) == 0 && c.idle > 0 && c.stall > c.idle {
+			_ = c.clock.Sleep(ctx, c.idle)
+			c.idleClosed.Store(true)
+			return
+		}
 		_ = c.clock.Sleep(ctx, c.stall)
 	})
+	if c.idleClosed.Load() {
+		return 0, fmt.Errorf("simvz: guest idle timeout: %w", io.ErrClosedPipe)
+	}
 	if c.stall > 0 {
 		if c.ctx != nil && c.ctx.Err() != nil {
 			return 0, c.ctx.Err()

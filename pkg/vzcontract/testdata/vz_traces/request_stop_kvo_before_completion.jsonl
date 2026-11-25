@@ -1,0 +1,4 @@
+{"seq":1,"op":"meta","order":"kvo_before_stop_completion","source":"derived","note":"derived, not hardware-recorded: RequestStop uses the same notifications as Stop"}
+{"seq":2,"op":"create","vm":"vm"}
+{"seq":3,"op":"start","vm":"vm","pre_state":"Stopped","events":[{"kind":"state_change","state":"Starting"},{"kind":"state_change","state":"Running"},{"kind":"completion_handler","err":null}]}
+{"seq":4,"op":"request_stop","vm":"vm","pre_state":"Running","events":[{"kind":"state_change","state":"Stopping"},{"kind":"delegate_guest_did_stop"},{"kind":"state_change","state":"Stopped"},{"kind":"completion_handler","err":null}]}

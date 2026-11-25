@@ -16,5 +16,6 @@
 // What is not real: there is no VZVirtualMachine, no hv_apple_isa_vm_quota
 // check inside XNU, and no virtio device. The 2-VM cap and the state machine
 // are enforced here so a third Start fails the way VZErrorVirtualMachineLimitExceeded
-// fails on hardware. Confirming that the framework agrees is hardware-pending.
+// fails on hardware. pkg/vzcontract runs that behaviour as a shared suite.
+// Confirming that the framework agrees is hardware-pending.
 package simvz
