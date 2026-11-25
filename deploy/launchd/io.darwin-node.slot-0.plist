@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.darwin-node.slot-0</string>
+	<!--
+		The same signed darwin-node binary as the agent. Entitlements do
+		not survive execve, so this program must be the signed binary,
+		not a copy launched by an unsigned parent.
+	-->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/darwin-node</string>
+		<string>--role=supervisor</string>
+		<string>--slot=0</string>
+		<string>--runtime=vz</string>
+		<string>--vm-supervisor-run-dir=/var/lib/darwin-node/run</string>
+	</array>
+	<!--
+		gui/<uid>, not the system domain. The directory
+		/var/lib/darwin-node/run must be created mode 0700 and owned by
+		the GUI user before the first boot. launchd does not create it.
+		The process binds slot-0.sock itself; there is no Sockets key.
+	-->
+	<key>RunAtLoad</key>
+	<true/>
+	<!--
+		Restart only when the process dies without calling exit 0.
+		A supervisor exits 0 after its VM stops, including the dead-man
+		switch. The next pod is launchctl kickstart, or the agent's
+		subprocess spawn when --vm-supervisor-spawn=subprocess.
+	-->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/var/log/darwin-node/slot-0.stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/darwin-node/slot-0.stderr.log</string>
+</dict>
+</plist>

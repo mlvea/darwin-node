@@ -48,10 +48,15 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if spec.MemoryBytes, err = clampMemory(spec.MemoryBytes); err != nil {
 		return nil, err
 	}
-	cfg, err := buildConfig(spec, r.Opts)
+	cfg, nic, err := buildConfig(spec, r.Opts)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if nic != nil {
+			nic.Close()
+		}
+	}()
 	var cons *serialConsole
 	if r.Opts.SerialConsole {
 		cons, err = attachSerialConsole(cfg)
@@ -70,7 +75,9 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if err != nil {
 		return nil, err
 	}
-	return &machine{id: spec.ID, spec: spec, vm: vm, token: spec.AgentToken, console: cons}, nil
+	m := &machine{id: spec.ID, spec: spec, vm: vm, token: spec.AgentToken, console: cons, nic: nic}
+	nic = nil
+	return m, nil
 }
 
 // serialConsole is a raw byte stream to the VM's serial port. Read returns
@@ -131,6 +138,7 @@ type machine struct {
 	listener net.Listener
 	disp     *agentDispatch
 	console  *serialConsole
+	nic      *nicFiles
 }
 
 func (m *machine) ID() types.MachineID { return m.id }
@@ -212,6 +220,10 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 	finished, err := finishStop(stopErr, m.listener, console, time.Now())
 	m.listener = nil
 	m.console = nil
+	if m.nic != nil {
+		m.nic.Close()
+		m.nic = nil
+	}
 	if finished != nil {
 		m.finished = finished
 	}
@@ -324,34 +336,42 @@ func (m *machine) Console() (io.ReadWriteCloser, error) {
 	return m.console, nil
 }
 
-func buildConfig(spec types.VMSpec, opts runtime.Options) (*vz.VirtualMachineConfiguration, error) {
+func buildConfig(spec types.VMSpec, opts runtime.Options) (*vz.VirtualMachineConfiguration, *nicFiles, error) {
 	boot, err := vz.NewMacOSBootLoader()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg, err := vz.NewVirtualMachineConfiguration(boot, spec.CPU, spec.MemoryBytes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := attachGraphics(cfg, spec.Graphics); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := attachNetwork(cfg, spec); err != nil {
-		return nil, err
+	nic, err := attachNetwork(cfg, spec, opts)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := attachSocket(cfg); err != nil {
-		return nil, err
+		if nic != nil {
+			nic.Close()
+		}
+		return nil, nil, err
 	}
 	if err := attachShares(cfg, spec.Shares); err != nil {
-		return nil, err
+		if nic != nil {
+			nic.Close()
+		}
+		return nil, nil, err
 	}
 	if err := attachPlatformAndDisk(cfg, spec); err != nil {
-		return nil, err
+		if nic != nil {
+			nic.Close()
+		}
+		return nil, nil, err
 	}
-	_ = opts
-	_ = os.DevNull
-	return cfg, nil
+	return cfg, nic, nil
 }
 
 func attachGraphics(cfg *vz.VirtualMachineConfiguration, g types.Graphics) error {
@@ -374,10 +394,13 @@ func attachGraphics(cfg *vz.VirtualMachineConfiguration, g types.Graphics) error
 	return nil
 }
 
-func attachNetwork(cfg *vz.VirtualMachineConfiguration, spec types.VMSpec) error {
+func attachNetwork(cfg *vz.VirtualMachineConfiguration, spec types.VMSpec, opts runtime.Options) (*nicFiles, error) {
 	var attachment vz.NetworkDeviceAttachment
+	var nic *nicFiles
 	var err error
-	if spec.NetworkMode == types.NetworkBridged && spec.BridgeDevice != "" {
+	if opts.FileHandleNetwork {
+		nic, attachment, err = newFileHandleAttachment()
+	} else if spec.NetworkMode == types.NetworkBridged && spec.BridgeDevice != "" {
 		var found vz.BridgedNetwork
 		for _, b := range vz.NetworkInterfaces() {
 			if b.Identifier() == spec.BridgeDevice {
@@ -386,18 +409,24 @@ func attachNetwork(cfg *vz.VirtualMachineConfiguration, spec types.VMSpec) error
 			}
 		}
 		if found == nil {
-			return fmt.Errorf("bridge interface %s not found", spec.BridgeDevice)
+			return nil, fmt.Errorf("bridge interface %s not found", spec.BridgeDevice)
 		}
 		attachment, err = vz.NewBridgedNetworkDeviceAttachment(found)
 	} else {
 		attachment, err = vz.NewNATNetworkDeviceAttachment()
 	}
 	if err != nil {
-		return err
+		if nic != nil {
+			nic.Close()
+		}
+		return nil, err
 	}
 	netDev, err := vz.NewVirtioNetworkDeviceConfiguration(attachment)
 	if err != nil {
-		return err
+		if nic != nil {
+			nic.Close()
+		}
+		return nil, err
 	}
 	if spec.MAC != "" {
 		hw, err := parseHardware(spec.MAC)
@@ -409,7 +438,7 @@ func attachNetwork(cfg *vz.VirtualMachineConfiguration, spec types.VMSpec) error
 		}
 	}
 	cfg.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{netDev})
-	return nil
+	return nic, nil
 }
 
 func attachSocket(cfg *vz.VirtualMachineConfiguration) error {

@@ -43,4 +43,9 @@ type Options struct {
 	// SerialConsole attaches a VM serial port surfaced via Machine's
 	// Consoler interface (break-glass access independent of the agent).
 	SerialConsole bool
+	// FileHandleNetwork attaches the guest NIC as a datagram socketpair
+	// (VZFileHandleNetworkDeviceAttachment) instead of NAT or bridged.
+	// The per-VM supervisor sets it so the agent can receive that
+	// descriptor. The in-process runtime leaves it false.
+	FileHandleNetwork bool
 }

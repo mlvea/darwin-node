@@ -42,7 +42,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	if err != nil {
 		return err
 	}
-	rt, err := newRuntime(cfg)
+	rt, err := runtimeFor(ctx, cfg)
 	if err != nil {
 		return err
 	}
