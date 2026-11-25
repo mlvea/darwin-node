@@ -4,7 +4,8 @@
 // Each cycle fills every configured VM slot (1 or 2, never more) with a
 // pod that declares a cache volume, waits for the guest agent, writes a
 // marker into that cache the way a guest write would land on the virtio-fs
-// share, deletes the pod, and fails on fd, directory, or slot drift.
+// share, exits 0 so the trusted write-back commits, deletes the pod, and
+// fails on fd, directory, or slot drift.
 //
 // Cache-volume pods cannot adopt a warm VM: virtio-fs shares are fixed at
 // boot. The harness leaves the warm pool off so both slots stay available
@@ -27,6 +28,7 @@ import (
 	"github.com/mlvea/darwin-node/pkg/config"
 	"github.com/mlvea/darwin-node/pkg/engine"
 	"github.com/mlvea/darwin-node/pkg/event"
+	"github.com/mlvea/darwin-node/pkg/guest"
 	"github.com/mlvea/darwin-node/pkg/runtime"
 	"github.com/mlvea/darwin-node/pkg/runtime/fake"
 	"github.com/mlvea/darwin-node/pkg/sidecar"
@@ -134,6 +136,10 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 	ecfg.CacheDir = cfg.CacheDir
 	ecfg.AllowNATWorkloads = true
 	ecfg.AgentReadyTimeout = cfg.AgentReadyTimeout
+	// The soak namespace is a trusted cache writer. Pods still opt in with
+	// the write annotation, and the snapshot runs only after exit 0.
+	ecfg.CacheWriters = []string{cfg.Namespace}
+	ecfg.ProbeInterval = 20 * time.Millisecond
 	// Warm slots stay 0. A cache annotation makes the pod unable to adopt,
 	// and a warm guest would consume one of the two slots this cycle needs.
 	ecfg.WarmSlots = 0
@@ -339,6 +345,12 @@ func (r *runner) cycle(ctx context.Context, n int) error {
 		if err := r.writeMarker(uid, slot, n); err != nil {
 			return fmt.Errorf("cycle %d: cache write %s: %w", n, name, err)
 		}
+		if err := r.finishWorkload(ctx, uid, name); err != nil {
+			return fmt.Errorf("cycle %d: finish %s: %w", n, name, err)
+		}
+		if err := r.waitPhase(ctx, name, corev1.PodSucceeded); err != nil {
+			return fmt.Errorf("cycle %d: %w", n, err)
+		}
 	}
 	for slot := 0; slot < r.width; slot++ {
 		name := podName(slot)
@@ -512,6 +524,77 @@ func (r *runner) storeDir(slot int) string {
 	return filepath.Join(r.cfg.CacheDir, "cache-store", r.ns, cacheName(slot))
 }
 
+// cacheWorkloadFinisher is the fake runtime. A vz guest exits on its own
+// when /tmp/darwin-soak-ready appears; the fake runtime does not run the
+// container command, so the harness sends the same Exit frame and stops.
+type cacheWorkloadFinisher interface {
+	ReportExitUID(uid string, rep guest.ExitReport) error
+	StopUID(ctx context.Context, uid string) error
+}
+
+func (r *runner) finishWorkload(ctx context.Context, uid, name string) error {
+	if fin, ok := r.rt.(cacheWorkloadFinisher); ok {
+		code := int32(0)
+		if err := fin.ReportExitUID(uid, guest.ExitReport{ExitCode: &code, Reason: "Completed"}); err != nil {
+			return err
+		}
+		deadline := time.Now().Add(r.cfg.BootTimeout)
+		for {
+			if c, ok := r.eng.WorkloadExitCode(r.ns, name); ok && c == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("workload exit was not recorded")
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		return fin.StopUID(ctx, uid)
+	}
+	ectx, cancel := context.WithTimeout(ctx, r.cfg.BootTimeout)
+	defer cancel()
+	return r.eng.ExecInVM(ectx, r.ns, name, []string{"/bin/sh", "-c", "touch /tmp/darwin-soak-ready"}, nil)
+}
+
+func (r *runner) waitPhase(ctx context.Context, name string, phase corev1.PodPhase) error {
+	deadline := time.Now().Add(r.cfg.BootTimeout)
+	tick := time.NewTicker(15 * time.Millisecond)
+	defer tick.Stop()
+	var last *corev1.Pod
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		p, err := r.eng.Get(r.ns, name)
+		if err == nil {
+			last = p
+			if p.Status.Phase == phase {
+				return nil
+			}
+			if p.Status.Phase == corev1.PodFailed && phase != corev1.PodFailed {
+				return fmt.Errorf("pod %s failed: %s", name, p.Status.Message)
+			}
+		}
+		if time.Now().After(deadline) {
+			got := corev1.PodPhase("missing")
+			msg := ""
+			if last != nil {
+				got = last.Status.Phase
+				msg = last.Status.Message
+			}
+			return fmt.Errorf("pod %s phase %s (%s), want %s", name, got, msg, phase)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
 func (r *runner) pod(name, uid string, slot int) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -519,13 +602,16 @@ func (r *runner) pod(name, uid string, slot int) *corev1.Pod {
 			Namespace: r.ns,
 			UID:       k8stypes.UID(uid),
 			Annotations: map[string]string{
-				types.AnnotationCachePrefix + cacheName(slot): guestPath(slot),
+				types.AnnotationCachePrefix + cacheName(slot):      guestPath(slot),
+				types.AnnotationCacheWritePrefix + cacheName(slot): "true",
 			},
 		},
 		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
-				Name:  "macos",
-				Image: r.image,
+				Name:    "macos",
+				Image:   r.image,
+				Command: []string{"/bin/sh", "-c", "while [ ! -f /tmp/darwin-soak-ready ]; do sleep 1; done"},
 			}},
 		},
 	}

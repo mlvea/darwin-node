@@ -15,8 +15,8 @@ make test-short
 - Fake runtime lifecycle (create/start/stop/IP)
 - hostPort conflict detection (no real bind in short tests)
 - Adopt/delete soak on the fake runtime (`pkg/soak`): both VM slots, cache
-  snapshot/restore, fd/dir/slot drift, a refused third VM, recovery after
-  an injected start failure
+  snapshot after exit 0 and restore, fd/dir/slot drift, a refused third VM,
+  recovery after an injected start failure
 
 ## Soak
 

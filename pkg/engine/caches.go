@@ -1,8 +1,11 @@
 // Pod cache volumes: annotation-declared guest directories backed by a
-// host-side CoW store. Restore is an APFS clonefile into the pod dir; the
-// directory is shared read-write over virtio-fs (link placement), so guest
-// writes land on host disk and a graceful Delete re-snapshots them. No new
-// guest protocol: everything rides existing shares and Materialize.
+// host-side CoW store. Restore is an APFS clonefile into the pod dir.
+// Consumers get a read-only virtio-fs share. Write-back is opt-in
+// (cache-write.darwin.node/<name>: "true") and only runs when the pod's
+// namespace or ServiceAccount is listed in --cache-writers, and only after
+// the workload exits 0. The commit clones into <store>.tmp and renames it
+// into place. A failed or interrupted run does not replace the store.
+// No new guest protocol: everything rides existing shares and Materialize.
 package engine
 
 import (
@@ -23,6 +26,10 @@ import (
 )
 
 const cacheStoreDirName = "cache-store"
+
+// cacheWriteAnnotationPrefix is types.AnnotationCacheWritePrefix. Kept as a
+// local name so the parser reads like the cache declaration prefix.
+const cacheWriteAnnotationPrefix = types.AnnotationCacheWritePrefix
 
 // CacheVol is one declared cache: annotation cache.darwin.node/<name> with
 // an absolute guest path as its value.
@@ -69,6 +76,68 @@ func ParseCacheAnnotations(pod *corev1.Pod) ([]CacheVol, error) {
 		out = append(out, CacheVol{Name: name, GuestPath: guest})
 	}
 	return out, nil
+}
+
+// cacheWriteSet returns the declared caches this pod asked to write back.
+// A write annotation that names no declared cache, or whose value is not
+// true or false, is rejected.
+func cacheWriteSet(pod *corev1.Pod, declared []CacheVol) (map[string]bool, error) {
+	known := map[string]bool{}
+	for _, c := range declared {
+		known[c.Name] = true
+	}
+	if pod == nil {
+		return map[string]bool{}, nil
+	}
+	var keys []string
+	for k := range pod.Annotations {
+		if strings.HasPrefix(k, cacheWriteAnnotationPrefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	out := map[string]bool{}
+	for _, k := range keys {
+		name := strings.TrimPrefix(k, cacheWriteAnnotationPrefix)
+		if name == "" || !validCacheName(name) || strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".old") {
+			return nil, fmt.Errorf("cache write annotation %q: name must match [A-Za-z0-9._-]+ and must not end in .tmp or .old", k)
+		}
+		switch strings.TrimSpace(pod.Annotations[k]) {
+		case "true":
+			if !known[name] {
+				return nil, fmt.Errorf("cache write annotation %q: cache.darwin.node/%s is not declared", k, name)
+			}
+			out[name] = true
+		case "false":
+		default:
+			return nil, fmt.Errorf("cache write annotation %q: value must be true or false", k)
+		}
+	}
+	return out, nil
+}
+
+// podMayWriteCache reports whether --cache-writers names this pod's
+// namespace, or that namespace and its ServiceAccount. An empty
+// ServiceAccountName is "default", matching Kubernetes.
+func (e *Engine) podMayWriteCache(pod *corev1.Pod) bool {
+	if e == nil || pod == nil {
+		return false
+	}
+	ns := pod.Namespace
+	sa := pod.Spec.ServiceAccountName
+	if sa == "" {
+		sa = "default"
+	}
+	for _, raw := range e.cfg.CacheWriters {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if entry == ns || entry == ns+"/"+sa {
+			return true
+		}
+	}
+	return false
 }
 
 func validCacheName(s string) bool {
@@ -145,6 +214,15 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 	if err := safeSegment("namespace", ns); err != nil {
 		return nil, nil, err
 	}
+	writes, err := cacheWriteSet(pod, caches)
+	if err != nil {
+		return nil, nil, err
+	}
+	mayWrite := e.podMayWriteCache(pod)
+	saName := pod.Spec.ServiceAccountName
+	if saName == "" {
+		saName = "default"
+	}
 	var shares []types.Share
 	var places []volume.Placement
 	for _, c := range caches {
@@ -164,28 +242,53 @@ func (e *Engine) prepareCaches(pod *corev1.Pod) ([]types.Share, []volume.Placeme
 		} else if err := os.MkdirAll(hostDir, 0o755); err != nil {
 			return nil, nil, fmt.Errorf("cache %q: %w", c.Name, err)
 		}
-		shares = append(shares, types.Share{Name: cacheShareName(c.Name), HostPath: hostDir})
+		writable := mayWrite && writes[c.Name]
+		if writes[c.Name] && !mayWrite {
+			e.events.Warn(context.Background(), event.ReasonCacheReadOnly,
+				fmt.Sprintf("cache %s stays read-only: %s/%s is not in --cache-writers", c.Name, ns, saName))
+		}
+		shares = append(shares, types.Share{
+			Name:     cacheShareName(c.Name),
+			HostPath: hostDir,
+			ReadOnly: !writable,
+		})
 		places = append(places, volume.Placement{
 			Name:      cacheShareName(c.Name),
 			HostPath:  hostDir,
 			GuestPath: c.GuestPath,
+			ReadOnly:  !writable,
 			Mode:      "link",
 		})
 	}
 	return shares, places, nil
 }
 
-// snapshotPodCaches clones each declared cache out of the pod dir into the
-// node store. Best-effort: failures are logged and never fail the delete.
+// snapshotPodCaches clones each writable cache out of the pod dir into the
+// node store. It commits only when the workload exited 0, the pod was not
+// killed, and the operator allowlist plus the write annotation both say
+// this pod may replace that cache. Best-effort: failures are logged and
+// never fail the caller. The commit writes a new directory and renames it
+// over the live store.
 func (e *Engine) snapshotPodCaches(rec *podRecord) {
-	e.cacheSnapMu.Lock()
-	defer e.cacheSnapMu.Unlock()
-	pod := rec.pod
-	if pod == nil {
+	if rec == nil {
 		return
 	}
+	pod, ok := cacheSnapshotPod(rec)
+	if !ok || !e.podMayWriteCache(pod) {
+		return
+	}
+	e.cacheSnapMu.Lock()
+	defer e.cacheSnapMu.Unlock()
 	caches, err := ParseCacheAnnotations(pod)
 	if err != nil || len(caches) == 0 {
+		return
+	}
+	writes, err := cacheWriteSet(pod, caches)
+	if err != nil {
+		e.events.Warn(context.Background(), event.ReasonCacheSaved, err.Error())
+		return
+	}
+	if len(writes) == 0 {
 		return
 	}
 	uid := string(pod.UID)
@@ -194,6 +297,9 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 		return
 	}
 	for _, c := range caches {
+		if !writes[c.Name] {
+			continue
+		}
 		src := e.cachePodDir(uid, c.Name)
 		if _, err := os.Stat(src); err != nil {
 			continue
@@ -245,4 +351,23 @@ func (e *Engine) snapshotPodCaches(rec *podRecord) {
 		_ = os.RemoveAll(old)
 		e.events.Normal(context.Background(), event.ReasonCacheSaved, c.GuestPath+" -> "+store)
 	}
+}
+
+// cacheSnapshotPod is the pod whose cache may be committed. The workload
+// must have exited 0 and must not have been killed or already failed.
+// The returned pod is a copy, so a later annotation edit cannot change
+// which caches this commit writes.
+func cacheSnapshotPod(rec *podRecord) (*corev1.Pod, bool) {
+	if rec == nil {
+		return nil, false
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.pod == nil || rec.killedCode != nil || rec.guestExit == nil || *rec.guestExit != 0 {
+		return nil, false
+	}
+	if rec.phase == corev1.PodFailed {
+		return nil, false
+	}
+	return rec.pod.DeepCopy(), true
 }

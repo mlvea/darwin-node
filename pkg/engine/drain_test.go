@@ -39,11 +39,23 @@ func drainCfg(t *testing.T) config.Config {
 	return cfg
 }
 
-func TestDrainDeletesAllPodsAndSnapshotsCaches(t *testing.T) {
+func TestDrainDeletesAllPodsAndDoesNotReplaceRunningCache(t *testing.T) {
 	cfg := drainCfg(t)
+	cfg.CacheWriters = []string{"default/builder"}
 	e, rt := drainEngine(t, cfg, sidecar.None{})
 
-	pod := cachePod("d1", "uid-d1", map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"})
+	store := e.cacheStorePath("default", "xc")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "state.bin"), []byte("good"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pod := cachePod("d1", "uid-d1", map[string]string{
+		"cache.darwin.node/xc":       "/Users/mac/DD",
+		"cache-write.darwin.node/xc": "true",
+	})
+	pod.Spec.ServiceAccountName = "builder"
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +66,9 @@ func TestDrainDeletesAllPodsAndSnapshotsCaches(t *testing.T) {
 	waitPhase(t, e, "default", "d2", corev1.PodRunning)
 
 	// Simulated guest write flows through the virtio-fs share to host disk.
+	// The workload has not exited, so drain must not publish it.
 	hostDir := e.cachePodDir("uid-d1", "xc")
-	if err := os.WriteFile(filepath.Join(hostDir, "state.bin"), []byte("drain-me"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(hostDir, "state.bin"), []byte("partial"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -74,8 +87,8 @@ func TestDrainDeletesAllPodsAndSnapshotsCaches(t *testing.T) {
 		t.Fatalf("slots not freed: %d", used)
 	}
 	b, err := os.ReadFile(filepath.Join(e.cacheStorePath("default", "xc"), "state.bin"))
-	if err != nil || string(b) != "drain-me" {
-		t.Fatalf("cache snapshot lost across drain: %q %v", b, err)
+	if err != nil || string(b) != "good" {
+		t.Fatalf("drain of a running pod replaced the cache with %q (%v)", b, err)
 	}
 	if rt.Starts() < 2 || rt.Starts() > 2+1 {
 		t.Fatalf("unexpected boot count %d (warm replenisher may have run during drain)", rt.Starts())

@@ -67,23 +67,12 @@ fits in the default `--agent-ready-timeout` of 2m. A dial that still
 fails is retried; the pod stays Pending until it succeeds or the error
 is permanent.
 
-Also check fallback_test unused time import - still used.
-
-And inject_test comment about 45s - optional update.
-
-Run gofmt and tests.
-
-Also check if fallback still needs time import - yes AgentReadyTimeout = 400 * time.Millisecond.
-
-Look at unused import in fallback if time is only used there. Still used.
-
-gofmt the packages.
-
 ## Running the soak
 
 `make soak` is the adopt/delete harness. Each cycle fills every configured
-VM slot (never more than 2) with a pod that declares a cache volume, waits
-until the guest agent is running, writes a marker into that cache, deletes
+VM slot (never more than 2) with a pod that declares a cache volume and
+opts into write-back, waits until the guest agent is running, writes a
+marker into that cache, exits 0 so the trusted snapshot commits, deletes
 the pod, and checks:
 
 - slot occupancy is back to zero, and one more create while the slots were
@@ -94,8 +83,12 @@ the pod, and checks:
   pre-cycle baseline (fds allow a small slack)
 
 The marker is written on the host directory that virtio-fs shares into the
-guest. That is the same directory a guest write lands in, and it is what
-graceful delete snapshots. Cache-volume pods cannot adopt a warm VM
+guest. That is the same directory a guest write lands in. The soak
+namespace is on `--cache-writers` and the pod sets the write annotation,
+so exit 0 commits it. A delete while the workload is still running does
+not. The ready file the hardware guest waits on is `/tmp/darwin-soak-ready`,
+outside the cache, so the next cycle does not restore it. Cache-volume
+pods cannot adopt a warm VM
 (shares are fixed at boot; see [warm-pool.md](warm-pool.md)), so the soak
 leaves the warm pool off and cold-boots. Both slots stay available to the
 cycle. Warm adoption is covered by `pkg/engine` tests.

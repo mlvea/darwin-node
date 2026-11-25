@@ -116,7 +116,8 @@ make soak IMAGE=out/macos-15
 
 This selects the vz runtime and a 24 hour budget. Each cycle fills both
 VM slots (2 vCPU and 4 GiB each, the engine default), writes a cache
-marker, deletes, and checks file descriptors, pod directories, slot
+marker, waits until the guest command sees `/tmp/darwin-soak-ready` and
+exits 0, deletes, and checks file descriptors, pod directories, slot
 occupancy, and cache-store drift. Leave the Mac awake and on AC power.
 A shorter budget is a smoke test, not this step:
 

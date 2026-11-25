@@ -394,6 +394,11 @@ func (e *Engine) noteVMDeath(ctx context.Context, rec *podRecord) (restarted, ke
 		e.succeedWorkload(rec)
 		return false, false
 	case vmExitRestart:
+		// Exit 0 still ended a successful run. Commit the cache before the
+		// next container starts and before restart clears that exit code.
+		if reported && code == 0 {
+			e.snapshotPodCaches(rec)
+		}
 		if err := e.restartVM(ctx, rec); err != nil {
 			if ctx.Err() != nil || !podActive(rec) {
 				return false, false

@@ -41,6 +41,9 @@ type Runtime struct {
 	matCalls int32
 
 	last atomic.Pointer[machine]
+
+	mu    sync.Mutex
+	byUID map[string]*machine
 }
 
 func (r *Runtime) MaterializeCalls() int { return int(atomic.LoadInt32(&r.matCalls)) }
@@ -63,7 +66,43 @@ func (r *Runtime) Create(_ context.Context, spec types.VMSpec) (runtime.Machine,
 		logs:  guest.NewLogBuffer(64),
 	}
 	r.last.Store(m)
+	r.mu.Lock()
+	if r.byUID == nil {
+		r.byUID = map[string]*machine{}
+	}
+	r.byUID[spec.ID.UID] = m
+	r.mu.Unlock()
 	return m, nil
+}
+
+// ReportExitUID sends an Exit notify from the machine created for uid.
+// The host records it on the guest read loop. StopUID must wait until that
+// record exists, or a stop with no code is a failure and the cache is kept.
+func (r *Runtime) ReportExitUID(uid string, rep guest.ExitReport) error {
+	m := r.machineByUID(uid)
+	if m == nil {
+		return fmt.Errorf("no fake machine %s", uid)
+	}
+	m.ReportExit(rep)
+	return nil
+}
+
+// StopUID stops the machine created for uid.
+func (r *Runtime) StopUID(ctx context.Context, uid string) error {
+	m := r.machineByUID(uid)
+	if m == nil {
+		return fmt.Errorf("no fake machine %s", uid)
+	}
+	return m.Stop(ctx, 0)
+}
+
+func (r *Runtime) machineByUID(uid string) *machine {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byUID == nil {
+		return nil
+	}
+	return r.byUID[uid]
 }
 
 // ConsoleGuestEnd returns the simulated guest side of the most recently

@@ -40,17 +40,23 @@ func TestParallelSnapshotOfOneStoreDoesNotInterleave(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	podA := cachePod("a", "uid-par-a", map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"})
-	podB := cachePod("b", "uid-par-b", map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"})
+	e.cfg.CacheWriters = []string{"default"}
+	ann := map[string]string{
+		"cache.darwin.node/xc":       "/Users/mac/DD",
+		"cache-write.darwin.node/xc": "true",
+	}
+	podA := cachePod("a", "uid-par-a", ann)
+	podB := cachePod("b", "uid-par-b", ann)
+	code := int32(0)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		e.snapshotPodCaches(&podRecord{pod: podA})
+		e.snapshotPodCaches(&podRecord{pod: podA, guestExit: &code})
 	}()
 	go func() {
 		defer wg.Done()
-		e.snapshotPodCaches(&podRecord{pod: podB})
+		e.snapshotPodCaches(&podRecord{pod: podB, guestExit: &code})
 	}()
 	wg.Wait()
 	if n := overlap.Load(); n != 0 {

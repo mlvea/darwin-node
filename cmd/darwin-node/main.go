@@ -73,6 +73,7 @@ func main() {
 	f.BoolVar(&cfg.AllowNATWorkloads, "allow-nat-workloads", cfg.AllowNATWorkloads, "do not taint NAT-only nodes")
 	f.BoolVar(&cfg.DisableTaint, "disable-taint", cfg.DisableTaint, "do not taint the node")
 	f.StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "image and overlay cache")
+	f.StringSliceVar(&cfg.CacheWriters, "cache-writers", cfg.CacheWriters, "namespaces or namespace/serviceaccounts allowed to write named caches back (empty: nobody)")
 	f.StringSliceVar(&cfg.AllowedHostPaths, "allowed-host-paths", cfg.AllowedHostPaths, "hostPath prefixes permitted in guests (empty denies all hostPath)")
 	f.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "debug|info|warn|error")
 	f.StringVar(&cfg.KubeConfig, "kubeconfig", cfg.KubeConfig, "kubeconfig path")

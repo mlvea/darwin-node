@@ -42,9 +42,14 @@ const GuestVsockPort = 50051
 
 // Pod annotation prefix for persistent CoW cache volumes. Each annotation
 // "cache.darwin.node/<name>: <absolute-guest-path>" declares one cache: the
-// host keeps a snapshot under the node cache store, restores it into the pod
-// with APFS clonefile before start, and re-snapshots it on graceful delete.
+// host restores it into the pod with APFS clonefile and shares it read-only.
+// Write-back also requires cache-write.darwin.node/<name>: "true" and an
+// entry for the pod in --cache-writers, and it runs only after exit 0.
 const AnnotationCachePrefix = "cache.darwin.node/"
+
+// AnnotationCacheWritePrefix opts one declared cache into write-back.
+// The value must be "true" or "false".
+const AnnotationCacheWritePrefix = "cache-write.darwin.node/"
 
 // Shared directory names.
 const (

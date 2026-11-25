@@ -42,6 +42,30 @@ func TestDefaultCap(t *testing.T) {
 	}
 }
 
+func TestCacheWritersEnvAndValidation(t *testing.T) {
+	c := Default()
+	if len(c.CacheWriters) != 0 {
+		t.Fatalf("default cache writers %v, want none", c.CacheWriters)
+	}
+	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
+	t.Setenv("VZ_SSH_PASSWORD", "")
+	t.Setenv("DARWIN_NODE_CACHE_WRITERS", "ci, build/updater")
+	if err := c.ApplyEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(c.CacheWriters, ",") != "ci,build/updater" {
+		t.Fatalf("cache writers %v", c.CacheWriters)
+	}
+	c.CacheWriters = []string{"a/b/c"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("cache writer a/b/c was accepted")
+	}
+	c.CacheWriters = []string{"../x"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("cache writer ../x was accepted")
+	}
+}
+
 func TestAllowedHostPathsEnv(t *testing.T) {
 	c := Default()
 	if len(c.AllowedHostPaths) != 0 {

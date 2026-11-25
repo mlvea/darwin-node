@@ -193,7 +193,11 @@ func TestSnapshotAfterCrashRecoveryCommitsAndCleans(t *testing.T) {
 		"xc.tmp/state.bin": "inflight-uncommitted",
 	})
 	e := engineOnCache(t, cache)
-	pod := cachePod("snap", "uid-snap", map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"})
+	e.cfg.CacheWriters = []string{"default"}
+	pod := cachePod("snap", "uid-snap", map[string]string{
+		"cache.darwin.node/xc":       "/Users/mac/DD",
+		"cache-write.darwin.node/xc": "true",
+	})
 	if _, _, err := e.prepareCaches(pod); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +205,8 @@ func TestSnapshotAfterCrashRecoveryCommitsAndCleans(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(host, "guest.bin"), []byte("from-guest"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	e.snapshotPodCaches(&podRecord{pod: pod})
+	code := int32(0)
+	e.snapshotPodCaches(&podRecord{pod: pod, guestExit: &code})
 
 	store := e.cacheStorePath("default", "xc")
 	assertNoCacheStaging(t, store)

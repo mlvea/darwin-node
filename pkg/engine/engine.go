@@ -232,9 +232,10 @@ func configurePuller(m *image.Manager, cfg config.Config) {
 }
 
 // Close rejects new creates, stops the warm pool, and force-stops every pod
-// machine still registered. Slots are released and cache volumes are
-// snapshotted through the normal delete path. A second call returns the
-// same error and does not stop anything again.
+// machine still registered. Slots are released. A cache is written back
+// only when that workload already exited 0 and the pod is allowed to write
+// it; Close of a pod that is still running does not replace the store. A
+// second call returns the same error and does not stop anything again.
 //
 // A Create, Start, Stop, or RemovePod that does not return within the
 // deadline does not keep Close waiting. The error is logged and returned.
@@ -979,12 +980,21 @@ func (e *Engine) watchGuestExit(rec *podRecord, cli *guest.Client) {
 		code := guest.ClampExitCode(*rep.ExitCode)
 		reason := guest.NormalizeExitReason(rep.Reason)
 		rec.mu.Lock()
-		defer rec.mu.Unlock()
 		if rec.agentGen != gen {
+			rec.mu.Unlock()
 			return
 		}
 		rec.guestExit = &code
 		rec.guestExitReason = reason
+		killed := rec.killedCode != nil
+		failed := rec.phase == corev1.PodFailed
+		rec.mu.Unlock()
+		// The workload has ended. Commit before the VM is torn down and
+		// before anything removes the pod directory. A kill that already
+		// won, or a non-zero exit, does not replace a good cache.
+		if code == 0 && !killed && !failed {
+			e.snapshotPodCaches(rec)
+		}
 	})
 }
 
@@ -1025,8 +1035,9 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 
 // succeedWorkload marks a Running pod Succeeded after the guest reported
 // exit 0 and the restart policy will not start it again. The slot is
-// released. The pod directory stays until Delete so that delete can still
-// snapshot cache volumes.
+// released. A successful cache write-back is committed before teardown,
+// while the pod directory is still present. Delete removes that directory
+// later; a process restart would otherwise reap it without a snapshot.
 func (e *Engine) succeedWorkload(rec *podRecord) {
 	rec.mu.Lock()
 	if rec.phase != corev1.PodRunning && rec.phase != corev1.PodPending {
@@ -1042,6 +1053,7 @@ func (e *Engine) succeedWorkload(rec *podRecord) {
 	rec.message = "workload exited 0"
 	rec.ready = false
 	rec.mu.Unlock()
+	e.snapshotPodCaches(rec)
 	e.teardown(context.Background(), rec, 0, false)
 	e.events.Normal(context.Background(), event.ReasonCompleted, "workload exited 0")
 }
@@ -1177,8 +1189,9 @@ type drainVictim struct {
 // Drain stops every pod gracefully, honoring each pod's termination grace
 // period until the context budget is exhausted. Pods that do not finish
 // within the budget are left running; a subsequent drain (or process exit)
-// handles them. Cache snapshots run as part of the normal delete path, so
-// host reboots and OS updates no longer lose cache state.
+// handles them. A cache is written back only when that workload already
+// exited 0 and the pod is allowed to write it. Drain of a pod that is
+// still running does not replace the store.
 func (e *Engine) Drain(ctx context.Context) error {
 	e.draining.Store(true)
 	e.mu.RLock()
@@ -1261,7 +1274,9 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
-	e.snapshotPodCaches(rec)          // CoW the final cache state into the store
+	// Exit 0 commits. A kill or a non-zero exit leaves the previous store.
+	// The pod directory is removed only after that decision.
+	e.snapshotPodCaches(rec)
 	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 
 	// The watch has returned, so it cannot arm the backoff again. Leaving
@@ -1369,6 +1384,26 @@ func (e *Engine) Get(namespace, name string) (*corev1.Pod, error) {
 		return nil, errdefs.NotFound("pod not found")
 	}
 	return e.podFrom(rec), nil
+}
+
+// WorkloadExitCode is the last guest Exit code recorded for this pod.
+// ok is false until that frame arrives. A VM restart clears it.
+func (e *Engine) WorkloadExitCode(namespace, name string) (int32, bool) {
+	if e == nil {
+		return 0, false
+	}
+	e.mu.RLock()
+	rec := e.pods[Key(namespace, name)]
+	e.mu.RUnlock()
+	if rec == nil {
+		return 0, false
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.guestExit == nil {
+		return 0, false
+	}
+	return *rec.guestExit, true
 }
 
 // List returns all pods.
