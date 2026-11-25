@@ -62,6 +62,14 @@ bind `0.0.0.0:hostPort` (or `hostIP`) on the host and splice to
 fail the pod with an event. This is *not* kube-proxy; it is the kubelet
 hostPort equivalent.
 
+When one side of a spliced connection ends, the proxy half-closes the other
+and fully closes both after 5 seconds. Removing the mapping (pod delete or
+failure, via `Engine.teardown` → `Manager.Release`) closes the listeners and
+every live connection. A dial to the guest times out after 5 seconds. One
+pod may hold 256 connections and the node 512, including a dial still in
+progress; a further connection is closed without dialing. These bounds are
+constants in `pkg/hostport`, not flags. UDP is rejected.
+
 ### Services
 
 - **ClusterIP / NodePort / LoadBalancer** work when the PodIP is reachable

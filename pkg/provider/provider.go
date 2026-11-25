@@ -3,6 +3,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -179,8 +180,16 @@ func (p *Provider) RunInContainer(ctx context.Context, namespace, podName, conta
 	return p.engine.ExecInSidecar(ctx, namespace, podName, containerName, cmd, attach)
 }
 
+// errAttachUnsupported is what kubectl attach receives. The guest agent
+// can exec a new process and can follow the workload log. It does not
+// expose that process's stdio, so attach cannot join it.
+var errAttachUnsupported = errors.New("attach is not supported; use kubectl exec or kubectl logs -f")
+
+// AttachToContainer refuses the request. It used to run /bin/zsh, which is
+// a new shell rather than the workload. The same answer applies to a
+// sidecar: this handler does not attach to a running process.
 func (p *Provider) AttachToContainer(ctx context.Context, namespace, podName, containerName string, attach api.AttachIO) error {
-	return p.RunInContainer(ctx, namespace, podName, containerName, []string{"/bin/zsh"}, attach)
+	return errAttachUnsupported
 }
 
 func (p *Provider) ConfigureNode(ctx context.Context, n *corev1.Node) error {
