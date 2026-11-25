@@ -116,7 +116,16 @@ type machine struct {
 	client    *guest.Client
 	peer      net.Conn
 	agentConn net.Conn
+	servers   []net.Conn
+	serves    *serveSet
 	dials     atomic.Int32
+}
+
+// serveSet is one generation of guest Serves. Stop waits on the current
+// set and then drops it, so a Start that races the wait Adds to a new set
+// instead of a WaitGroup that is already waiting.
+type serveSet struct {
+	wg sync.WaitGroup
 }
 
 // Console exposes a break-glass serial stream. The guest side is available
@@ -254,7 +263,7 @@ func (m *machine) Start(ctx context.Context) error {
 	h.Init()
 	m.sctx = sctx
 	m.handler = h
-	go func() { _ = guest.Serve(sctx, a, h) }()
+	m.trackServeLocked(sctx, a, h)
 	cli, err := guest.Dial(ctx, b, m.token, "fake-host")
 	if err != nil {
 		cancel()
@@ -273,28 +282,65 @@ func (m *machine) Start(ctx context.Context) error {
 
 func (m *machine) Stop(_ context.Context, _ time.Duration) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.counted && m.rt != nil {
 		atomic.AddInt32(&m.rt.running, -1)
 		m.counted = false
 	}
-	if m.state == types.VMStopped || m.state == "" || m.state == types.VMPending {
-		m.state = types.VMStopped
-		return nil
+	// A machine that never reached Start has no guest. One that did must
+	// still join Serve. Cancelling the context only schedules idleWatchdog,
+	// and returning before that goroutine leaves select is what the macOS
+	// race run reported. Handler.Close wakes every Serve that shares this
+	// handler, including a dial whose client the host still holds.
+	started := m.state != types.VMStopped && m.state != "" && m.state != types.VMPending
+	cancel := m.srvCancel
+	m.srvCancel = nil
+	client := m.client
+	m.client = nil
+	servers := m.servers
+	m.servers = nil
+	m.agentConn = nil
+	m.peer = nil
+	handler := m.handler
+	if started && m.finished == nil {
+		now := time.Now()
+		m.finished = &now
 	}
-	m.state = types.VMStopping
-	if m.client != nil {
-		_ = m.client.Close()
-		m.client = nil
-	}
-	if m.srvCancel != nil {
-		m.srvCancel()
-	}
-	now := time.Now()
-	m.finished = &now
+	set := m.serves
+	m.serves = nil
 	m.state = types.VMStopped
 	m.agentOK = false
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	handler.Close()
+	for _, c := range servers {
+		_ = c.Close()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+	if set != nil {
+		set.wg.Wait()
+	}
 	return nil
+}
+
+// trackServeLocked starts a guest Serve and remembers its conn. The caller
+// holds m.mu. Stop waits on the set it observed and leaves a nil set, so
+// the next Start does not Add to a WaitGroup that is already in Wait.
+func (m *machine) trackServeLocked(ctx context.Context, server net.Conn, h guest.Handler) {
+	if m.serves == nil {
+		m.serves = &serveSet{}
+	}
+	set := m.serves
+	set.wg.Add(1)
+	m.servers = append(m.servers, server)
+	go func() {
+		defer set.wg.Done()
+		_ = guest.Serve(ctx, server, h)
+	}()
 }
 
 func (m *machine) Status() types.VMStatus {
@@ -337,14 +383,14 @@ func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	h := m.handler
 	sctx := m.sctx
 	token := m.token
-	m.mu.Unlock()
 	// A new pipe per dial. The guest agent serves one connection and then
 	// dials again; closing the previous client must not retire the VM.
+	// The pipe is created under the lock so Stop cannot begin its wait
+	// until this Serve is on the current set.
 	a, b := net.Pipe()
-	m.mu.Lock()
 	m.agentConn = a
+	m.trackServeLocked(sctx, a, h)
 	m.mu.Unlock()
-	go func() { _ = guest.Serve(sctx, a, h) }()
 	return guest.Dial(ctx, b, token, "fake-host")
 }
 

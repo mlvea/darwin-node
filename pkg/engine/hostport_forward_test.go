@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +46,11 @@ type reportMachine struct {
 	token string
 	ip    *atomic.Value
 	hide  bool
+
+	mu      sync.Mutex
+	gen     *sync.WaitGroup
+	cancels []context.CancelFunc
+	servers []net.Conn
 }
 
 func (m *reportMachine) Status() types.VMStatus {
@@ -58,6 +64,7 @@ func (m *reportMachine) Status() types.VMStatus {
 }
 
 func (m *reportMachine) DialAgent(ctx context.Context) (*guest.Client, error) {
+	sctx, cancel := context.WithCancel(context.Background())
 	a, b := net.Pipe()
 	h := guest.Handler{
 		Token:        m.token,
@@ -68,8 +75,45 @@ func (m *reportMachine) DialAgent(ctx context.Context) (*guest.Client, error) {
 		},
 	}
 	h.Init()
-	go func() { _ = guest.Serve(context.Background(), a, h) }()
+	m.mu.Lock()
+	if m.gen == nil {
+		m.gen = &sync.WaitGroup{}
+	}
+	gen := m.gen
+	m.cancels = append(m.cancels, cancel)
+	m.servers = append(m.servers, a)
+	gen.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer gen.Done()
+		_ = guest.Serve(sctx, a, h)
+	}()
 	return guest.Dial(ctx, b, m.token, "test-host")
+}
+
+// Stop ends the dial Serves started so far. A later restart dials again.
+// The old Serve used context.Background, so the fake machine's cancel did
+// not reach it and idleWatchdog outlived the test.
+func (m *reportMachine) Stop(ctx context.Context, grace time.Duration) error {
+	m.mu.Lock()
+	gen := m.gen
+	m.gen = &sync.WaitGroup{}
+	cancels := m.cancels
+	m.cancels = nil
+	servers := m.servers
+	m.servers = nil
+	m.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for _, server := range servers {
+		_ = server.Close()
+	}
+	err := m.Machine.Stop(ctx, grace)
+	if gen != nil {
+		gen.Wait()
+	}
+	return err
 }
 
 func TestHostPortDoesNotForwardGuestLoopback(t *testing.T) {

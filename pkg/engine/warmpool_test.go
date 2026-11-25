@@ -172,8 +172,10 @@ type oneSessionMachine struct {
 	sctx   context.Context
 	cancel context.CancelFunc
 
-	mu   sync.Mutex
-	open int
+	mu     sync.Mutex
+	open   int
+	closed bool
+	wg     sync.WaitGroup
 }
 
 func (m *oneSessionMachine) SetAgentToken(token string) {
@@ -187,8 +189,13 @@ func (m *oneSessionMachine) SetAgentToken(token string) {
 }
 
 func (m *oneSessionMachine) Stop(ctx context.Context, grace time.Duration) error {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
 	m.cancel()
-	return m.Machine.Stop(ctx, grace)
+	err := m.Machine.Stop(ctx, grace)
+	m.wg.Wait()
+	return err
 }
 
 // Status hides the fake runtime's IP. The guest agent is vsock-only, so a
@@ -204,15 +211,23 @@ func (m *oneSessionMachine) Status() types.VMStatus {
 
 func (m *oneSessionMachine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, context.Canceled
+	}
 	if m.open > 0 {
 		m.mu.Unlock()
 		return nil, errSessionHeld
 	}
 	m.open++
+	m.wg.Add(1)
 	m.mu.Unlock()
 
 	a, b := net.Pipe()
-	go func() { _ = guest.Serve(m.sctx, a, m.h) }()
+	go func() {
+		defer m.wg.Done()
+		_ = guest.Serve(m.sctx, a, m.h)
+	}()
 	conn := &closeOnceConn{Conn: b, fn: func() {
 		m.mu.Lock()
 		m.open--

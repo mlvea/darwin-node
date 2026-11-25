@@ -80,6 +80,17 @@ func (h *Handler) SetToken(token string) {
 	h.Reload()
 }
 
+// Close stops every Serve that shares this handler's live state. The
+// idle watchdog returns and closes its connection, so a host that still
+// holds the client cannot keep the goroutine parked until IdleTimeout.
+// A second call is a no-op. Token reload does not call Close.
+func (h *Handler) Close() {
+	if h == nil || h.live == nil {
+		return
+	}
+	h.live.stopServing()
+}
+
 // Reload copies Handler.Token into the shared live token.
 func (h *Handler) Reload() {
 	h.Init()
@@ -334,6 +345,10 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 func (h *Handler) idleWatchdog(ctx context.Context, rw io.ReadWriteCloser, conn *connState, lastRead *atomic.Int64, done <-chan struct{}) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	var shut <-chan struct{}
+	if h.live != nil {
+		shut = h.live.shut
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -342,6 +357,11 @@ func (h *Handler) idleWatchdog(ctx context.Context, rw io.ReadWriteCloser, conn 
 			_ = rw.Close()
 			return
 		case <-done:
+			return
+		case <-shut:
+			// Handler.Close. The host may still hold the client, so ctx
+			// stays active and the idle window has not elapsed.
+			_ = rw.Close()
 			return
 		case <-ticker.C:
 			if conn.liveInteractive.Load() > 0 {
