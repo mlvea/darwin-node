@@ -103,6 +103,12 @@ type Config struct {
 	// MetricsAddress is the Prometheus listener. The default port is
 	// 9102 so it does not take node_exporter's 9100. "off" disables it.
 	MetricsAddress string
+
+	// CacheWriters is who may write a named cache back into the node
+	// store. Each entry is a namespace, or namespace/serviceaccount.
+	// Empty means no pod may snapshot a cache. A pod must also opt in
+	// with cache-write.darwin.node/<name>: "true".
+	CacheWriters []string
 }
 
 const (
@@ -358,6 +364,9 @@ func (c *Config) MergeEnv() error {
 	if v, ok := os.LookupEnv("DARWIN_NODE_METRICS_ADDRESS"); ok {
 		c.MetricsAddress = v
 	}
+	if v := os.Getenv("DARWIN_NODE_CACHE_WRITERS"); v != "" {
+		c.CacheWriters = splitComma(v)
+	}
 	if v := os.Getenv("DARWIN_NODE_RESERVED_CPU"); v != "" {
 		q, err := parseNonNegativeQuantity("DARWIN_NODE_RESERVED_CPU", v)
 		if err != nil {
@@ -485,6 +494,47 @@ func (c Config) Validate() error {
 	}
 	if c.ReservedCPU.Sign() < 0 || c.ReservedMemory.Sign() < 0 || c.ReservedEphemeral.Sign() < 0 {
 		return fmt.Errorf("reserved resources must not be negative")
+	}
+	for _, w := range c.CacheWriters {
+		if err := validateCacheWriter(w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateCacheWriter accepts "namespace" or "namespace/serviceaccount".
+func validateCacheWriter(entry string) error {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return fmt.Errorf("cache writer entry is empty")
+	}
+	ns, sa, ok := strings.Cut(entry, "/")
+	if !ok {
+		return validateWriterSegment(entry)
+	}
+	if ns == "" || sa == "" || strings.Contains(sa, "/") {
+		return fmt.Errorf("cache writer %q must be namespace or namespace/serviceaccount", entry)
+	}
+	if err := validateWriterSegment(ns); err != nil {
+		return fmt.Errorf("cache writer %q: %w", entry, err)
+	}
+	if err := validateWriterSegment(sa); err != nil {
+		return fmt.Errorf("cache writer %q: %w", entry, err)
+	}
+	return nil
+}
+
+func validateWriterSegment(s string) error {
+	if s == "." || s == ".." {
+		return fmt.Errorf("cache writer segment %q is not allowed", s)
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("cache writer segment %q must match [A-Za-z0-9._-]+", s)
+		}
 	}
 	return nil
 }

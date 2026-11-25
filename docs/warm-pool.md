@@ -76,6 +76,7 @@ waits up to 30 seconds for any in-flight warm boot, stops every pooled
 guest, and then force-stops any pod machine still registered. A boot or
 stop that is still running at that deadline is logged and its slot stays
 held until the call returns. On the normal path, slots and overlay
-directories are released, and a pod's cache volumes are snapshotted.
+directories are released. A named cache is snapshotted only when that
+workload already exited 0 and the pod is allowed to write it.
 A second SIGINT/SIGTERM cancels the drain and still runs that stop
 before the process exits. A crash skips it.

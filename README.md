@@ -298,7 +298,7 @@ See [docs/scheduling.md](docs/scheduling.md).
 | Feature | How | Docs |
 |---|---|---|
 | Warm VM pool: pods adopt a pre-booted guest | `--warm-slots`, `--warm-image` | [docs/warm-pool.md](docs/warm-pool.md) |
-| Cache volumes that outlive the pod (CoW restore + snapshot) | `cache.darwin.node/<name>: <guest-path>` annotation | [docs/cache-volumes.md](docs/cache-volumes.md) |
+| Cache volumes that outlive a successful pod (CoW restore; write-back is opt-in) | `cache.darwin.node/<name>: <guest-path>` plus `cache-write.darwin.node/<name>: "true"` and `--cache-writers` | [docs/cache-volumes.md](docs/cache-volumes.md) |
 | Interactive exec, `logs -f` | `kubectl exec -it`, `kubectl logs -f` | [docs/architecture.md](docs/architecture.md) |
 | Break-glass serial console | `--serial-console`, then `darwin-node console -n <ns> -p <pod>` | [docs/console.md](docs/console.md) |
 | Delta image updates | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
@@ -341,6 +341,7 @@ environment has been applied.
 | `--allow-nat-workloads` | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Don't apply the `nat-only` taint |
 | `--disable-taint` | – | `false` | Don't taint the node at all |
 | `--cache-dir` | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Image and overlay cache |
+| `--cache-writers` | `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Namespaces or `namespace/serviceaccount` allowed to write named caches back after exit 0. The flag wins when both are set |
 | `--allowed-host-paths` | `DARWIN_NODE_ALLOWED_HOST_PATHS` | empty (deny all) | hostPath prefixes guests may use |
 | `--log-level` | – | `info` | `debug`, `info`, `warn` or `error` |
 | `--kubeconfig` | `KUBECONFIG` | `~/.kube/config` | Kubeconfig path |

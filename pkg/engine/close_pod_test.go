@@ -81,15 +81,27 @@ func TestCloseStopsRunningPodVMs(t *testing.T) {
 	}
 }
 
-func TestCloseSnapshotsCacheOfPodStillRunning(t *testing.T) {
+func TestCloseDoesNotReplaceCacheOfPodStillRunning(t *testing.T) {
 	e, _ := closeTestEngine(t)
-	pod := cachePod("c1", "uid-close-c1", map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"})
+	e.cfg.CacheWriters = []string{"default/builder"}
+	store := e.cacheStorePath("default", "xc")
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "state.bin"), []byte("good"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pod := cachePod("c1", "uid-close-c1", map[string]string{
+		"cache.darwin.node/xc":       "/Users/mac/DD",
+		"cache-write.darwin.node/xc": "true",
+	})
+	pod.Spec.ServiceAccountName = "builder"
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
 	waitPhase(t, e, "default", "c1", corev1.PodRunning)
 	hostDir := e.cachePodDir("uid-close-c1", "xc")
-	if err := os.WriteFile(filepath.Join(hostDir, "state.bin"), []byte("close-me"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(hostDir, "state.bin"), []byte("partial"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -97,8 +109,8 @@ func TestCloseSnapshotsCacheOfPodStillRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(e.cacheStorePath("default", "xc"), "state.bin"))
-	if err != nil || string(got) != "close-me" {
-		t.Fatalf("cache snapshot = %q, %v", got, err)
+	got, err := os.ReadFile(filepath.Join(store, "state.bin"))
+	if err != nil || string(got) != "good" {
+		t.Fatalf("close of a running pod replaced the cache with %q (%v)", got, err)
 	}
 }

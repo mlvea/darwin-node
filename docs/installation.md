@@ -115,21 +115,25 @@ SIGTERM and SIGINT trigger a graceful drain before the process exits:
 
 1. New pod creates are rejected immediately (the scheduler routes work
    elsewhere).
-2. Every running pod is deleted through the normal path: preStop hooks,
-   the guest shutdown RPC, and cache-volume snapshots all run.
+2. Every running pod is deleted through the normal path: preStop hooks
+   and the guest shutdown RPC run. A named cache is written back only
+   when that workload already exited 0 and the pod is allowed to write
+   it. Drain of a pod that is still running does not replace the store.
 3. Each pod gets its `terminationGracePeriodSeconds`; the total budget is
    `--shutdown-grace-period` (default 60s).
 4. When that budget ends, or when draining is disabled
    (`--shutdown-grace-period=0`), `Engine.Close` force-stops every pod VM
-   still running, snapshots its cache volumes, and releases its slot. The
-   warm pool is paused during the drain and stopped as part of that close.
+   still running and releases its slot. That close does not replace a
+   cache whose workload has not exited 0. The warm pool is paused
+   during the drain and stopped as part of that close.
    A VM call that is still running after 30 seconds does not hold the
    close. The error is logged and that slot stays held until the call
    returns.
 
 A second signal cancels the rest of the drain and still force-stops
-every remaining pod VM (`Engine.Close`: cache snapshot, slot release)
-before exiting 130. It does not wait out `--shutdown-grace-period`.
+every remaining pod VM (`Engine.Close`: slot release; a cache write-back
+only if that workload already exited 0) before exiting 130. It does not
+wait out `--shutdown-grace-period`.
 A crash skips that stop. The next process reclaims leftover pod
 directories at startup. Drain the node before each upgrade so that
 restart is not how a running pod is stopped. See [Upgrades](#upgrades).
@@ -168,10 +172,10 @@ out the rest of `terminationGracePeriodSeconds` after the guest is
 already stopped. launchd's `ExitTimeOut` is the SIGTERM-to-SIGKILL
 gap and has to be longer than `--shutdown-grace-period` (default 60s,
 `DARWIN_NODE_SHUTDOWN_GRACE`) plus the 30s close and the 5s final
-reap. Those finish the cache-volume snapshot. The supplied plist sets
-`ExitTimeOut` to 120, which covers the defaults. Raise that integer
-when you raise the grace period, or launchd kills the process and the
-snapshot does not run.
+reap. A cache whose workload already exited 0 is committed before the
+pod directory is removed. The supplied plist sets `ExitTimeOut` to 120,
+which covers the defaults. Raise that integer when you raise the grace
+period, or launchd kills the process before that commit runs.
 
 ## Configuration
 
@@ -189,6 +193,7 @@ Host keep-away is subtracted from Allocatable. The defaults are 2 CPUs, 4Gi of m
 | `DARWIN_NODE_BRIDGE_INTERFACE` | empty | Required for bridged |
 | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Do not taint NAT nodes |
 | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Images + overlays |
+| `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Comma-separated namespaces or `namespace/serviceaccount` allowed to write named caches back. A pod must also set `cache-write.darwin.node/<name>: "true"`. Used when `--cache-writers` is omitted. An explicit `--cache-writers` wins |
 | `DARWIN_NODE_GRAPHICS` | `1920x1200@80` | `none` disables Metal |
 | `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | Total drain budget on SIGTERM. launchd `ExitTimeOut` must be larger; see Shutdown behavior |
 | `DARWIN_NODE_AGENT_READY_TIMEOUT` | `2m` | Budget for each guest-agent dial and ready check |

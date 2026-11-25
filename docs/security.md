@@ -276,6 +276,10 @@ is not subject to these checks.
   follow restart semantics. Drain the node before each upgrade. `cache/warm` leftovers from the previous process are
   removed at the same time. A directory whose uid already holds a slot is
   left alone. The committed cache store is not rewritten from the orphan.
+  An arbitrary pod cannot replace a named cache: the share is read-only
+  unless `cache-write.darwin.node/<name>` is `true` and `--cache-writers`
+  names that namespace or ServiceAccount, and the commit runs only after
+  exit 0.
   APFS snapshots taken while secret files still exist on disk may retain
   those bytes until the snapshot is dropped.
 

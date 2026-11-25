@@ -3,6 +3,7 @@ package soak
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mlvea/darwin-node/pkg/guest"
 	"github.com/mlvea/darwin-node/pkg/runtime"
 	"github.com/mlvea/darwin-node/pkg/runtime/fake"
 	"github.com/mlvea/darwin-node/pkg/types"
@@ -351,6 +353,14 @@ func (r *countingRuntime) Create(ctx context.Context, spec types.VMSpec) (runtim
 	return r.Runtime.Create(ctx, spec)
 }
 
+func (r *countingRuntime) ReportExitUID(uid string, rep guest.ExitReport) error {
+	return reportExitUID(r.Runtime, uid, rep)
+}
+
+func (r *countingRuntime) StopUID(ctx context.Context, uid string) error {
+	return stopUID(r.Runtime, ctx, uid)
+}
+
 // failStartRuntime fails the first Start, then passes through. Same shape
 // as pkg/engine/inject_test.go: the node must reclaim the slot and the
 // pod directory, then accept a later cycle.
@@ -365,6 +375,34 @@ func (r *failStartRuntime) Create(ctx context.Context, spec types.VMSpec) (runti
 		return nil, err
 	}
 	return &failStartMachine{Machine: m, left: &r.left}, nil
+}
+
+func (r *failStartRuntime) ReportExitUID(uid string, rep guest.ExitReport) error {
+	return reportExitUID(r.Runtime, uid, rep)
+}
+
+func (r *failStartRuntime) StopUID(ctx context.Context, uid string) error {
+	return stopUID(r.Runtime, ctx, uid)
+}
+
+func reportExitUID(rt runtime.Runtime, uid string, rep guest.ExitReport) error {
+	fin, ok := rt.(interface {
+		ReportExitUID(string, guest.ExitReport) error
+	})
+	if !ok {
+		return fmt.Errorf("runtime %T cannot report a workload exit", rt)
+	}
+	return fin.ReportExitUID(uid, rep)
+}
+
+func stopUID(rt runtime.Runtime, ctx context.Context, uid string) error {
+	fin, ok := rt.(interface {
+		StopUID(context.Context, string) error
+	})
+	if !ok {
+		return fmt.Errorf("runtime %T cannot stop a workload", rt)
+	}
+	return fin.StopUID(ctx, uid)
 }
 
 type failStartMachine struct {

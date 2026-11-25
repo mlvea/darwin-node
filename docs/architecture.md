@@ -89,11 +89,15 @@ boot entirely. Invariants:
 
 Pod annotations `cache.darwin.node/<name>: <absolute-guest-path>`
 declare persistent caches. The host restores each one into the pod dir
-with APFS `clonefile` (CoW), shares it read-write over virtio-fs at the
-annotated path (link placement, guest writes land on host disk), and
-clones the final state back into `<cache-dir>/cache-store/<ns>/<name>/`
-on graceful delete. Failed starts never snapshot. No new guest protocol;
-no PVC/CSI.
+with APFS `clonefile` (CoW) and shares it over virtio-fs at the
+annotated path (link placement). The share is read-only unless the pod
+sets `cache-write.darwin.node/<name>: "true"` and `--cache-writers`
+names its namespace or `namespace/serviceaccount`. The cache of an
+allowed writer that exits 0 is cloned back into
+`<cache-dir>/cache-store/<ns>/<name>/` before the pod directory is
+removed, including a workload that ends by itself. A failed exit, a
+kill, and a delete of a pod that is still running leave the previous
+store. Failed starts never snapshot. No new guest protocol; no PVC/CSI.
 
 ## Interactive exec, follow logs, console
 
@@ -127,11 +131,13 @@ single-flight cache, and a failed apply never leaves a partial entry.
 
 SIGTERM/SIGINT start a drain bounded by `--shutdown-grace-period`
 (default 60s): new creates are rejected, every pod is deleted through
-the normal path (preStop, guest shutdown RPC, cache snapshots), each
-with its `terminationGracePeriodSeconds`. The warm replenisher is paused
-for the duration; freed slots serve departing pods. Pods still running
-when the budget expires are force-stopped by `Engine.Close`, which
-releases their slots and snapshots caches. A Create, Start, Stop, or
+the normal path (preStop, guest shutdown RPC). A named cache is written
+back only when that workload already exited 0 and the pod may write it.
+Each pod uses its `terminationGracePeriodSeconds`. The warm replenisher
+is paused for the duration; freed slots serve departing pods. Pods still
+running when the budget expires are force-stopped by `Engine.Close`,
+which releases their slots and does not replace a cache that has not
+exited 0. A Create, Start, Stop, or
 RemovePod that has not returned after 30 seconds does not hold that
 close: the error is logged, and the slot stays held until the call
 returns and the normal path releases it. A second signal cancels the

@@ -1,19 +1,34 @@
-# A CI pod whose Xcode caches survive across runs. Every
-# cache.darwin.node/<name> annotation declares a persistent cache:
-# the host restores it into this pod with APFS clonefile (CoW, instant),
-# shares it read-write over virtio-fs at the annotated guest path, and
-# re-snapshots it on graceful delete for the next pod.
+# A CI pod whose Xcode caches survive across successful runs.
+# cache.darwin.node/<name> restores a persistent cache into this pod
+# with APFS clonefile (CoW, instant) and shares it at the guest path.
+# The share is read-only unless this pod also sets
+# cache-write.darwin.node/<name>: "true" AND the node allowlist names
+# this namespace or this namespace/serviceaccount:
+#
+#   darwin-node --cache-writers=ci/builder
+#   # or DARWIN_NODE_CACHE_WRITERS=ci/builder
+#
+# Write-back runs only after the workload exits 0. A failed run, and a
+# delete while the workload is still running, leave the previous cache
+# in place. restartPolicy Never (or OnFailure) is what records that
+# success as Succeeded. Always also commits on exit 0, then starts again.
 #
 # Pair with `darwin-node --warm-slots=1` so the VM itself also skips
-# its cold boot when the previous pod used the same image.
+# its cold boot when the previous pod used the same image. A cache
+# annotation cannot adopt a warm VM.
 apiVersion: v1
 kind: Pod
 metadata:
   name: xcode-build
+  namespace: ci
   annotations:
     cache.darwin.node/derived-data: "/Users/mac/Library/Developer/Xcode/DerivedData"
     cache.darwin.node/spm: "/Users/mac/Library/Caches/org.swift.swiftpm"
+    cache-write.darwin.node/derived-data: "true"
+    cache-write.darwin.node/spm: "true"
 spec:
+  restartPolicy: Never
+  serviceAccountName: builder
   containers:
     - name: macos
       image: registry.example.com/macos:15-xcodes

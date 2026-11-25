@@ -154,6 +154,49 @@ func TestExplicitFlagBeatsEnv(t *testing.T) {
 			env:     map[string]string{"DARWIN_NODE_RESERVED_CPU": "nope"},
 			wantErr: "DARWIN_NODE_RESERVED_CPU",
 		},
+		{
+			name: "cache writers env applies when the flag is omitted",
+			env:  map[string]string{"DARWIN_NODE_CACHE_WRITERS": "ci, build/updater"},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if strings.Join(c.CacheWriters, ",") != "ci,build/updater" {
+					t.Fatalf("cache writers %v", c.CacheWriters)
+				}
+			},
+		},
+		{
+			name: "cache writers flag beats env",
+			env:  map[string]string{"DARWIN_NODE_CACHE_WRITERS": "ci"},
+			args: []string{"--cache-writers", "build/updater"},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if strings.Join(c.CacheWriters, ",") != "build/updater" {
+					t.Fatalf("cache writers %v, want the flag value", c.CacheWriters)
+				}
+			},
+		},
+		{
+			name: "cache writers flag replaces an env value that would not validate",
+			env:  map[string]string{"DARWIN_NODE_CACHE_WRITERS": "a/b/c"},
+			args: []string{"--cache-writers", "ci"},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if strings.Join(c.CacheWriters, ",") != "ci" {
+					t.Fatalf("cache writers %v, want the flag value", c.CacheWriters)
+				}
+			},
+		},
+		{
+			name:    "malformed cache writers env is an error",
+			env:     map[string]string{"DARWIN_NODE_CACHE_WRITERS": "a/b/c"},
+			wantErr: "cache writer",
+		},
+		{
+			name: "cache writers default to empty",
+			env:  map[string]string{"DARWIN_NODE_CACHE_WRITERS": ""},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if len(c.CacheWriters) != 0 {
+					t.Fatalf("cache writers %v, want none", c.CacheWriters)
+				}
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

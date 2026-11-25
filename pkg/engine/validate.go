@@ -66,7 +66,11 @@ func ValidatePod(pod *corev1.Pod, allowedHostPaths []string) error {
 			return fmt.Errorf("volume %q: %w", v.Name, err)
 		}
 	}
-	if _, err := ParseCacheAnnotations(pod); err != nil {
+	caches, err := ParseCacheAnnotations(pod)
+	if err != nil {
+		return err
+	}
+	if _, err := cacheWriteSet(pod, caches); err != nil {
 		return err
 	}
 	if err := validateContainerWorkload(pod.Spec.Containers[0]); err != nil {

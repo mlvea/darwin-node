@@ -12,8 +12,8 @@ To rotate the client credential:
 2. Restart the process. Under the supplied launchd plist, `KeepAlive` starts
    it again after it exits.
 3. SIGTERM still runs the drain. `ExitTimeOut` has to stay above
-   `--shutdown-grace-period` or launchd kills the process before the
-   cache snapshot. See [installation.md](installation.md).
+   `--shutdown-grace-period` or launchd kills the process before a
+   cache that already exited 0 is committed. See [installation.md](installation.md).
 
 What already reloads without a restart:
 

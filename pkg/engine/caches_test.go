@@ -103,8 +103,8 @@ func TestPrepareCachesRestoresFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(shares) != 1 || shares[0].Name != "cache.darwin.node.xc" || shares[0].ReadOnly {
-		t.Fatalf("shares %+v", shares)
+	if len(shares) != 1 || shares[0].Name != "cache.darwin.node.xc" || !shares[0].ReadOnly {
+		t.Fatalf("shares %+v, a consumer cache is read-only", shares)
 	}
 	if len(places) != 1 || places[0].GuestPath != "/Users/mac/DD" || places[0].Mode != "link" {
 		t.Fatalf("places %+v", places)
@@ -122,11 +122,15 @@ func TestPrepareCachesRestoresFromStore(t *testing.T) {
 }
 
 func TestCacheSnapshotRoundTripThroughLifecycle(t *testing.T) {
-	e := testEngine(t)
+	e, rt := cacheTestEngine(t, "default")
 	ctx := context.Background()
-	ann := map[string]string{"cache.darwin.node/xc": "/Users/mac/DD"}
+	ann := map[string]string{
+		"cache.darwin.node/xc":       "/Users/mac/DD",
+		"cache-write.darwin.node/xc": "true",
+	}
 
 	first := cachePod("ci-1", "uid-ci-1", ann)
+	first.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if err := e.Create(ctx, first, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +144,7 @@ func TestCacheSnapshotRoundTripThroughLifecycle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hostDir, "derived.bin"), []byte("build-output"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	endWorkload(t, e, rt, "default", "ci-1", 0)
 	if err := e.Delete(ctx, "default", "ci-1", 0); err != nil {
 		t.Fatal(err)
 	}
