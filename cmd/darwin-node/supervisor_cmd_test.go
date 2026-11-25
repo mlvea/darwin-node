@@ -60,7 +60,12 @@ func TestVMSupervisorFlagBeatsEnv(t *testing.T) {
 
 func TestSupervisorRoleSkipsAgent(t *testing.T) {
 	clearSupervisorEnv(t)
-	dir := t.TempDir()
+	// macOS sun_path holds 103 bytes. t.TempDir under /var/folders does not.
+	dir, err := os.MkdirTemp("/tmp", "dn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	started := make(chan struct{}, 1)
 	cmd, _, _, err := buildCommand(func(context.Context, dnconfig.Config, bool, *shutdownGate) error {
 		started <- struct{}{}

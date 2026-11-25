@@ -97,6 +97,10 @@ func (s *Server) prepare(ctx context.Context) error {
 	if s.Slot < 0 || s.Slot >= types.AppleMaxConcurrentVMs {
 		return fmt.Errorf("supervisor slot must be 0 or 1, got %d", s.Slot)
 	}
+	s.sock = SocketPath(s.RunDir, s.Slot)
+	if err := checkSocketPath(s.sock); err != nil {
+		return err
+	}
 	if err := prepareRunDir(s.RunDir); err != nil {
 		return err
 	}
@@ -126,7 +130,6 @@ func (s *Server) prepare(ctx context.Context) error {
 	s.active = map[net.Conn]struct{}{}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	s.sock = SocketPath(s.RunDir, s.Slot)
 	if err := os.Remove(s.sock); err != nil && !errors.Is(err, os.ErrNotExist) {
 		s.cancel()
 		return err
@@ -355,6 +358,22 @@ func (s *Server) deadLoop() {
 			}
 		}
 	}
+}
+
+// maxSocketPathLen is the longest pathname bind accepts for an AF_UNIX
+// socket. sun_path reserves one byte for the terminating NUL (103 on
+// macOS, 107 on Linux).
+func maxSocketPathLen() int {
+	var raw unix.RawSockaddrUnix
+	return len(raw.Path) - 1
+}
+
+func checkSocketPath(path string) error {
+	max := maxSocketPathLen()
+	if len(path) > max {
+		return fmt.Errorf("supervisor socket path is %d bytes; this OS allows %d (%s)", len(path), max, path)
+	}
+	return nil
 }
 
 func prepareRunDir(dir string) error {

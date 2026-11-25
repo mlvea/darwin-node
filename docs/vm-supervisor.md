@@ -43,6 +43,12 @@ plist example uses `/var/lib/darwin-node/run`, which the GUI user must
 create before the first boot. launchd does not create it, and the plist
 does not use a `Sockets` key. The process binds the socket itself.
 
+The socket path has to fit in `sockaddr_un.sun_path`: 103 bytes on macOS
+and 107 on Linux, not counting the trailing NUL. A home under
+`~/Library/Application Support/io.darwin-node.node/run` fits a short
+account name. A longer path fails at startup with the length in the
+error. `/var/lib/darwin-node/run` stays well under the limit.
+
 For a checkout without launchd, `--vm-supervisor-spawn=subprocess` (the
 default) starts the supervisor with `Setsid` and leaves its process
 group. There is no `Pdeathsig`. If the agent dies first, init adopts the

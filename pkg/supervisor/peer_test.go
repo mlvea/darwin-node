@@ -13,7 +13,7 @@ import (
 )
 
 func TestPeerUIDOfAcceptedConn(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketRunDir(t)
 	path := filepath.Join(dir, "sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
