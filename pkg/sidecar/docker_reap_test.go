@@ -50,3 +50,36 @@ func TestReapDanglingRemovesCrashedContainers(t *testing.T) {
 		t.Fatalf("removed %v, reap deleted a container it does not own", cli.removed)
 	}
 }
+
+type netListDocker struct {
+	listDocker
+	networks   []types.NetworkResource
+	netRemoved []string
+}
+
+func (f *netListDocker) NetworkList(context.Context, types.NetworkListOptions) ([]types.NetworkResource, error) {
+	return f.networks, nil
+}
+
+func (f *netListDocker) NetworkRemove(_ context.Context, id string) error {
+	f.mu.Lock()
+	f.netRemoved = append(f.netRemoved, id)
+	f.mu.Unlock()
+	return nil
+}
+
+func TestReapDanglingRemovesPodNetworks(t *testing.T) {
+	cli := &netListDocker{networks: []types.NetworkResource{
+		{ID: "ours", Name: "darwin-node-uid-1", Labels: map[string]string{"darwin-node": "pod"}},
+		{ID: "plain", Name: "darwin-node-user", Labels: map[string]string{"app": "web"}},
+		{ID: "bridge", Name: "bridge", Labels: map[string]string{"darwin-node": "pod"}},
+		{ID: "other", Name: "mynet", Labels: map[string]string{"darwin-node": "pod"}},
+	}}
+	d := &Docker{cli: cli, ids: map[string]map[string]string{}}
+	if err := d.reapDangling(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(cli.netRemoved) != 1 || cli.netRemoved[0] != "ours" {
+		t.Fatalf("removed networks %v", cli.netRemoved)
+	}
+}

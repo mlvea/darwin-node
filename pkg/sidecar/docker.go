@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +34,9 @@ type dockerAPI interface {
 	ContainerExecAttach(ctx context.Context, execID string, config types.ExecStartCheck) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (types.ContainerExecInspect, error)
 	ContainerKill(ctx context.Context, containerID, signal string) error
+	NetworkCreate(ctx context.Context, name string, options types.NetworkCreate) (types.NetworkCreateResponse, error)
+	NetworkRemove(ctx context.Context, networkID string) error
+	NetworkList(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error)
 }
 
 var _ dockerAPI = (*dockercl.Client)(nil)
@@ -42,9 +45,11 @@ const namePrefix = "darwin-node"
 
 // Docker runs hybrid sidecars on a local Docker daemon (Colima, Desktop, ...).
 type Docker struct {
-	cli dockerAPI
-	mu  sync.Mutex
-	ids map[string]map[string]string // podKey -> containerName -> docker ID
+	cli   dockerAPI
+	mu    sync.Mutex
+	ids   map[string]map[string]string // podKey -> containerName -> docker ID
+	nets  map[string]string            // podKey -> network name
+	saved map[string]CreateOptions     // podKey -> last Create options
 }
 
 // NewDocker returns a sidecar runtime or an error if the daemon is unreachable.
@@ -61,7 +66,12 @@ func NewDocker(ctx context.Context) (*Docker, error) {
 		_ = cli.Close()
 		return nil, err
 	}
-	d := &Docker{cli: cli, ids: map[string]map[string]string{}}
+	d := &Docker{
+		cli:   cli,
+		ids:   map[string]map[string]string{},
+		nets:  map[string]string{},
+		saved: map[string]CreateOptions{},
+	}
 	_ = d.reapDangling(ctx)
 	return d, nil
 }
@@ -84,86 +94,26 @@ func drainImagePull(r io.ReadCloser, err error) error {
 	return copyErr
 }
 
-func volumeBinds(pod *corev1.Pod, c corev1.Container, volRoot string) []string {
-	var binds []string
-	for _, m := range c.VolumeMounts {
-		host := ""
-		ro := m.ReadOnly
-		if pod != nil {
-			for i := range pod.Spec.Volumes {
-				v := &pod.Spec.Volumes[i]
-				if v.Name != m.Name {
-					continue
-				}
-				if v.HostPath != nil {
-					host = v.HostPath.Path
-				} else if volRoot != "" {
-					host = filepath.Join(volRoot, m.Name)
-				}
-				// The node rewrites these directories. A read-write bind lets
-				// the container replace a key with a symlink first.
-				if projectedContent(&v.VolumeSource) {
-					ro = true
-				}
-			}
-		}
-		if host == "" {
-			continue
-		}
-		mode := "rw"
-		if ro {
-			mode = "ro"
-		}
-		binds = append(binds, host+":"+m.MountPath+":"+mode)
+func prepareContainer(pod *corev1.Pod, c corev1.Container, volRoot string, opts CreateOptions) (*container.Config, *container.HostConfig, error) {
+	if err := ValidateContainerIsolation(pod, c); err != nil {
+		return nil, nil, err
 	}
-	return binds
-}
-
-func projectedContent(src *corev1.VolumeSource) bool {
-	return src.ConfigMap != nil || src.Secret != nil || src.Projected != nil || src.DownwardAPI != nil
-}
-
-func dockerResources(c corev1.Container) container.Resources {
-	var res container.Resources
-	if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok && !q.IsZero() {
-		res.NanoCPUs = q.MilliValue() * 1_000_000
+	binds, err := volumeBinds(pod, c, volRoot, opts.AllowedHostPaths)
+	if err != nil {
+		return nil, nil, err
 	}
-	if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok && !q.IsZero() {
-		if v, ok := q.AsInt64(); ok {
-			res.Memory = v
-		}
+	res, err := dockerResources(c)
+	if err != nil {
+		return nil, nil, err
 	}
-	return res
-}
-
-func dockerHostConfig(pod *corev1.Pod, c corev1.Container, volRoot string) *container.HostConfig {
-	return &container.HostConfig{
-		Binds:     volumeBinds(pod, c, volRoot),
-		Resources: dockerResources(c),
-	}
-}
-
-func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container, volRoot string) error {
-	// A second Create is a restart. Start the stopped container in place so
-	// the daemon does not reject the name. A start that fails, or a container
-	// the daemon no longer has, is removed and created again.
-	if id, ok := d.trackedID(pod.Namespace, pod.Name, c.Name); ok {
-		if err := d.restartTracked(ctx, id); err == nil {
-			return nil
-		}
-		// Keep the tracked id until the replacement is stored. A failed
-		// recreate still has a container RemovePod can delete.
-		_ = d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: true})
-	}
-	if c.ImagePullPolicy != corev1.PullNever {
-		rc, err := d.cli.ImagePull(ctx, c.Image, image.PullOptions{})
-		if err := drainImagePull(rc, err); err != nil {
-			return fmt.Errorf("docker pull %s: %w", c.Image, err)
-		}
+	env, err := resolveEnv(pod, c, opts)
+	if err != nil {
+		return nil, nil, err
 	}
 	cfg := &container.Config{
 		Image:      c.Image,
-		Env:        envList(c.Env),
+		Env:        env,
+		User:       userString(pod, c),
 		WorkingDir: c.WorkingDir,
 		Tty:        c.TTY,
 	}
@@ -173,9 +123,73 @@ func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container
 	if len(c.Args) > 0 {
 		cfg.Cmd = c.Args
 	}
-	host := dockerHostConfig(pod, c, volRoot)
+	host := &container.HostConfig{
+		Binds:          binds,
+		Resources:      res,
+		ReadonlyRootfs: readOnlyRoot(c),
+		Privileged:     false,
+		SecurityOpt:    []string{"no-new-privileges:true"},
+	}
+	for _, cap := range droppedCaps(c) {
+		host.CapDrop = append(host.CapDrop, string(cap))
+	}
+	return cfg, host, nil
+}
+
+func (d *Docker) remember(ctx context.Context, ns, name string) CreateOptions {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.saved == nil {
+		d.saved = map[string]CreateOptions{}
+	}
+	key := podKey(ns, name)
+	if opts, ok := CreateOptionsFrom(ctx); ok {
+		d.saved[key] = opts
+		return opts
+	}
+	return d.saved[key]
+}
+
+func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container, volRoot string) error {
+	if pod == nil {
+		return fmt.Errorf("nil pod")
+	}
+	opts := d.remember(ctx, pod.Namespace, pod.Name)
+	cfg, host, err := prepareContainer(pod, c, volRoot, opts)
+	if err != nil {
+		return err
+	}
+	// A second Create is a restart. Start the stopped container in place so
+	// the daemon does not reject the name. A start that fails, or a container
+	// the daemon no longer has, is removed and created again.
+	if id, ok := d.trackedID(pod.Namespace, pod.Name, c.Name); ok {
+		if err := d.restartTracked(ctx, id); err == nil {
+			return nil
+		}
+		// Keep going with the tracked id removed. A failed recreate still
+		// has a container RemovePod can delete once the replacement is stored.
+		_ = d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: true})
+	}
+	netName, err := d.ensurePodNetwork(ctx, pod)
+	if err != nil {
+		return err
+	}
+	host.NetworkMode = container.NetworkMode(netName)
+	netCfg := &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
+		netName: {},
+	}}
+	if c.ImagePullPolicy != corev1.PullNever {
+		auth, err := registryAuthHeader(c.Image, opts.Pull)
+		if err != nil {
+			return fmt.Errorf("docker pull %s: %w", c.Image, err)
+		}
+		rc, pullErr := d.cli.ImagePull(ctx, c.Image, image.PullOptions{RegistryAuth: auth})
+		if err := drainImagePull(rc, pullErr); err != nil {
+			return fmt.Errorf("docker pull %s: %w", c.Image, err)
+		}
+	}
 	name := dockerName(pod.Namespace, pod.Name, c.Name)
-	res, err := d.cli.ContainerCreate(ctx, cfg, host, nil, nil, name)
+	res, err := d.cli.ContainerCreate(ctx, cfg, host, netCfg, nil, name)
 	if err != nil {
 		return fmt.Errorf("docker create %s: %w", c.Name, err)
 	}
@@ -190,6 +204,39 @@ func (d *Docker) Create(ctx context.Context, pod *corev1.Pod, c corev1.Container
 	d.ids[podKey(pod.Namespace, pod.Name)][c.Name] = res.ID
 	d.mu.Unlock()
 	return nil
+}
+
+func (d *Docker) ensurePodNetwork(ctx context.Context, pod *corev1.Pod) (string, error) {
+	key := podKey(pod.Namespace, pod.Name)
+	d.mu.Lock()
+	if d.nets == nil {
+		d.nets = map[string]string{}
+	}
+	if name := d.nets[key]; name != "" {
+		d.mu.Unlock()
+		return name, nil
+	}
+	d.mu.Unlock()
+	name := podNetworkName(pod)
+	_, err := d.cli.NetworkCreate(ctx, name, types.NetworkCreate{
+		Driver: "bridge",
+		Labels: map[string]string{networkLabel: networkLabelPod},
+	})
+	if err != nil && !networkExists(err) {
+		return "", fmt.Errorf("docker network %s: %w", name, err)
+	}
+	d.mu.Lock()
+	if cur := d.nets[key]; cur != "" {
+		d.mu.Unlock()
+		return cur, nil
+	}
+	d.nets[key] = name
+	d.mu.Unlock()
+	return name, nil
+}
+
+func networkExists(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "already exists")
 }
 
 func (d *Docker) trackedID(ns, name, containerName string) (string, bool) {
@@ -224,13 +271,27 @@ func (d *Docker) StopContainer(ctx context.Context, ns, name, containerName stri
 }
 
 func (d *Docker) RemovePod(ctx context.Context, ns, name string, _ int64) error {
+	key := podKey(ns, name)
 	d.mu.Lock()
-	ids := copyContainerIDs(d.ids[podKey(ns, name)])
-	delete(d.ids, podKey(ns, name))
+	ids := copyContainerIDs(d.ids[key])
+	delete(d.ids, key)
+	netName := ""
+	if d.nets != nil {
+		netName = d.nets[key]
+		delete(d.nets, key)
+	}
+	if d.saved != nil {
+		delete(d.saved, key)
+	}
 	d.mu.Unlock()
 	var first error
 	for _, id := range ids {
 		if err := d.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil && first == nil {
+			first = err
+		}
+	}
+	if netName != "" {
+		if err := d.cli.NetworkRemove(ctx, netName); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -247,6 +308,30 @@ func (d *Docker) Get(ctx context.Context, ns, name, containerName string) (Statu
 		return Status{}, err
 	}
 	return inspectJSON(containerName, ins), nil
+}
+
+// Endpoint is the container address on its pod network. Loopback and
+// link-local inspect results are refused so a probe cannot dial the node.
+func (d *Docker) Endpoint(ctx context.Context, ns, name, containerName string) (string, error) {
+	id, err := d.lookup(ns, name, containerName)
+	if err != nil {
+		return "", err
+	}
+	ins, err := d.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	d.mu.Lock()
+	netName := ""
+	if d.nets != nil {
+		netName = d.nets[podKey(ns, name)]
+	}
+	d.mu.Unlock()
+	ip := containerIP(ins.NetworkSettings, netName)
+	if ip == "" {
+		return "", fmt.Errorf("sidecar %s has no routable address", containerName)
+	}
+	return ip, nil
 }
 
 // copyContainerIDs detaches the id map so List and RemovePod can inspect
@@ -283,11 +368,15 @@ func (d *Docker) Logs(ctx context.Context, ns, name, containerName string, opts 
 	if err != nil {
 		return nil, err
 	}
+	tail := "all"
+	if opts.Tail > 0 {
+		tail = strconv.Itoa(opts.Tail)
+	}
 	return d.cli.ContainerLogs(ctx, id, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     opts.Follow,
-		Tail:       fmt.Sprintf("%d", opts.Tail),
+		Tail:       tail,
 		Timestamps: opts.Timestamps,
 	})
 }
@@ -311,7 +400,43 @@ func (d *Docker) Exec(ctx context.Context, ns, name, containerName string, cmd [
 	if err != nil {
 		return err
 	}
-	defer hr.Close()
+	var once sync.Once
+	closeStream := func() {
+		once.Do(func() {
+			if hr.Conn != nil {
+				hr.Close()
+			}
+		})
+	}
+	done := make(chan struct{})
+	var watch sync.WaitGroup
+	watch.Add(1)
+	go func() {
+		defer watch.Done()
+		select {
+		case <-ctx.Done():
+			closeStream()
+		case <-done:
+		}
+	}()
+	defer func() {
+		close(done)
+		watch.Wait()
+		closeStream()
+	}()
+
+	var stdinWG sync.WaitGroup
+	if attach != nil && attach.Stdin() != nil && hr.Conn != nil {
+		stdinWG.Add(1)
+		go func() {
+			defer stdinWG.Done()
+			_, _ = io.Copy(hr.Conn, attach.Stdin())
+			if ctx.Err() == nil {
+				_ = hr.CloseWrite()
+			}
+		}()
+	}
+
 	var copyErr error
 	if hr.Reader != nil {
 		dst := io.Writer(io.Discard)
@@ -320,6 +445,13 @@ func (d *Docker) Exec(ctx context.Context, ns, name, containerName string, cmd [
 		}
 		_, copyErr = io.Copy(dst, hr.Reader)
 	}
+	if ctx.Err() != nil {
+		closeStream()
+		stdinWG.Wait()
+		return ctx.Err()
+	}
+	stdinWG.Wait()
+
 	ins, err := d.cli.ContainerExecInspect(ctx, execID.ID)
 	if err != nil {
 		return fmt.Errorf("exec inspect: %w", err)
@@ -355,15 +487,20 @@ func (d *Docker) reapDangling(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
-}
-
-func envList(vars []corev1.EnvVar) []string {
-	out := make([]string, 0, len(vars))
-	for _, e := range vars {
-		out = append(out, e.Name+"="+e.Value)
+	nets, err := d.cli.NetworkList(ctx, types.NetworkListOptions{})
+	if err != nil {
+		return err
 	}
-	return out
+	for _, n := range nets {
+		if !strings.HasPrefix(n.Name, namePrefix+"-") {
+			continue
+		}
+		if n.Labels[networkLabel] != networkLabelPod {
+			continue
+		}
+		_ = d.cli.NetworkRemove(ctx, n.ID)
+	}
+	return nil
 }
 
 func inspectJSON(name string, ins types.ContainerJSON) Status {

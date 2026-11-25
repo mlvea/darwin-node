@@ -2,11 +2,14 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -462,33 +465,123 @@ func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, conta
 	switch req.Type {
 	case guest.ProbeExec:
 		err := rt.Exec(pctx, ns, podName, container, req.Argv, nil)
+		if pctx.Err() != nil {
+			return false, probeIOMessage(pctx.Err())
+		}
 		if err != nil {
-			return false, err.Error()
+			return false, clipProbe(err.Error())
 		}
 		return true, ""
-	case guest.ProbeHTTP:
-		return sidecarHTTPProbe(pctx, req)
-	case guest.ProbeTCP:
-		return sidecarTCPProbe(pctx, req)
+	case guest.ProbeHTTP, guest.ProbeTCP:
+		host, port, err := sidecarProbeTarget(pctx, rt, ns, podName, container, p, ports)
+		if err != nil {
+			return false, clipProbe(err.Error())
+		}
+		if req.Type == guest.ProbeHTTP {
+			return sidecarHTTPProbe(pctx, p, host, port)
+		}
+		return sidecarTCPProbe(pctx, host, port)
 	default:
 		return false, "unknown probe type"
 	}
 }
 
-func sidecarHTTPProbe(ctx context.Context, req guest.ProbeReq) (bool, string) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)
+// sidecarProbeTarget is the container address the probe may dial.
+// An empty host, localhost, or a loopback address means the sidecar.
+// Any other host is refused, and the dial never happens.
+// The message is published on the pod and on events, so it carries no body.
+func sidecarProbeTarget(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe, ports []corev1.ContainerPort) (string, int, error) {
+	specHost, port, err := probeSpecHostPort(p, ports)
 	if err != nil {
-		return false, err.Error()
+		return "", 0, err
 	}
-	for k, v := range req.Headers {
-		httpReq.Header.Set(k, v)
+	ep, ok := rt.(sidecar.Endpoint)
+	if !ok {
+		return "", 0, fmt.Errorf("sidecar probe: runtime has no container address")
 	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	resp, err := client.Do(httpReq)
+	ip, err := ep.Endpoint(ctx, ns, podName, container)
+	if err != nil || strings.TrimSpace(ip) == "" {
+		return "", 0, fmt.Errorf("sidecar probe: runtime has no container address")
+	}
+	got, ok := sidecar.RoutableIP(ip)
+	if !ok {
+		return "", 0, fmt.Errorf("sidecar probe: container address is not routable")
+	}
+	host := got
+	if !probeHostUsesContainer(specHost) {
+		if !sameProbeHost(specHost, got) {
+			return "", 0, fmt.Errorf("sidecar probe: host %q is not the sidecar", specHost)
+		}
+	}
+	if _, ok := sidecar.RoutableIP(host); !ok {
+		return "", 0, fmt.Errorf("sidecar probe: refusing host loopback")
+	}
+	return host, port, nil
+}
+
+func probeSpecHostPort(p *corev1.Probe, ports []corev1.ContainerPort) (string, int, error) {
+	if p == nil {
+		return "", 0, fmt.Errorf("sidecar probe: no probe")
+	}
+	var host string
+	var port int
+	switch {
+	case p.HTTPGet != nil:
+		host = p.HTTPGet.Host
+		port = probePort(p.HTTPGet.Port, ports)
+	case p.TCPSocket != nil:
+		host = p.TCPSocket.Host
+		port = probePort(p.TCPSocket.Port, ports)
+	default:
+		return "", 0, fmt.Errorf("sidecar probe: no host")
+	}
+	if port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("sidecar probe: port %d is invalid", port)
+	}
+	return host, port, nil
+}
+
+func probeHostUsesContainer(host string) bool {
+	h := strings.TrimSpace(host)
+	if h == "" || strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(h, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func sameProbeHost(spec, container string) bool {
+	a := net.ParseIP(strings.Trim(strings.TrimSpace(spec), "[]"))
+	b := net.ParseIP(strings.Trim(strings.TrimSpace(container), "[]"))
+	if a != nil && b != nil {
+		return a.Equal(b)
+	}
+	return strings.EqualFold(strings.TrimSpace(spec), strings.TrimSpace(container))
+}
+
+func sidecarHTTPProbe(ctx context.Context, p *corev1.Probe, host string, port int) (bool, string) {
+	if _, ok := sidecar.RoutableIP(host); !ok {
+		return false, "sidecar probe: refusing host loopback"
+	}
+	raw, err := sidecarProbeURL(p, host, port)
 	if err != nil {
-		return false, err.Error()
+		return false, clipProbe(err.Error())
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	if err != nil {
+		return false, "probe dial failed"
+	}
+	if p != nil && p.HTTPGet != nil {
+		for _, h := range p.HTTPGet.HTTPHeaders {
+			if h.Name == "" || strings.EqualFold(h.Name, "Host") {
+				continue
+			}
+			httpReq.Header.Set(h.Name, h.Value)
+		}
+	}
+	resp, err := sidecarProbeClient().Do(httpReq)
+	if err != nil {
+		return false, probeIOMessage(err)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
@@ -498,16 +591,78 @@ func sidecarHTTPProbe(ctx context.Context, req guest.ProbeReq) (bool, string) {
 	return true, ""
 }
 
-func sidecarTCPProbe(ctx context.Context, req guest.ProbeReq) (bool, string) {
-	host := req.Host
-	if host == "" {
-		host = "127.0.0.1"
+func sidecarProbeURL(p *corev1.Probe, host string, port int) (string, error) {
+	scheme := "http"
+	path := "/"
+	if p != nil && p.HTTPGet != nil {
+		if p.HTTPGet.Scheme != "" {
+			scheme = strings.ToLower(string(p.HTTPGet.Scheme))
+		}
+		if p.HTTPGet.Path != "" {
+			path = p.HTTPGet.Path
+		}
+	}
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("sidecar probe: scheme %q is not supported", scheme)
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u := &url.URL{
+		Scheme: scheme,
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:   path,
+	}
+	return u.String(), nil
+}
+
+func sidecarProbeClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:             nil,
+			DialContext:       (&net.Dialer{}).DialContext,
+			DisableKeepAlives: true,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func sidecarTCPProbe(ctx context.Context, host string, port int) (bool, string) {
+	if _, ok := sidecar.RoutableIP(host); !ok {
+		return false, "sidecar probe: refusing host loopback"
 	}
 	var d net.Dialer
-	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(req.Port)))
+	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
-		return false, err.Error()
+		return false, probeIOMessage(err)
 	}
 	_ = c.Close()
 	return true, ""
+}
+
+func probeIOMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return "probe canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "probe timed out"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "probe timed out"
+	}
+	return "probe dial failed"
+}
+
+func clipProbe(msg string) string {
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	if len(msg) > 160 {
+		return msg[:160]
+	}
+	return msg
 }
