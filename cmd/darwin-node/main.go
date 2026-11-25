@@ -56,6 +56,10 @@ func buildCommand(start starter) (*cobra.Command, *dnconfig.Config, *shutdownGat
 	if err := cfg.MergeEnv(); err != nil {
 		return nil, nil, nil, err
 	}
+	sup := dnconfig.DefaultSupervisor()
+	if err := sup.MergeEnv(); err != nil {
+		return nil, nil, nil, err
+	}
 	var standalone bool
 	gate := newShutdownGate()
 
@@ -67,8 +71,15 @@ func buildCommand(start starter) (*cobra.Command, *dnconfig.Config, *shutdownGat
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
+			if err := sup.Validate(); err != nil {
+				return err
+			}
 			observability.SetupSlog(cfg.LogLevel)
-			return start(cmd.Context(), cfg, standalone, gate)
+			ctx := dnconfig.WithSupervisor(cmd.Context(), sup)
+			if sup.Role == dnconfig.RoleSupervisor {
+				return runSupervisor(ctx, cfg, sup)
+			}
+			return start(ctx, cfg, standalone, gate)
 		},
 	}
 	f := cmd.Flags()
@@ -108,6 +119,7 @@ func buildCommand(start starter) (*cobra.Command, *dnconfig.Config, *shutdownGat
 	f.IntVar(&cfg.ImageGCLow, "image-gc-low-threshold", cfg.ImageGCLow, "percent used at which image GC stops (kubelet default 80)")
 	f.DurationVar(&cfg.ImageGCInterval, "image-gc-interval", cfg.ImageGCInterval, "how often to evaluate image and cache-store GC")
 	f.StringVar(&cfg.MetricsAddress, "metrics-address", cfg.MetricsAddress, "Prometheus listen address (default 127.0.0.1:9102, not node_exporter's 9100); off disables it")
+	registerSupervisorFlags(cmd, &sup)
 
 	cmd.AddCommand(cmdDebugDump(&cfg))
 	cmd.AddCommand(cmdConsole(&cfg))

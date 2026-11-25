@@ -11,3 +11,4 @@
 | [0007](0007-gpu.md) | Paravirtualized Metal, honest labels | Accepted |
 | [0008](0008-technical-debt.md) | Remaining debt and next steps (Phase 6) | Living |
 | [0009](0009-stay-on-go.md) | Stay on Go; do not port to Rust | Accepted |
+| [0010](0010-per-vm-supervisor.md) | Per-VM supervisor processes | Accepted |
