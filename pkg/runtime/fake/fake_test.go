@@ -2,9 +2,11 @@ package fake
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/mlvea/darwin-node/internal/leakcheck"
 	"github.com/mlvea/darwin-node/pkg/guest"
 	"github.com/mlvea/darwin-node/pkg/types"
 )
@@ -79,4 +81,35 @@ func TestDialAgentAfterCloseReachesGuest(t *testing.T) {
 	if err != nil || info.PrimaryIP == "" {
 		t.Fatalf("guest unreachable after the first session closed: %+v %v", info, err)
 	}
+}
+
+// Stop has to end every in-process Serve, including dials whose clients
+// the host never closed. Those watchdogs otherwise stay in select until
+// the idle timeout, which is longer than leakcheck waits.
+func TestStopEndsGuestWatchdogs(t *testing.T) {
+	leakcheck.Check(t)
+	r := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m, err := r.Create(ctx, types.VMSpec{ID: types.MachineID{Name: "p", Namespace: "n", UID: "u"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var held []*guest.Client
+	for i := 0; i < 3; i++ {
+		cli, err := m.DialAgent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, cli)
+	}
+	if err := m.Stop(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the clients reachable so their heartbeats, not Stop, are what
+	// would have held the guest connections open.
+	runtime.KeepAlive(held)
 }

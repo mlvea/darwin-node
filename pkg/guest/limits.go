@@ -184,6 +184,10 @@ type handlerLive struct {
 	exitSeq     uint64
 	exitWait    chan struct{}
 	waitSeq     uint64
+	// shut is closed by stopServing. Every Serve on this agent, including
+	// its idle watchdog, returns. Close is once so a second Stop is safe.
+	shut     chan struct{}
+	shutOnce sync.Once
 }
 
 func newHandlerLive(token string, lim *Limiter) *handlerLive {
@@ -194,7 +198,17 @@ func newHandlerLive(token string, lim *Limiter) *handlerLive {
 		token:  token,
 		lim:    lim,
 		nonces: newNonceSet(maxHandshakeNonces),
+		shut:   make(chan struct{}),
 	}
+}
+
+// stopServing tells every Serve sharing this live state to return.
+// A second call does nothing.
+func (l *handlerLive) stopServing() {
+	if l == nil || l.shut == nil {
+		return
+	}
+	l.shutOnce.Do(func() { close(l.shut) })
 }
 
 func (l *handlerLive) getToken() string {

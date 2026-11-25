@@ -279,6 +279,13 @@ func (m *machine) Stop(_ context.Context, _ time.Duration) error {
 		m.counted = false
 	}
 	if m.state == types.VMStopped || m.state == "" || m.state == types.VMPending {
+		// A dial can start Serve after the state is already stopped.
+		// Cancel and close the handler or its idle watchdog stays in
+		// select until IdleTimeout.
+		if m.srvCancel != nil {
+			m.srvCancel()
+		}
+		m.handler.Close()
 		m.state = types.VMStopped
 		return nil
 	}
@@ -290,6 +297,9 @@ func (m *machine) Stop(_ context.Context, _ time.Duration) error {
 	if m.srvCancel != nil {
 		m.srvCancel()
 	}
+	// Every DialAgent Serve shares this handler. Close wakes idle
+	// watchdogs whose context was already replaced.
+	m.handler.Close()
 	now := time.Now()
 	m.finished = &now
 	m.state = types.VMStopped
