@@ -155,8 +155,23 @@ func Default() Config {
 	}
 }
 
-// ApplyEnv overlays DARWIN_NODE_* (and a few kubelet-compat) variables.
+// ApplyEnv overlays DARWIN_NODE_* (and a few kubelet-compat) variables
+// and validates. A caller that also parses flags must MergeEnv, register
+// those flags with the merged values as their defaults, then Validate.
+// Calling ApplyEnv after parsing puts the environment back on top of an
+// explicit flag.
 func (c *Config) ApplyEnv() error {
+	if err := c.MergeEnv(); err != nil {
+		return err
+	}
+	return c.Validate()
+}
+
+// MergeEnv overlays DARWIN_NODE_* (and a few kubelet-compat) variables.
+// It does not validate. An empty variable leaves the current value.
+// DARWIN_NODE_METRICS_ADDRESS is the exception: an empty value turns
+// metrics off, because LookupEnv distinguishes "unset" from "set empty".
+func (c *Config) MergeEnv() error {
 	if v := os.Getenv("DARWIN_NODE_NAME"); v != "" {
 		c.NodeName = v
 	}
@@ -343,7 +358,40 @@ func (c *Config) ApplyEnv() error {
 	if v, ok := os.LookupEnv("DARWIN_NODE_METRICS_ADDRESS"); ok {
 		c.MetricsAddress = v
 	}
-	return c.Validate()
+	if v := os.Getenv("DARWIN_NODE_RESERVED_CPU"); v != "" {
+		q, err := parseNonNegativeQuantity("DARWIN_NODE_RESERVED_CPU", v)
+		if err != nil {
+			return err
+		}
+		c.ReservedCPU = q
+	}
+	if v := os.Getenv("DARWIN_NODE_RESERVED_MEMORY"); v != "" {
+		q, err := parseNonNegativeQuantity("DARWIN_NODE_RESERVED_MEMORY", v)
+		if err != nil {
+			return err
+		}
+		c.ReservedMemory = q
+	}
+	if v := os.Getenv("DARWIN_NODE_RESERVED_EPHEMERAL"); v != "" {
+		q, err := parseNonNegativeQuantity("DARWIN_NODE_RESERVED_EPHEMERAL", v)
+		if err != nil {
+			return err
+		}
+		c.ReservedEphemeral = q
+	}
+	return nil
+}
+
+// parseNonNegativeQuantity accepts a Kubernetes quantity (2, 500m, 4Gi).
+func parseNonNegativeQuantity(name, v string) (resource.Quantity, error) {
+	q, err := resource.ParseQuantity(strings.TrimSpace(v))
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("%s: %w", name, err)
+	}
+	if q.Sign() < 0 {
+		return resource.Quantity{}, fmt.Errorf("%s: negative", name)
+	}
+	return q, nil
 }
 
 // MetricsDisabled reports that addr turns the Prometheus listener off.
@@ -434,6 +482,9 @@ func (c Config) Validate() error {
 	}
 	if c.AgentReadyTimeout < 0 {
 		return fmt.Errorf("agent ready timeout must not be negative")
+	}
+	if c.ReservedCPU.Sign() < 0 || c.ReservedMemory.Sign() < 0 || c.ReservedEphemeral.Sign() < 0 {
+		return fmt.Errorf("reserved resources must not be negative")
 	}
 	return nil
 }

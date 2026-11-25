@@ -88,10 +88,24 @@ Capacity must show `pods: 2`, `darwin.node/vm-slot: 2`, and `darwin.node/vm: 2`.
 ## launchd (production)
 
 ```bash
+sudo mkdir -p /var/log/darwin-node /etc/newsyslog.d
 sudo cp deploy/launchd/io.darwin-node.node.plist /Library/LaunchDaemons/
+sudo cp deploy/launchd/darwin-node.conf /etc/newsyslog.d/darwin-node.conf
 # edit paths and environment
 sudo launchctl load /Library/LaunchDaemons/io.darwin-node.node.plist
 ```
+
+The plist writes stdout and stderr to `/var/log/darwin-node/stdout.log` and
+`stderr.log`. `darwin-node.conf` is a newsyslog rule for those two files:
+rotate at 1024 KB, keep 5 bzip2 archives, owner `root:admin`, mode `640`.
+The `N` flag tells newsyslog not to signal syslogd. `newsyslog` runs on
+its own schedule. launchd keeps the log descriptors open, so bytes written
+after a rotation stay in the renamed file until the job starts again.
+
+The plist passes `--nodename`, `--log-level`, and `--listen-address`.
+Those flags win over the matching environment variables. Change the
+listen address by editing `--listen-address`. Log level has no
+environment variable.
 
 The guest-side plist is installed *inside images* by `darwin-image inject-agent`.
 
@@ -161,13 +175,16 @@ snapshot does not run.
 
 ## Configuration
 
-Precedence: `ApplyEnv` runs after flag parsing, so a set environment variable overrides the matching flag. Defaults apply when neither is set.
+Precedence is defaults, then environment variables, then explicit flags. `MergeEnv` runs before the flags are registered, so an omitted flag keeps the environment value and a flag on the command line replaces it. A malformed `DARWIN_NODE_*` value is an error before flags are parsed.
 
-Environment variables use the `DARWIN_NODE_` prefix (see `--help`). `ApplyEnv` does not read `DARWIN_NODE_RESERVED_CPU` or `DARWIN_NODE_RESERVED_MEMORY`. Host keep-away stays at the `config.Default` values (2 CPUs and 4Gi). Notable:
+Host keep-away is subtracted from Allocatable. The defaults are 2 CPUs, 4Gi of memory, and 20Gi of ephemeral storage. Set them with `DARWIN_NODE_RESERVED_CPU`, `DARWIN_NODE_RESERVED_MEMORY`, and `DARWIN_NODE_RESERVED_EPHEMERAL`, or with `--reserved-cpu`, `--reserved-memory`, and `--reserved-ephemeral`. Values are Kubernetes quantities (`500m`, `6Gi`). Notable:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `DARWIN_NODE_MAX_VMS` | `2` | Must be 1 or 2 |
+| `DARWIN_NODE_RESERVED_CPU` | `2` | CPUs withheld from Allocatable. Same as `--reserved-cpu` |
+| `DARWIN_NODE_RESERVED_MEMORY` | `4Gi` | Memory withheld from Allocatable. Same as `--reserved-memory` |
+| `DARWIN_NODE_RESERVED_EPHEMERAL` | `20Gi` | Ephemeral storage withheld from Allocatable. Same as `--reserved-ephemeral` |
 | `DARWIN_NODE_NETWORK_MODE` | `nat` | `nat` or `bridged` |
 | `DARWIN_NODE_BRIDGE_INTERFACE` | empty | Required for bridged |
 | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Do not taint NAT nodes |
@@ -191,7 +208,7 @@ Kubernetes connection (same as Virtual Kubelet):
 | `APISERVER_CERT_LOCATION` / `APISERVER_KEY_LOCATION` | kubelet server cert and key. Required in cluster mode |
 | `APISERVER_CA_CERT_LOCATION` | kubelet client CA. Required in cluster mode |
 | `KUBELET_PORT` | default `10250` |
-| `DARWIN_NODE_LISTEN_ADDRESS` | kubelet HTTP bind address. Default `127.0.0.1`. When set, overrides `--listen-address` |
+| `DARWIN_NODE_LISTEN_ADDRESS` | kubelet HTTP bind address. Default `127.0.0.1`. Used when `--listen-address` is omitted. An explicit `--listen-address` wins |
 
 ## Helm (optional skeleton)
 

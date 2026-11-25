@@ -49,6 +49,12 @@
 	-->
 	<key>ExitTimeOut</key>
 	<integer>120</integer>
+	<!--
+		These two files grow without a bound until darwin-node.conf is
+		installed in /etc/newsyslog.d/. launchd keeps the descriptors
+		open, so a rotated file receives new bytes after the job next
+		starts. See docs/installation.md.
+	-->
 	<key>StandardOutPath</key>
 	<string>/var/log/darwin-node/stdout.log</string>
 	<key>StandardErrorPath</key>

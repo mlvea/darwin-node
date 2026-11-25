@@ -7,6 +7,8 @@ import (
 
 	"github.com/mlvea/darwin-node/pkg/image"
 	"github.com/mlvea/darwin-node/pkg/types"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestParseGraphics(t *testing.T) {
@@ -314,6 +316,43 @@ func TestImageGCAndMetricsEnv(t *testing.T) {
 	c = Default()
 	if err := c.ApplyEnv(); err == nil {
 		t.Fatal("bad DARWIN_NODE_IMAGE_GC accepted")
+	}
+}
+
+func TestReservedEnv(t *testing.T) {
+	t.Setenv("DARWIN_NODE_SSH_PASSWORD", "")
+	t.Setenv("VZ_SSH_PASSWORD", "")
+	t.Setenv("DARWIN_NODE_RESERVED_CPU", "1500m")
+	t.Setenv("DARWIN_NODE_RESERVED_MEMORY", "6Gi")
+	t.Setenv("DARWIN_NODE_RESERVED_EPHEMERAL", "8Gi")
+	c := Default()
+	if err := c.ApplyEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if c.ReservedCPU.Cmp(resource.MustParse("1500m")) != 0 {
+		t.Fatalf("cpu %s", c.ReservedCPU.String())
+	}
+	if c.ReservedMemory.Cmp(resource.MustParse("6Gi")) != 0 {
+		t.Fatalf("memory %s", c.ReservedMemory.String())
+	}
+	if c.ReservedEphemeral.Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Fatalf("ephemeral %s", c.ReservedEphemeral.String())
+	}
+
+	t.Setenv("DARWIN_NODE_RESERVED_CPU", "-1")
+	c = Default()
+	if err := c.ApplyEnv(); err == nil {
+		t.Fatal("negative DARWIN_NODE_RESERVED_CPU accepted")
+	}
+	t.Setenv("DARWIN_NODE_RESERVED_CPU", "nope")
+	c = Default()
+	if err := c.ApplyEnv(); err == nil || !strings.Contains(err.Error(), "DARWIN_NODE_RESERVED_CPU") {
+		t.Fatalf("bad cpu quantity: %v", err)
+	}
+	c = Default()
+	c.ReservedMemory = resource.MustParse("-1")
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative reserved memory accepted")
 	}
 }
 
