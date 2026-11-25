@@ -19,6 +19,43 @@ make test-short
 - Adopt/delete soak on the fake runtime (`pkg/soak`): both VM slots, cache
   snapshot after exit 0 and restore, fd/dir/slot drift, a refused third VM,
   recovery after an injected start failure
+- Per-VM supervisor control socket on Linux, with the fake runtime over
+  real Unix sockets (see below). This does not boot launchd or
+  Virtualization.framework
+
+## Per-VM supervisor
+
+`--vm-supervisor` defaults to `off`. Linux tests drive a supervisor with
+the fake runtime over a real Unix socket. They cover the handshake and a
+refused unknown protocol major, all five RPCs (`StartVM`, `InspectVM`,
+`PauseAndSaveVM`, `StopVM`, `AttachChannels`), `SCM_RIGHTS` descriptors
+that can be written on one end and read on the other, reattach that
+leaves the VM running, a lease mismatch and a deleting pod leading to
+`StopVM`, peer-uid rejection, `ENOTCONN` (the connection closes, and
+that is not an auth failure), the dead-man timer, and goleak plus
+fd-count checks. The adapter's `Recover` and the lease check are in
+that set. `pkg/engine` does not call `Recover`.
+
+These paths compile for `darwin/arm64` and have not been run on Apple
+hardware:
+
+- A file-handle NIC moving frames. The socketpair and
+  `VZFileHandleNetworkDeviceAttachment` call are in place. The agent
+  does not bridge those frames to host NAT.
+- `VirtioSocketDevice.Connect` on the Virtualization queue, and taking
+  the unix descriptor out of the unexported `rawConn` field. `Connect`
+  has no context. Today's guest dials the host, so `Connect` completes
+  when the guest listens.
+- `Pause` plus `SaveMachineStateToPath`. The save API is macOS 14. On
+  macOS 13 the framework returns an error. The minimum stays macOS 13.
+- LaunchAgents in `gui/<uid>`, `launchctl kickstart`, and codesign of
+  this one binary. CI checks the plist text in `deploy/launchd/`.
+  launchd and the entitlement are not exercised.
+
+`pkg/runtime/simvz` is a separate Linux stand-in that opens real
+descriptors for the engine. `--runtime` does not select it. See
+[simvz.md](simvz.md). The supervisor feature write-up is
+[vm-supervisor.md](vm-supervisor.md).
 
 ## Soak
 

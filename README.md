@@ -34,6 +34,7 @@ like any other workload.
 | Kubelet authn/authz (client CA, TokenReview, SubjectAccessReview) | ✅ Verified against a real API server | `make test-kubelet-auth` (envtest, kube-apiserver + etcd 1.35) |
 | Real VM boot, exec, logs, metrics, delete | ⏳ Hardware pending | `make test-hardware IMAGE=...` on a Mac, not run yet |
 | 24 h adopt/delete soak on Virtualization.framework | ⏳ Hardware pending | `make soak IMAGE=...`, not run yet |
+| Per-VM supervisor (`--vm-supervisor`, default off) | ⏳ Protocol covered on Linux sockets; launchd and Virtualization.framework behaviour hardware-pending | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
 | Bridged/routed pod networking | ⏳ Design chosen, not built | See [Roadmap](#roadmap) |
 
 ---
@@ -88,6 +89,11 @@ flowchart TD
 
 - **Pods.** `containers[0]` is the macOS VM. `containers[1..]` are Docker
   sidecars on the host. Init containers run on the host only.
+- **Process boundary.** The VM is created in the agent process.
+  `--vm-supervisor=on` (default `off`) moves it into the same binary
+  started as `--role=supervisor --slot=N`, so an agent crash can leave
+  that VM running. The engine does not adopt it after a restart yet.
+  See [docs/vm-supervisor.md](docs/vm-supervisor.md).
 - **Capacity.** Each VM takes one `darwin.node/vm-slot`. The node advertises
   that extended resource at the configured maximum (1 or 2) and fails closed
   there (Apple's macOS EULA and the XNU `hv_apple_isa_vm_quota` limit). If
@@ -222,7 +228,9 @@ To run it as a service, use the launchd plist at
 and `stderr.log` rotate. See
 [docs/installation.md](docs/installation.md) for launchd, log rotation,
 shutdown, upgrades and Homebrew. The Homebrew formula is a sketch until
-notarized release archives exist.
+notarized release archives exist. Slot LaunchAgents
+(`deploy/launchd/io.darwin-node.slot-0.plist` and `slot-1.plist`) belong
+to `--vm-supervisor=on` and are not loaded by that default install.
 
 ### 5. Cluster-side RBAC (Helm, optional)
 
@@ -306,6 +314,7 @@ See [docs/scheduling.md](docs/scheduling.md).
 | Break-glass serial console | `--serial-console`, then `darwin-node console -n <ns> -p <pod>` | [docs/console.md](docs/console.md) |
 | Delta image updates | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
 | Debug snapshot without a cluster | `darwin-node debug-dump -o debug-snapshot.json` | [docs/testing.md](docs/testing.md) |
+| Per-VM supervisor (default off) | `--vm-supervisor=on`, `--role=supervisor --slot=N` | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
 
 Warm-pool adoption needs a matching image and a matching vCPU and memory
 size. The pool boots 2 vCPU and 4 GiB, which is the default request, so a
@@ -318,17 +327,21 @@ adopted guest gets a new agent token. The slot is taken immediately before
 
 ## Configuration
 
-Every flag below comes from `cmd/darwin-node/main.go`, and every default from
-`config.Default()` in `pkg/config/config.go`. **Precedence is defaults, then
-environment variables, then explicit flags.** An omitted flag keeps the
-environment value. A flag on the command line replaces it. `darwin-node
---help` lists the flags, and the default it prints is the value after the
-environment has been applied. A value `MergeEnv` cannot parse is an error
-before that help text runs. A value that parses and then fails `Validate`
-is an error when the command runs. The flag is already applied by then, so
-it can stand in for an environment value that would not validate.
+Node flags below come from `buildCommand` in `cmd/darwin-node/main.go`,
+and their defaults from `config.Default()` in `pkg/config/config.go`.
+Supervisor flags are registered from that same command, and their
+defaults come from `config.DefaultSupervisor()`. **Precedence is
+defaults, then environment variables, then explicit flags.** An omitted
+flag keeps the environment value. A flag on the command line replaces
+it. `darwin-node --help` lists the flags, and the default it prints is
+the value after the environment has been applied. A value `MergeEnv`
+cannot parse is an error before that help text runs. A value that
+parses and then fails `Validate` is an error when the command runs. The
+flag is already applied by then, so it can stand in for an environment
+value that would not validate.
 [docs/installation.md](docs/installation.md) lists every variable
-`MergeEnv` reads and the flags that have no environment variable.
+`Config.MergeEnv` and `(*Supervisor).MergeEnv` read, and the flags that
+have no environment variable.
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
@@ -367,6 +380,22 @@ it can stand in for an environment value that would not validate.
 | `--image-gc-high-threshold` / `--image-gc-low-threshold` | `DARWIN_NODE_IMAGE_GC_{HIGH,LOW}_THRESHOLD` | `85` / `80` | Disk usage (%) at which GC starts and stops |
 | `--image-gc-interval` | `DARWIN_NODE_IMAGE_GC_INTERVAL` | `5m` | How often GC runs |
 | `--metrics-address` | `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus `/metrics`. `off`, `disabled`, `-`, or empty disables it. An unset variable keeps the default |
+
+Per-VM supervisor. Default `off` leaves today's in-process VMs in place.
+The control protocol, the gaps (no engine reattach yet, no host NAT
+bridge, no serial console on the supervised machine), and the
+hardware-pending launchd and Virtualization.framework behaviour are in
+[docs/vm-supervisor.md](docs/vm-supervisor.md). The socket path limit is
+in [docs/installation.md](docs/installation.md).
+
+| Flag | Env | Default | Meaning |
+|---|---|---|---|
+| `--vm-supervisor` | `DARWIN_NODE_VM_SUPERVISOR` | `off` | `on` moves each VM into a slot supervisor |
+| `--role` | `DARWIN_NODE_ROLE` | `agent` | `agent` (virtual kubelet) or `supervisor` (one slot, no image pull, no API watch, no `:10250`) |
+| `--slot` | `DARWIN_NODE_SLOT` | `-1` | Slot `0` or `1`. `-1` means unset. Role `supervisor` requires `0` or `1` |
+| `--vm-supervisor-run-dir` | `DARWIN_NODE_VM_SUPERVISOR_RUN_DIR` | `~/Library/Application Support/io.darwin-node.node/run` | Socket and boot-lease directory, mode `0700`. On macOS the socket path `<run dir>/slot-N.sock` must be at most 103 bytes |
+| `--vm-supervisor-deadman` | `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` | `5m` | After a disconnect while a VM is running, stop it once no agent has been connected for this long |
+| `--vm-supervisor-spawn` | `DARWIN_NODE_VM_SUPERVISOR_SPAWN` | `subprocess` | `subprocess` starts the slot with `Setsid`. `launchd` runs `launchctl kickstart gui/<uid>/io.darwin-node.slot-N` |
 
 Variables with no flag:
 
@@ -475,6 +504,12 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
   reach the host network, and sidecars in one pod can reach each other),
   and seccomp, AppArmor, `fsGroup`, and `supplementalGroups` are not applied.
 - **SSH fallback** is off by default, key-only, and never uses passwords.
+- **Per-VM supervisor** is off by default. With `--vm-supervisor=on`, the
+  run directory (mode `0700`) and a same-uid check on the Unix socket
+  (`LOCAL_PEERCRED` on macOS, `SO_PEERCRED` on Linux) are the local trust
+  boundary. The supervisor does not parse the guest protocol. Kubelet
+  TLS, the virtualization entitlement, and the guest handshake stay as
+  they are with the flag off.
 
 **Reporting a vulnerability:** do **not** open a public issue. GitHub
 private vulnerability reporting is the only channel: open the
@@ -510,6 +545,7 @@ matter most:
   the listeners and every live splice. One side ending half-closes the
   other; both close after 5s. A dial to the guest gives up after 5s.
   The caps are 256 connections per pod and 512 per node. There is no flag.
+- **Per-VM supervisor is off, and turning it on does not yet preserve a pod across an agent restart.** The supervisor process can keep the VM. `pkg/engine` does not call the adapter's `Recover`, so the new agent leaves that VM unadopted. A guest booted with the flag on has no host network until the file-handle NIC is bridged. Real launchd and Virtualization.framework behaviour is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
 - **No real hardware run yet.** See the status table at the top.
 
 ## Hardware validation
@@ -525,7 +561,10 @@ checklist for a real Apple Silicon Mac, and it is the release gate:
 6. Optional cluster smoke with `examples/pod.yaml` (a third pod must fail with `VMCapacityExhausted`)
 
 **Status (25 Nov 2026): not yet run.** Results go in the result sheet in that
-doc and in the PR that records them.
+doc and in the PR that records them. The per-VM supervisor's LaunchAgents,
+`launchctl kickstart`, and Virtualization.framework paths (file-handle NIC,
+vsock `Connect`, pause/save) are a separate hardware-pending list. CI checks
+the slot plist text. It does not boot launchd or a VM.
 
 ## Roadmap
 
@@ -564,7 +603,8 @@ cmd/darwin-hwtest    hardware release gate
 cmd/darwin-soak      adopt/delete soak harness
 pkg/provider         Virtual Kubelet adapter
 pkg/engine           pod lifecycle, warm pool, caches, probes, console bridge
-pkg/runtime          vz (darwin/arm64) + fake runtime
+pkg/runtime          vz (darwin/arm64), fake, simvz (Linux stand-in), supervised adapter
+pkg/supervisor       per-VM control socket and boot lease
 pkg/guest            agent protocol, transports, PTY exec
 pkg/image            OCI pull, overlays, deltas, provenance
 pkg/capacity         2-VM slot table
@@ -584,6 +624,8 @@ Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md
 |---|---|
 | [docs/installation.md](docs/installation.md) | Build, sign, launchd, upgrades, Helm |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit together |
+| [docs/vm-supervisor.md](docs/vm-supervisor.md) | Per-VM supervisor (`--vm-supervisor`, default off), control socket, launchd slots |
+| [docs/simvz.md](docs/simvz.md) | Linux stand-in for the VM runtime. It is not selected by `--runtime` |
 | [docs/code-layout.md](docs/code-layout.md) | Where a new file goes, so `engine.go`, `fake.go`, `config.go`, and `main.go` stay the entry points |
 | [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
 | [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle and adoption rules |

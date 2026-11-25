@@ -74,5 +74,11 @@ tab and choose **Report a vulnerability**.
 - A warm VM adopted by a pod gets a fresh agent token. The pod's own
   pull credentials are checked again before that adoption when a
   committed image cache exists. See [docs/security.md](docs/security.md).
+- `--vm-supervisor` defaults to `off`. With it on, the run directory
+  (mode `0700`) and a same-uid peer check on the slot socket are the
+  local trust boundary. The supervisor does not parse the guest
+  protocol. Kubelet TLS and the guest handshake are unchanged. The
+  engine does not adopt a live supervisor VM after an agent restart
+  yet. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
 
 Operational notes: [docs/security.md](docs/security.md).

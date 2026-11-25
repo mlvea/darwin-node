@@ -109,6 +109,112 @@ environment variable.
 
 The guest-side plist is installed *inside images* by `darwin-image inject-agent`.
 
+## Per-VM supervisor
+
+The mode stays off unless the process is started with `--vm-supervisor=on`.
+Off keeps each `VZVirtualMachine` inside the agent. On runs each VM in a
+second process of the same signed binary. The protocol, threat model, and
+upgrade flow are in [vm-supervisor.md](vm-supervisor.md). Flags and
+environment variables are in
+[Per-VM supervisor configuration](#per-vm-supervisor-configuration).
+
+| Role | How it starts | What it does |
+|---|---|---|
+| agent | `--role=agent` (default) | Virtual kubelet: image pull, pod watch, `:10250` |
+| supervisor | `--role=supervisor --slot=0` or `--slot=1` | One VM and one control socket. It does not pull images, watch the API server, or listen on `:10250` |
+
+`--slot` defaults to `-1` (unset). A supervisor process requires `0` or `1`.
+
+### launchd slot plists
+
+Examples live in `deploy/launchd/io.darwin-node.slot-0.plist` and
+`io.darwin-node.slot-1.plist`. They belong in the `gui/<uid>` domain, not
+beside the node LaunchDaemon. Each one runs the same signed binary:
+
+```text
+/usr/local/bin/darwin-node --role=supervisor --slot=N --runtime=vz --vm-supervisor-run-dir=/var/lib/darwin-node/run
+```
+
+`KeepAlive` is `{SuccessfulExit=false}`. launchd restarts a supervisor
+that crashes. A supervisor that exits 0, which it does after the VM stops
+and after the dead-man switch, stays stopped. The next pod needs
+`launchctl kickstart gui/$UID/io.darwin-node.slot-N`, or an agent started
+with `--vm-supervisor-spawn=subprocess` (the default), which starts the
+slot itself with `Setsid` and does not ask launchd.
+
+`--vm-supervisor-spawn=launchd` is the agent setting that runs
+`launchctl kickstart gui/<uid>/io.darwin-node.slot-N` when the socket is
+not already listening.
+
+Create `/var/lib/darwin-node/run` mode `0700`, owned by the GUI user,
+before the first boot. launchd does not create it. The plist has no
+`Sockets` key. The process binds `<run dir>/slot-N.sock` itself. The
+agent default, when the flag is on and the run directory is left unset,
+is `~/Library/Application Support/io.darwin-node.node/run`. The boot
+lease is `<run dir>/slots/slot-N/lease.json` (mode `0600`).
+
+Real LaunchAgent install, `launchctl kickstart`, codesign of the running
+binary, and Virtualization.framework behaviour are hardware-pending. CI
+checks the plist text. It does not boot launchd or a VM. The pending
+framework paths are a file-handle NIC that actually moves frames (the
+agent does not bridge those frames to host NAT yet),
+`VirtioSocketDevice.Connect` on the Virtualization queue (today's guest
+dials the host, so `Connect` completes when the guest listens), and
+`Pause` plus `SaveMachineStateToPath` (the save API is macOS 14; on
+macOS 13 the framework returns an error, and the minimum stays macOS 13).
+
+### Socket path limit
+
+macOS `sockaddr_un.sun_path` holds 103 bytes plus a trailing NUL. Linux
+holds 107. The path that has to fit is `<run dir>/slot-N.sock`, not the
+run directory alone. `Serve` rejects a longer path before it creates the
+directory, and the error reports the length and the OS limit.
+
+`/var/lib/darwin-node/run/slot-0.sock` is 36 bytes. The default
+`$HOME/Library/Application Support/io.darwin-node.node/run/slot-0.sock`
+fits when `$HOME` is at most 39 bytes: `/Users/` plus an account name of
+32 characters is exactly 103, and one byte more is rejected. A longer
+home directory needs a shorter `--vm-supervisor-run-dir` (or
+`DARWIN_NODE_VM_SUPERVISOR_RUN_DIR`).
+
+### Slot logs
+
+The slot plists write:
+
+- `/var/log/darwin-node/slot-0.stdout.log` and `slot-0.stderr.log`
+- `/var/log/darwin-node/slot-1.stdout.log` and `slot-1.stderr.log`
+
+`deploy/launchd/darwin-node.conf` rotates the node agent's
+`/var/log/darwin-node/stdout.log` and `stderr.log` only. The four slot
+paths are absent from that file, so newsyslog does not bound them.
+`cmd/darwin-node/launchd_plist_test.go` requires the rule count in
+`darwin-node.conf` to equal the node plist's two log files, so slot
+rules stay out of that file. Add a separate newsyslog configuration when
+those slot logs should rotate.
+
+### Current limits of the flag
+
+These are the operator-visible gaps. The feature write-up records the
+same list.
+
+- `pkg/engine` recovery does not call the adapter's `Recover`. A
+  restarted agent with the flag on leaves a live VM unadopted. The
+  adapter method and the lease check exist and are tested. Startup still
+  deletes unheld pod directories.
+- The guest agent still dials the host. `AttachChannels` dials the
+  guest. Those meet when the guest listens.
+- The datagram descriptor is handed to the agent and is not bridged to
+  host NAT. A guest booted with the flag on has no host network until
+  that bridge exists.
+- The supervised machine does not expose the serial console.
+  `--serial-console` on the in-process runtime is unchanged.
+- A recovered machine does not carry the guest-agent token. The lease
+  does not store it. The engine has to supply the token from the pod
+  before `DialAgent` on a reattached VM.
+- macOS 13 cannot save a paused VM. The save API is macOS 14. The
+  minimum stays macOS 13, so `PauseAndSaveVM` returns the framework
+  error there.
+
 ## Shutdown behavior
 
 SIGTERM and SIGINT trigger a graceful drain before the process exits:
@@ -135,14 +241,17 @@ every remaining pod VM (`Engine.Close`: slot release; a cache write-back
 only if that workload already exited 0) before exiting 130. It does not
 wait out `--shutdown-grace-period`.
 A crash skips that stop. The next process reclaims leftover pod
-directories at startup. Drain the node before each upgrade so that
+directories at startup. That is the in-process runtime. With
+`--vm-supervisor=on` the supervisor can keep the VM, and the engine
+does not adopt it. Drain the node before each upgrade so that
 restart is not how a running pod is stopped. See [Upgrades](#upgrades).
 
 ## Upgrades
 
-Drain the node before each upgrade. A process restart, a crash, or a
-host reboot stops every pod VM. The next process deletes the leftover
-pod disks and does not boot those pods from a clean image:
+Drain the node before each upgrade. With `--vm-supervisor` left off
+(the default), a process restart, a crash, or a host reboot stops every
+pod VM. The next process deletes the leftover pod disks and does not
+resume those disks as live machines:
 
 - `restartPolicy: Never` is marked `Failed` with reason `NodeRestarted`
   and is not started again. Its restart count is left as it was.
@@ -150,6 +259,10 @@ pod disks and does not boot those pods from a clean image:
   started again. The container restart count increases by one.
 - A pod that had already `Succeeded` or `Failed` keeps that phase and
   is not started again.
+
+With `--vm-supervisor=on`, the slot supervisor can keep the VM across an
+agent restart, and the engine does not adopt it. Drain before the
+upgrade in that case too. See [Per-VM supervisor](#per-vm-supervisor).
 
 Draining first lets the pods shut down through the normal path, so a
 Job is not failed by the upgrade and an Always pod is not killed mid-run.
@@ -179,15 +292,15 @@ period, or launchd kills the process before that commit runs.
 
 ## Configuration
 
-Precedence is defaults (`config.Default()` in `pkg/config/config.go`), then environment variables (`MergeEnv` in `pkg/config/env.go`), then explicit flags (`buildCommand` in `cmd/darwin-node/main.go`). `MergeEnv` runs before the flags are registered, so an omitted flag keeps the environment value and a flag on the command line replaces it. `--help` prints those flag defaults after the environment has been applied.
+`config.Config` and `config.Supervisor` are separate values. Precedence for both is defaults, then environment variables, then explicit flags. `buildCommand` in `cmd/darwin-node/main.go` calls `Config.MergeEnv` (`pkg/config/env.go`) and `(*Supervisor).MergeEnv` (`pkg/config/supervisor.go`) before the flags are registered, so an omitted flag keeps the environment value and a flag on the command line replaces it. `--help` prints those flag defaults after the environment has been applied. Node defaults come from `config.Default()` in `pkg/config/config.go`. Supervisor defaults come from `config.DefaultSupervisor()`.
 
-A value `MergeEnv` cannot parse is an error before flags are parsed, including before `--help`. That is a bad integer, duration, Kubernetes quantity, or graphics string, and `DARWIN_NODE_IMAGE_GC` set to anything other than `true`, `1`, `false`, or `0`. A value that parses and then fails `Validate` (`pkg/config/validate.go`) is an error when the command runs. The flag is already applied, so it can stand in for an environment value that would not validate. `Validate` rejects max VMs outside 1 or 2, warm slots outside 0–2, an unknown runtime or network mode, bridged mode with no interface, a negative duration, image GC thresholds out of range, a metrics address that is not `host:port` while metrics are on, a cache-writer entry that is not a namespace or `namespace/serviceaccount`, and any non-empty `DARWIN_NODE_SSH_PASSWORD` or `VZ_SSH_PASSWORD`.
+A value that `Config.MergeEnv` or `(*Supervisor).MergeEnv` cannot parse is an error before flags are parsed, including before `--help`. For the node config that is a bad integer, duration, Kubernetes quantity, or graphics string, and `DARWIN_NODE_IMAGE_GC` set to anything other than `true`, `1`, `false`, or `0`. For the supervisor config it is a non-integer `DARWIN_NODE_SLOT` or a `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` that is not a Go duration. A value that parses and then fails `Validate` (`pkg/config/validate.go` for the node, `(*Supervisor).Validate` for the supervisor) is an error when the command runs. The flag is already applied, so it can stand in for an environment value that would not validate. Node `Validate` rejects max VMs outside 1 or 2, warm slots outside 0–2, an unknown runtime or network mode, bridged mode with no interface, a negative duration, image GC thresholds out of range, a metrics address that is not `host:port` while metrics are on, a cache-writer entry that is not a namespace or `namespace/serviceaccount`, and any non-empty `DARWIN_NODE_SSH_PASSWORD` or `VZ_SSH_PASSWORD`. Supervisor `Validate` is described with the supervisor table below.
+
+The first table is every variable `Config.MergeEnv` reads. The flag column is the matching `buildCommand` flag. Where that column is empty, there is no flag.
 
 `DARWIN_NODE_ALLOW_NAT_WORKLOADS`, `DARWIN_NODE_SERIAL_CONSOLE`, and `DARWIN_NODE_ENABLE_SSH_FALLBACK` turn on only for `true` or `1`. Any other non-empty value leaves them off and is not a parse error. An empty variable leaves the current value, except `DARWIN_NODE_METRICS_ADDRESS`: setting that variable to empty turns metrics off. `DARWIN_NODE_AGENT_TCP_FALLBACK` is read and ignored.
 
 Host keep-away is subtracted from Allocatable. The defaults are 2 CPUs, 4Gi of memory, and 20Gi of ephemeral storage. Set them with `DARWIN_NODE_RESERVED_CPU`, `DARWIN_NODE_RESERVED_MEMORY`, and `DARWIN_NODE_RESERVED_EPHEMERAL`, or with `--reserved-cpu`, `--reserved-memory`, and `--reserved-ephemeral`. Values are Kubernetes quantities (`500m`, `6Gi`).
-
-`MergeEnv` reads every variable below. The flag column is the matching `buildCommand` flag. Where that column is empty, there is no flag.
 
 | Variable | Default | Flag | Meaning |
 |---|---|---|---|
@@ -252,6 +365,21 @@ These are registered in `buildCommand` and are not read from the environment. `-
 | `--standalone` | `false` | Run the engine without joining a cluster |
 | `--startup-timeout` | `0` | Passed to virtual-kubelet `Node.WaitReady`. `0` adds no deadline: the call waits until the node is Ready, the controller exits, or the process context ends |
 | `--init-timeout` | `2m` | Maximum wait for each init container |
+
+### Per-VM supervisor configuration
+
+`(*Supervisor).MergeEnv` reads the variables below. An empty variable leaves the current value. Strings are lowercased before `Validate`. Role must be `agent` or `supervisor`. Mode must be `off` or `on`. Spawn must be `subprocess` or `launchd`. The dead-man duration must be positive. The slot must be `-1`, `0`, or `1`. Role `supervisor` requires slot `0` or `1` and a non-empty run directory. Mode `on` also requires a non-empty run directory. When the home directory cannot be resolved, the default run directory is empty and those two cases fail `Validate`.
+
+The socket path limit for `--vm-supervisor-run-dir` is in [Socket path limit](#socket-path-limit).
+
+| Variable | Default | Flag | Meaning |
+|---|---|---|---|
+| `DARWIN_NODE_VM_SUPERVISOR` | `off` | `--vm-supervisor` | `on` moves each VM into a slot supervisor. Any other value fails `Validate` |
+| `DARWIN_NODE_ROLE` | `agent` | `--role` | `agent` or `supervisor` |
+| `DARWIN_NODE_SLOT` | `-1` | `--slot` | Slot `0` or `1`. `-1` means unset. A non-integer is a parse error. Role `supervisor` requires `0` or `1` |
+| `DARWIN_NODE_VM_SUPERVISOR_RUN_DIR` | `~/Library/Application Support/io.darwin-node.node/run` | `--vm-supervisor-run-dir` | Directory for `<run dir>/slot-N.sock` and the boot lease. Mode `0700`. On macOS the socket path must be at most 103 bytes |
+| `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` | `5m` | `--vm-supervisor-deadman` | After a disconnect while a VM is running, stop it once no agent has been connected for this long. Must be a positive Go duration |
+| `DARWIN_NODE_VM_SUPERVISOR_SPAWN` | `subprocess` | `--vm-supervisor-spawn` | `subprocess` starts the slot with `Setsid`. `launchd` runs `launchctl kickstart` |
 
 ## Helm (optional skeleton)
 
