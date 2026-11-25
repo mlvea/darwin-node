@@ -198,10 +198,21 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 
 // succeedWorkload marks a Running pod Succeeded after the guest reported
 // exit 0 and the restart policy will not start it again. The slot is
-// released. A successful cache write-back is committed before teardown,
-// while the pod directory is still present. Delete removes that directory
+// released. The cache commit (clone into a temp dir, then rename onto the
+// store) finishes before Succeeded is visible and before teardown, while
+// the pod directory is still present. A waiter that observes Succeeded
+// therefore observes the committed store. Delete removes that directory
 // later; a process restart would otherwise reap it without a snapshot.
 func (e *Engine) succeedWorkload(rec *podRecord) {
+	rec.mu.Lock()
+	if rec.phase != corev1.PodRunning && rec.phase != corev1.PodPending {
+		rec.mu.Unlock()
+		return
+	}
+	rec.mu.Unlock()
+	// Publishing Succeeded before this returns let readers observe success
+	// while the rename was still in flight and the store file was missing.
+	e.snapshotPodCaches(rec)
 	rec.mu.Lock()
 	if rec.phase != corev1.PodRunning && rec.phase != corev1.PodPending {
 		rec.mu.Unlock()
@@ -216,7 +227,6 @@ func (e *Engine) succeedWorkload(rec *podRecord) {
 	rec.message = "workload exited 0"
 	rec.ready = false
 	rec.mu.Unlock()
-	e.snapshotPodCaches(rec)
 	e.teardown(context.Background(), rec, 0, false)
 	e.events.Normal(context.Background(), event.ReasonCompleted, "workload exited 0")
 }
