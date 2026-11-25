@@ -73,8 +73,15 @@ func TestWrongStateAndPauseSave(t *testing.T) {
 	if err := m.Save(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if m.State() != "Stopped" || rt.Running() != 0 {
+	// Save leaves the VM Paused and keeps the slot. Stop is what releases it.
+	if m.State() != "Paused" || rt.Running() != 1 {
 		t.Fatalf("after save %s running %d", m.State(), rt.Running())
+	}
+	if err := m.Stop(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	if m.State() != "Stopped" || rt.Running() != 0 {
+		t.Fatalf("after stop %s running %d", m.State(), rt.Running())
 	}
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)

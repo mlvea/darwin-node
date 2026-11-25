@@ -85,6 +85,57 @@ func (c *ScaledClock) Wall(d time.Duration) time.Duration {
 	return w
 }
 
+// ManualClock advances logical time without sleeping. Wall returns 0 so a
+// caller can tell that a duration does not occupy wall time. The guest
+// idle watchdog (pkg/guest) uses the real clock and will not fire inside
+// a ManualClock stall; faultConn closes the session itself when a stall
+// outlasts the idle window on a clock whose Wall is zero.
+//
+// testing/synctest cannot drive that case: the guest blocks in a socket
+// read, which is not a durable bubble block, so fake time never advances.
+type ManualClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// NewManualClock returns a clock whose epoch is Unix 0. Sleep moves Now
+// forward by the logical duration and returns immediately.
+func NewManualClock() *ManualClock {
+	return &ManualClock{now: time.Unix(0, 0).UTC()}
+}
+
+// Now is the logical time.
+func (c *ManualClock) Now() time.Time {
+	if c == nil {
+		return time.Unix(0, 0).UTC()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// Wall reports that logical time does not occupy wall time.
+func (c *ManualClock) Wall(time.Duration) time.Duration { return 0 }
+
+// Sleep advances logical time by d. A context that is already cancelled
+// does not advance the clock.
+func (c *ManualClock) Sleep(ctx context.Context, d time.Duration) error {
+	if c == nil || d <= 0 {
+		return nil
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+	return nil
+}
+
 // Sleep waits the wall-scaled duration, then advances logical time by d.
 // A cancelled context does not advance the clock.
 func (c *ScaledClock) Sleep(ctx context.Context, d time.Duration) error {

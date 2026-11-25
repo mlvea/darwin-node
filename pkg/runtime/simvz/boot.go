@@ -25,6 +25,9 @@ func (m *machine) boot(ctx context.Context) error {
 		return err
 	}
 	life := m.startLife()
+	if m.faults.HoldAgent {
+		return nil
+	}
 	if m.rt.guestBin != "" {
 		return m.spawnGuest(ctx)
 	}
@@ -136,6 +139,7 @@ func (m *machine) cleanup() {
 	dir := m.dir
 	m.dir = ""
 	m.disk = ""
+	m.agentReady = false
 	m.mu.Unlock()
 	if ln != nil {
 		_ = ln.Close()
@@ -156,4 +160,6 @@ func (m *machine) cleanup() {
 	if dir != "" {
 		_ = os.RemoveAll(dir)
 	}
+	m.dropFlows()
+	m.q.stop()
 }

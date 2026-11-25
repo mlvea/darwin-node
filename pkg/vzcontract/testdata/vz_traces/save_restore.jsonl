@@ -1,0 +1,7 @@
+{"seq":1,"op":"meta","order":"kvo_before_stop_completion","source":"derived","note":"derived, not hardware-recorded: Save stays Paused; Restore from Stopped ends Paused"}
+{"seq":2,"op":"create","vm":"vm"}
+{"seq":3,"op":"start","vm":"vm","pre_state":"Stopped","events":[{"kind":"state_change","state":"Starting"},{"kind":"state_change","state":"Running"},{"kind":"completion_handler","err":null}]}
+{"seq":4,"op":"pause","vm":"vm","pre_state":"Running","events":[{"kind":"state_change","state":"Pausing"},{"kind":"state_change","state":"Paused"},{"kind":"completion_handler","err":null}]}
+{"seq":5,"op":"save","vm":"vm","pre_state":"Paused","events":[{"kind":"state_change","state":"Saving"},{"kind":"state_change","state":"Paused"},{"kind":"completion_handler","err":null}]}
+{"seq":6,"op":"stop","vm":"vm","pre_state":"Paused","events":[{"kind":"state_change","state":"Stopping"},{"kind":"delegate_guest_did_stop"},{"kind":"state_change","state":"Stopped"},{"kind":"completion_handler","err":null}]}
+{"seq":7,"op":"restore","vm":"vm","pre_state":"Stopped","events":[{"kind":"state_change","state":"Restoring"},{"kind":"state_change","state":"Paused"},{"kind":"completion_handler","err":null}]}

@@ -36,6 +36,19 @@ type Faults struct {
 	// stopped machine. CrashAfter of zero kills before Start returns.
 	CrashGuest bool
 	CrashAfter time.Duration
+	// HoldAgent leaves the VM Running without a guest listener. Connect
+	// and DialAgent then fail with ECONNREFUSED instead of accepting on a
+	// socket created before the agent is ready. RegisterAgent releases it.
+	HoldAgent bool
+	// ConnectDelay is the async completion latency for Connect and
+	// DialAgent. The call does not poll for a listener; it waits this
+	// long (logical time) and then succeeds or returns ECONNREFUSED.
+	// Zero completes immediately. Values from 50ms to 2s are the range
+	// the contract exercises.
+	ConnectDelay time.Duration
+	// DatagramENOBUFS is how many host datagram writes return ENOBUFS
+	// before a write is attempted. The payload is not queued.
+	DatagramENOBUFS int
 }
 
 // FaultsFromSeed is a deterministic plan. The same seed always returns
@@ -80,6 +93,17 @@ type Options struct {
 	// Transition is the logical pause spent in Starting, Pausing, Saving,
 	// and Stopping so a test can observe the intermediate state.
 	Transition time.Duration
+	// Order selects async completion ordering.
+	//
+	//	"" or "kvo_before_stop_completion": guestDidStop, KVO Stopped, then the completion handler.
+	//	"stop_completion_before_kvo": guestDidStop, the completion handler, then KVO Stopped.
+	//	"jitter": permute those three events. OrderSeed reproduces the permutation.
+	//
+	// The same switch orders a limit failure's KVO Error against its completion handler.
+	Order string
+	// OrderSeed is the PCG seed for Order "jitter". Zero picks a seed from
+	// the wall clock and keeps it on the runtime so a failure can print it.
+	OrderSeed int64
 }
 
 func (o Options) maxRunning() int {

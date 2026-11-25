@@ -50,8 +50,15 @@ func (m *machine) serveInProcess(ctx context.Context) error {
 	}
 	h := m.inProcessHandler()
 	m.mu.Lock()
+	if m.ln != nil || m.agentReady {
+		m.mu.Unlock()
+		_ = ln.Close()
+		_ = os.Remove(path)
+		return nil
+	}
 	m.sock = path
 	m.ln = ln
+	m.agentReady = true
 	m.mu.Unlock()
 	m.wg.Add(1)
 	go m.acceptLoop(ctx, ln, h)
@@ -94,40 +101,6 @@ func (m *machine) acceptLoop(ctx context.Context, ln net.Listener, h guest.Handl
 	}
 }
 
-// DialAgent connects to the guest's unix socket and performs the host
-// handshake. The VM must be Running. A crashed guest fails the dial and
-// leaves the machine Running.
-func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	if m.state != vzRunning {
-		st := m.state.String()
-		m.mu.Unlock()
-		return nil, &StateError{Op: "dial", State: st}
-	}
-	path := m.sock
-	token := m.token
-	life := m.life
-	m.mu.Unlock()
-	if path == "" {
-		return nil, fmt.Errorf("simvz: guest agent is not listening")
-	}
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", path)
-	if err != nil {
-		return nil, fmt.Errorf("simvz: vsock dial: %w", err)
-	}
-	wrapped := m.wrap(life, ctx, conn)
-	cli, err := guest.Dial(ctx, wrapped, token, "simvz")
-	if err != nil {
-		_ = wrapped.Close()
-		return nil, err
-	}
-	return cli, nil
-}
-
 func (m *machine) wrap(life, dial context.Context, conn net.Conn) net.Conn {
 	if m.faults.Stall <= 0 && m.faults.VsockEOFAfter <= 0 {
 		return conn
@@ -138,6 +111,7 @@ func (m *machine) wrap(life, dial context.Context, conn net.Conn) net.Conn {
 		ctx:      life,
 		dial:     dial,
 		stall:    m.faults.Stall,
+		idle:     guest.DefaultIdleTimeout,
 		eofAfter: m.faults.VsockEOFAfter,
 	}
 }
@@ -149,8 +123,10 @@ func (m *machine) crashGuest() {
 	proc := m.proc
 	m.proc = nil
 	m.agentOK = false
+	m.agentReady = false
 	m.mu.Unlock()
 	m.cancelLife()
+	m.dropFlows()
 	if ln != nil {
 		_ = ln.Close()
 	}

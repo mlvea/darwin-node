@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"math/rand/v2"
+
 	"github.com/mlvea/darwin-node/pkg/guest"
 	"github.com/mlvea/darwin-node/pkg/runtime"
 	"github.com/mlvea/darwin-node/pkg/types"
@@ -34,6 +36,13 @@ type Runtime struct {
 	live     int
 	failLeft int
 	seq      atomic.Uint64
+
+	order     string
+	orderSeed int64
+	rng       *rand.Rand
+	rngMu     sync.Mutex
+	gateMu    sync.Mutex
+	gates     map[string]*gate
 }
 
 // New builds a simulator. A nil clock is the wall clock. See Options.
@@ -43,7 +52,7 @@ func New(opts Options) *Runtime {
 		clock = wallClock{}
 	}
 	faults := opts.resolvedFaults()
-	return &Runtime{
+	rt := &Runtime{
 		clock:      clock,
 		faults:     faults,
 		guestBin:   opts.GuestBinary,
@@ -53,6 +62,8 @@ func New(opts Options) *Runtime {
 		idle:       idleWall(clock),
 		failLeft:   faults.FailStart,
 	}
+	rt.initOrder(opts)
+	return rt
 }
 
 // idleWall is the guest idle timeout on the real clock. The protocol
@@ -92,7 +103,7 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	return newMachine(r, spec), nil
 }
 
-func (r *Runtime) acquire() error {
+func (r *Runtime) reserve() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.live >= r.max {
@@ -147,7 +158,13 @@ type machine struct {
 	life       context.Context
 	lifeCancel context.CancelFunc
 
-	wg sync.WaitGroup
+	wg           sync.WaitGroup
+	events       []traceEvent
+	agentReady   bool
+	flow         *flowGroup
+	dgramLeft    int
+	snapshotPath string
+	q            vmQueue
 }
 
 func newMachine(r *Runtime, spec types.VMSpec) *machine {
@@ -158,15 +175,17 @@ func newMachine(r *Runtime, spec types.VMSpec) *machine {
 		mac = fmt.Sprintf("02:00:00:00:%02x:%02x", byte(n>>8), byte(n))
 	}
 	return &machine{
-		rt:     r,
-		clock:  r.clock,
-		faults: r.faults,
-		spec:   spec,
-		id:     spec.ID,
-		token:  spec.AgentToken,
-		ip:     ip,
-		mac:    mac,
-		state:  vzStopped,
+		rt:        r,
+		clock:     r.clock,
+		faults:    r.faults,
+		spec:      spec,
+		id:        spec.ID,
+		token:     spec.AgentToken,
+		ip:        ip,
+		mac:       mac,
+		state:     vzStopped,
+		flow:      newFlowGroup(),
+		dgramLeft: r.faults.DatagramENOBUFS,
 	}
 }
 
@@ -233,132 +252,14 @@ func (m *machine) Logs() io.ReadCloser {
 
 func (m *machine) cas(from, to vzState, op string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.state != from {
-		return &StateError{Op: op, State: m.state.String()}
-	}
-	m.state = to
-	return nil
-}
-
-// Start moves Stopped to Starting, then Running. A third live VM returns
-// ErrVirtualMachineLimitExceeded and stays Stopped. A configured start
-// failure opens the NIC and the vsock listener and closes them before
-// returning.
-func (m *machine) Start(ctx context.Context) error {
-	if m == nil {
-		return fmt.Errorf("simvz: nil machine")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := m.cas(vzStopped, vzStarting, "start"); err != nil {
-		return err
-	}
-	if err := m.rt.acquire(); err != nil {
-		m.mu.Lock()
-		m.state = vzStopped
-		m.mu.Unlock()
-		return err
-	}
-	m.mu.Lock()
-	m.held = true
-	m.bootErr = nil
-	m.mu.Unlock()
-	if err := m.pauseTransition(ctx); err != nil {
-		m.failStart(err)
-		return err
-	}
-	if err := m.boot(ctx); err != nil {
-		m.failStart(err)
-		return err
-	}
-	immediate := m.faults.CrashGuest && m.faults.CrashAfter <= 0
-	if immediate {
-		// Still Starting, so a concurrent Stop is refused and cannot
-		// Wait the accept loop out from under this crash.
-		m.crashGuest()
-		m.wg.Wait()
-	}
-	now := m.clock.Now()
-	m.mu.Lock()
-	if m.state != vzStarting {
 		st := m.state.String()
 		m.mu.Unlock()
-		m.failStart(&StateError{Op: "start", State: st})
-		return &StateError{Op: "start", State: st}
+		return &StateError{Op: op, State: st}
 	}
-	m.started = &now
-	m.finished = nil
-	m.agentOK = !immediate
-	m.state = vzRunning
-	life := m.life
+	release := m.commitLocked(to)
 	m.mu.Unlock()
-	if m.faults.CrashGuest && !immediate {
-		m.armCrash(life)
-	}
-	return nil
-}
-
-// Stop force-stops a Running or Paused VM. graceful is wall time: the
-// engine passes a real termination grace, and scaling it would hide a
-// stuck stop. The intermediate state is Stopping.
-func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
-	if m == nil {
-		return fmt.Errorf("simvz: nil machine")
-	}
-	m.mu.Lock()
-	switch m.state {
-	case vzRunning, vzPaused:
-		m.state = vzStopping
-	default:
-		st := m.state.String()
-		m.mu.Unlock()
-		return &StateError{Op: "stop", State: st}
-	}
-	m.mu.Unlock()
-	if graceful > 0 {
-		waitWall(ctx, graceful)
-	}
-	_ = m.pauseTransition(ctx)
-	m.finishStopped()
-	return nil
-}
-
-// Pause moves Running through Pausing to Paused. The VM keeps its slot.
-func (m *machine) Pause(ctx context.Context) error {
-	if err := m.cas(vzRunning, vzPausing, "pause"); err != nil {
-		return err
-	}
-	if err := m.pauseTransition(ctx); err != nil {
-		_ = m.cas(vzPausing, vzRunning, "pause")
-		return err
-	}
-	return m.cas(vzPausing, vzPaused, "pause")
-}
-
-// Resume moves Paused through Starting back to Running.
-func (m *machine) Resume(ctx context.Context) error {
-	if err := m.cas(vzPaused, vzStarting, "resume"); err != nil {
-		return err
-	}
-	if err := m.pauseTransition(ctx); err != nil {
-		_ = m.cas(vzStarting, vzPaused, "resume")
-		return err
-	}
-	return m.cas(vzStarting, vzRunning, "resume")
-}
-
-// Save moves Paused through Saving to Stopped and releases the slot.
-func (m *machine) Save(ctx context.Context) error {
-	if err := m.cas(vzPaused, vzSaving, "save"); err != nil {
-		return err
-	}
-	if err := m.pauseTransition(ctx); err != nil {
-		_ = m.cas(vzSaving, vzPaused, "save")
-		return err
-	}
-	m.finishStopped()
+	m.releaseSlot(release)
 	return nil
 }
 
@@ -385,30 +286,21 @@ func waitWall(ctx context.Context, d time.Duration) {
 func (m *machine) failStart(err error) {
 	m.cleanup()
 	m.mu.Lock()
-	m.state = vzStopped
 	m.agentOK = false
 	m.bootErr = err
-	held := m.held
-	m.held = false
 	m.mu.Unlock()
-	if held {
-		m.rt.release()
-	}
+	m.become(vzStopped)
+	m.recordCompletion(err)
 }
 
-func (m *machine) finishStopped() {
-	m.cleanup()
-	now := m.clock.Now()
-	m.mu.Lock()
-	m.state = vzStopped
-	m.finished = &now
-	m.agentOK = false
-	held := m.held
-	m.held = false
-	m.mu.Unlock()
-	if held {
-		m.rt.release()
+// shutdown stops the actor and any vsock pumps. Stop and failStart already
+// do this; call it again for a VM left in Error, which still has an actor.
+func (m *machine) shutdown() {
+	if m == nil {
+		return
 	}
+	m.dropFlows()
+	m.q.stop()
 }
 
 func stringsReader(s string) io.Reader { return &stringReader{s: s} }
