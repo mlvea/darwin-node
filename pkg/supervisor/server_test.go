@@ -395,7 +395,9 @@ func TestDeadmanHoldsWhileConnectedAndResetsOnHeartbeat(t *testing.T) {
 }
 
 func TestRunDirSymlinkRejected(t *testing.T) {
-	dir := t.TempDir()
+	// The path check runs before the symlink check. t.TempDir on macOS
+	// already overflows sun_path once slot-0.sock is appended.
+	dir := socketRunDir(t)
 	real := filepath.Join(dir, "real")
 	if err := os.MkdirAll(real, 0o700); err != nil {
 		t.Fatal(err)
