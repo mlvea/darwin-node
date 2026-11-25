@@ -43,9 +43,10 @@ Priority order, all behind `pkg/guest.Transport`:
    independent of NAT/bridged, works before DHCP. Apple's host-side vsock is
    *not* `AF_VSOCK` (ENODEV); it is a file descriptor from Virtualization.framework.
    Code-Hex/vz exposes that FD as `net.Conn`.
-2. **Authenticated TCP (fallback).** Guest listens on a well-known port
-   (`1050/tcp`). Host dials the guest IP once discovered. Shared token (injected
-   via virtio-fs at boot) authenticates the first frame. Optional TLS.
+2. **TCP fallback — removed 25 Nov 2026.** It listened on `1050/tcp` and
+   sent the pod token in the clear. Over the shared NAT the other VM can
+   sniff or stall that socket. The host does not dial it and the guest
+   agent does not listen. See the amendment below.
 3. **SSH (last resort).** Kept for images that have not yet been baked with the
    agent. Degraded: no log stream, probes are exec-over-SSH, no secret
    materialization.
@@ -54,7 +55,7 @@ The guest **dials the host** on vsock (guest-initiated) because Apple's
 documented model is: guest `AF_VSOCK` works; host must use the framework. The
 host installs a `VZVirtioSocketListener` on a well-known port; the agent
 connects at launch and keeps a persistent session. If the listener is missing
-(old host), the agent falls back to TCP listen.
+the agent retries vsock. It does not listen on TCP.
 
 Well-known vsock port: `50051`.
 
@@ -90,8 +91,8 @@ asking the guest to stop, and its payload is a reason and a timeout. The
 serial console is a raw byte stream and is off unless `--serial-console`
 is set, so it is not this channel.
 
-The guest writes one frame on the agent connection it already has (vsock
-port 50051, or TCP when that fallback is on) and then halts:
+The guest writes one frame on the vsock connection it already has (port
+50051) and then halts:
 
 ```json
 {"v":1,"id":"exit","kind":"notify","method":"Exit","payload":{"exitCode":137,"reason":"OOMKilled"}}
@@ -152,15 +153,16 @@ launchd job `io.darwin-node.guest-agent`:
 - `KeepAlive` true, `RunAtLoad` true
 - Starts as root (needed for shutdown, mounts, some probes)
 - Writes logs to `/var/log/darwin-guest-agent.log` (and os_log)
-- On vsock connect failure, retries with backoff and opens TCP fallback
+- On vsock connect failure, retries with backoff. There is no TCP listen.
 - Crash recovery is launchd's job; the host treats missing handshake as
   `ContainerStarting` then `Failed` after `AgentReadyTimeout`
 
 ## Security
 
 - vsock is the trust boundary: only the hosting process can accept.
-- TCP fallback requires a per-pod random token, 32 bytes, written mode 0600
-  into the virtio-fs control share, never into the Pod spec.
+- The pod token is 32 random bytes, written mode 0600 into the virtio-fs
+  control share, never into the Pod spec, and sent only on the vsock
+  handshake.
 - Exec does not imply a login shell; the host sends argv + env explicitly.
 - Secrets are copied by the agent to the requested path with the requested
   mode, then the host may unshare the secret directory.
@@ -170,4 +172,27 @@ launchd job `io.darwin-node.guest-agent`:
 - Images without the agent still boot (SSH fallback) but are marked with
   condition `GuestAgent=False`.
 - Bake tooling (`darwin-image inject-agent`) is part of the supported path.
-- We must test vsock on real hardware; CI uses the TCP loopback transport.
+- We must test vsock on real hardware. CI uses `net.Pipe` and the fake
+  runtime, not a TCP guest transport.
+
+## Amendment (25 Nov 2026)
+
+The plaintext TCP fallback described above is removed. The guest agent
+is reached only over vsock. `--agent-tcp-fallback`, `--listen`, and
+`DARWIN_NODE_AGENT_TCP_FALLBACK` are gone; setting the variable does
+not open a listener and does not make the host dial TCP. SSH fallback
+is unchanged: opt-in, key-only, for images that have no agent.
+
+Handshake is additive. The host sends `minProtocol`, `maxProtocol`, and
+its capability list. The guest replies with the selected protocol, its
+version, and its own list. The host keeps the intersection for that
+session. An older agent that omits the list still handshakes; the
+intersection is empty. Unknown JSON fields are ignored.
+
+Control frames are capped at 64 KiB. Stream and materialize frames keep
+the 16 MiB cap. An over-limit frame, or one nested deeper than 32,
+closes the session. Workload exit codes are stored in 0..255. Guest
+status and event text is truncated to 1024 printable UTF-8 characters.
+`kubectl exec` returns the process exit code. Named probe ports are
+resolved from the container's ports. Guest CPU and memory are measured
+in the agent and are untrusted telemetry, not a scheduling input.

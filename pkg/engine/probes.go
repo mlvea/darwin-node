@@ -18,9 +18,10 @@ import (
 	"github.com/darwin-node/darwin-node/pkg/types"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-func k8sProbe(p *corev1.Probe) (guest.ProbeReq, bool) {
+func k8sProbe(p *corev1.Probe, ports []corev1.ContainerPort) (guest.ProbeReq, bool) {
 	if p == nil {
 		return guest.ProbeReq{}, false
 	}
@@ -34,7 +35,7 @@ func k8sProbe(p *corev1.Probe) (guest.ProbeReq, bool) {
 		return guest.ProbeReq{Type: guest.ProbeExec, Argv: h.Exec.Command, Timeout: timeout}, true
 	case h.HTTPGet != nil:
 		host := h.HTTPGet.Host
-		port := h.HTTPGet.Port.IntValue()
+		port := probePort(h.HTTPGet.Port, ports)
 		path := h.HTTPGet.Path
 		if path == "" {
 			path = "/"
@@ -57,7 +58,7 @@ func k8sProbe(p *corev1.Probe) (guest.ProbeReq, bool) {
 		if host == "" {
 			host = "127.0.0.1"
 		}
-		return guest.ProbeReq{Type: guest.ProbeTCP, Host: host, Port: h.TCPSocket.Port.IntValue(), Timeout: timeout}, true
+		return guest.ProbeReq{Type: guest.ProbeTCP, Host: host, Port: probePort(h.TCPSocket.Port, ports), Timeout: timeout}, true
 	default:
 		return guest.ProbeReq{}, false
 	}
@@ -457,7 +458,7 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 	// startupDone lives on the record so a liveness restart can clear it.
 	// A local flag would stay true and leave Started set across that restart.
 	if !startupDone {
-		if req, ok := k8sProbe(c0.StartupProbe); ok {
+		if req, ok := k8sProbe(c0.StartupProbe, c0.Ports); ok {
 			initial, period, failTh := probeTiming(c0.StartupProbe)
 			due, _ := probeDue(now, started, sched.startup, initial, period)
 			if !due {
@@ -496,7 +497,7 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 		}
 		rec.mu.Lock()
 		rec.startupDone = true
-		if _, hasReady := k8sProbe(c0.ReadinessProbe); !hasReady {
+		if _, hasReady := k8sProbe(c0.ReadinessProbe, c0.Ports); !hasReady {
 			rec.ready = true
 			if rec.reason == "StartupProbe" {
 				rec.reason = ""
@@ -508,7 +509,7 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 
 	var wg sync.WaitGroup
 
-	if req, ok := k8sProbe(c0.ReadinessProbe); ok {
+	if req, ok := k8sProbe(c0.ReadinessProbe, c0.Ports); ok {
 		initial, period, failTh := probeTiming(c0.ReadinessProbe)
 		successTh := probeSuccessThreshold(c0.ReadinessProbe)
 		if due, _ := probeDue(now, started, sched.ready, initial, period); due {
@@ -554,7 +555,7 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 	var liveErr error
 	var liveRan bool
 	var liveFailTh int32
-	if req, ok := k8sProbe(c0.LivenessProbe); ok {
+	if req, ok := k8sProbe(c0.LivenessProbe, c0.Ports); ok {
 		initial, period, failTh := probeTiming(c0.LivenessProbe)
 		liveFailTh = failTh
 		if due, _ := probeDue(now, started, sched.live, initial, period); due {
@@ -620,17 +621,17 @@ func (e *Engine) tickProbes(ctx context.Context, rec *podRecord, sched *vmProbeS
 }
 
 func hasStartupProbe(c corev1.Container) bool {
-	_, ok := k8sProbe(c.StartupProbe)
+	_, ok := k8sProbe(c.StartupProbe, c.Ports)
 	return ok
 }
 
 func hasLivenessProbe(c corev1.Container) bool {
-	_, ok := k8sProbe(c.LivenessProbe)
+	_, ok := k8sProbe(c.LivenessProbe, c.Ports)
 	return ok
 }
 
 func hasReadinessProbe(c corev1.Container) bool {
-	_, ok := k8sProbe(c.ReadinessProbe)
+	_, ok := k8sProbe(c.ReadinessProbe, c.Ports)
 	return ok
 }
 
@@ -641,12 +642,24 @@ func probeContext(parent context.Context, timeout time.Duration) (context.Contex
 	return context.WithTimeout(parent, timeout)
 }
 
+func probePort(port intstr.IntOrString, ports []corev1.ContainerPort) int {
+	if port.Type == intstr.String {
+		for _, p := range ports {
+			if p.Name == port.StrVal && p.ContainerPort > 0 {
+				return int(p.ContainerPort)
+			}
+		}
+		return 0
+	}
+	return port.IntValue()
+}
+
 func probeMsg(res guest.ProbeRes, err error) string {
 	if err != nil {
-		return err.Error()
+		return guest.SanitizeGuestText(err.Error())
 	}
 	if res.Message != "" {
-		return res.Message
+		return guest.SanitizeGuestText(res.Message)
 	}
 	if !res.OK {
 		return "probe failed"

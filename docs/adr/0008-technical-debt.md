@@ -11,7 +11,8 @@
   volumes, image config, fake VM lifecycle, node capacity, hostPort,
   provider Create/status.
 - Fail-closed 2-VM slot table.
-- Guest agent protocol + TCP server + fake in-process transport.
+- Guest agent protocol over vsock, plus a fake in-process transport.
+  The plaintext TCP server was removed on 25 Nov 2026.
 - VZ wrapper skeleton (graphics, NAT/bridged, vsock, virtio-fs) behind
   `darwin && arm64`.
 - Honest GPU labels and `darwin.node/metal` tokens.

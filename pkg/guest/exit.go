@@ -1,7 +1,7 @@
 package guest
 
 // ExitReport is one guest→host exit notice. The guest writes it on the
-// agent connection it already has (vsock, or TCP when that fallback is on)
+// agent connection it already has (vsock)
 // and then halts. The host does not request it and does not reply.
 //
 // ExitCode is required. A missing or null code is not a report: the

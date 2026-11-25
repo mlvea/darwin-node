@@ -172,11 +172,11 @@ func (e *Engine) agentDialBudget() time.Duration {
 	return 2 * time.Minute
 }
 
-// dialGuest dials the guest agent, then TCP if vsock did not connect, and
-// waits for Ready. Each attempt's budget is AgentReadyTimeout. A refused
-// dial or a guest that is not ready yet is retried. The client returned
-// is the one that became ready.
-func (e *Engine) dialGuest(ctx context.Context, rec *podRecord, machine runtime.Machine, token string) (*guest.Client, error) {
+// dialGuest dials the guest agent over vsock and waits for Ready. Each
+// attempt's budget is AgentReadyTimeout. A refused dial or a guest that
+// is not ready yet is retried. The client returned is the one that
+// became ready.
+func (e *Engine) dialGuest(ctx context.Context, rec *podRecord, machine runtime.Machine) (*guest.Client, error) {
 	var cli *guest.Client
 	err := e.retryTransient(ctx, rec, "guest agent dial", func() error {
 		if err := ctx.Err(); err != nil {
@@ -186,17 +186,6 @@ func (e *Engine) dialGuest(ctx context.Context, rec *podRecord, machine runtime.
 		dialCtx, cancel := context.WithTimeout(ctx, budget)
 		c, derr := machine.DialAgent(dialCtx)
 		cancel()
-		if derr != nil && ctx.Err() == nil {
-			fbCtx, fbCancel := context.WithTimeout(ctx, tcpFallbackTimeout)
-			c2, ferr := e.dialFallback(fbCtx, token, machine)
-			fbCancel()
-			if ferr == nil {
-				if c != nil {
-					_ = c.Close()
-				}
-				c, derr = c2, nil
-			}
-		}
 		if derr != nil {
 			if c != nil {
 				_ = c.Close()

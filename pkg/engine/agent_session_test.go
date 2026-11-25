@@ -67,16 +67,13 @@ func TestAgentRedialsAfterSessionDrop(t *testing.T) {
 func TestAgentRedialBudgetMarksNotReady(t *testing.T) {
 	leakcheck.Check(t)
 	oldBack, oldMax, oldBudget := agentRedialBackoff, agentRedialMax, agentRedialBudget
-	oldFB := tcpFallbackTimeout
 	agentRedialBackoff = 10 * time.Millisecond
 	agentRedialMax = 20 * time.Millisecond
 	agentRedialBudget = 150 * time.Millisecond
-	tcpFallbackTimeout = 20 * time.Millisecond
 	t.Cleanup(func() {
 		agentRedialBackoff = oldBack
 		agentRedialMax = oldMax
 		agentRedialBudget = oldBudget
-		tcpFallbackTimeout = oldFB
 	})
 
 	rt := fake.New()

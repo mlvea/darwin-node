@@ -3,12 +3,17 @@ package guest
 import "time"
 
 // HandshakeReq is the first message on a connection.
+// MinProtocol, MaxProtocol, and Capabilities are additive. An older host
+// omits them. Unknown JSON fields are ignored by encoding/json.
 type HandshakeReq struct {
-	Token        string `json:"token"`
-	HostAgentVer string `json:"hostAgentVer,omitempty"`
-	TraceParent  string `json:"traceparent,omitempty"`
-	ExpectedOS   string `json:"expectedOS,omitempty"`
-	Nonce        string `json:"nonce,omitempty"`
+	Token        string   `json:"token"`
+	HostAgentVer string   `json:"hostAgentVer,omitempty"`
+	TraceParent  string   `json:"traceparent,omitempty"`
+	ExpectedOS   string   `json:"expectedOS,omitempty"`
+	Nonce        string   `json:"nonce,omitempty"`
+	MinProtocol  int      `json:"minProtocol,omitempty"`
+	MaxProtocol  int      `json:"maxProtocol,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // HandshakeRes is the agent's identity.
@@ -27,6 +32,10 @@ type HandshakeRes struct {
 	// Zero means this agent does not grant credit. A new host then sends
 	// stdin without waiting, which an older agent may drop when its queue fills.
 	StdinWindow int `json:"stdinWindow,omitempty"`
+	// Capabilities is the full set this agent implements. Empty means an
+	// older agent. The host intersects it with its own list. Unknown
+	// names are kept here and ignored by the intersection.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // HealthRes is agent liveness.

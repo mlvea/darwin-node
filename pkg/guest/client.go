@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 )
@@ -31,6 +32,12 @@ type Client struct {
 	exitMu sync.Mutex
 	exitFn func(ExitReport)
 	exit   *ExitReport
+
+	// protocol and caps are fixed at handshake. caps is the intersection
+	// and is not written again, so later reads need no lock. An empty
+	// set is an older agent, not a rejected session.
+	protocol int
+	caps     map[string]struct{}
 }
 
 func newHandshakeNonce() (string, error) {
@@ -41,7 +48,7 @@ func newHandshakeNonce() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// Dial wraps an established stream (vsock, TCP, or net.Pipe).
+// Dial wraps an established stream (vsock, or a test pipe).
 func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string, cfg ...HostConfig) (*Client, error) {
 	nonce, err := newHandshakeNonce()
 	if err != nil {
@@ -55,7 +62,14 @@ func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string, cfg
 	c := &Client{sess: s, close: rw}
 	s.onNotify = c.consumeNotify
 	go s.readLoop()
-	env, err := s.Call(ctx, MethodHandshake, HandshakeReq{Token: token, HostAgentVer: hostVer, Nonce: nonce})
+	env, err := s.Call(ctx, MethodHandshake, HandshakeReq{
+		Token:        token,
+		HostAgentVer: hostVer,
+		Nonce:        nonce,
+		MinProtocol:  MinProtocol,
+		MaxProtocol:  MaxProtocol,
+		Capabilities: HostCapabilities(),
+	})
 	if err != nil {
 		_ = s.Close()
 		return nil, err
@@ -69,6 +83,16 @@ func Dial(ctx context.Context, rw io.ReadWriteCloser, token, hostVer string, cfg
 		_ = s.Close()
 		return nil, fmt.Errorf("handshake rejected")
 	}
+	proto := hs.Protocol
+	if proto == 0 {
+		proto = ProtocolVersion
+	}
+	if proto < MinProtocol || proto > MaxProtocol {
+		_ = s.Close()
+		return nil, fmt.Errorf("guest protocol %d outside %d..%d", proto, MinProtocol, MaxProtocol)
+	}
+	c.protocol = proto
+	c.caps = capabilitySet(IntersectCapabilities(HostCapabilities(), hs.Capabilities))
 	c.info = hs
 	c.stdinWindow = hs.StdinWindow
 	idle := time.Duration(hs.IdleMS) * time.Millisecond
@@ -105,6 +129,39 @@ func heartbeatEvery(cfg HostConfig, idle time.Duration) time.Duration {
 		every = idle / 2
 	}
 	return every
+}
+
+// Protocol is the version selected at handshake. Zero means Dial has
+// not finished.
+func (c *Client) Protocol() int {
+	if c == nil {
+		return 0
+	}
+	return c.protocol
+}
+
+// HasCapability reports whether both sides advertised name. An older
+// agent that sent no list has none. Existing RPCs are not refused for
+// a missing name; callers use this to skip optional features.
+func (c *Client) HasCapability(name string) bool {
+	if c == nil || name == "" {
+		return false
+	}
+	_, ok := c.caps[name]
+	return ok
+}
+
+// Capabilities is the intersection, sorted. Nil is an older agent.
+func (c *Client) Capabilities() []string {
+	if c == nil || len(c.caps) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.caps))
+	for name := range c.caps {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Done closes when the session's read loop ends.

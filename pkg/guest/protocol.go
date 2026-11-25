@@ -15,11 +15,44 @@ import (
 )
 
 const (
-	// ProtocolVersion is the envelope v field.
+	// ProtocolVersion is the envelope v field. MinProtocol and
+	// MaxProtocol are the versions this binary speaks. They are equal
+	// until a second version exists. A peer that omits the range is
+	// treated as version 1.
 	ProtocolVersion = 1
-	// MaxFrame is the largest accepted frame (16 MiB).
+	MinProtocol     = 1
+	MaxProtocol     = 1
+	// MaxFrame is the largest accepted frame (16 MiB). Stream and
+	// materialize frames may use it. Every other frame is capped at
+	// MaxControlFrame. An over-limit frame closes the session.
 	MaxFrame = 16 << 20
+	// MaxControlFrame is the cap for handshake, health, probe, exit,
+	// and the other non-stream RPCs.
+	MaxControlFrame = 64 << 10
+	// MaxJSONDepth is the deepest object or array nesting one frame
+	// may contain. The envelope itself counts.
+	MaxJSONDepth = 32
 )
+
+// errFrameLimit marks a frame the session must not continue after.
+var errFrameLimit = errors.New("frame limit")
+
+type frameLimitError struct{ msg string }
+
+func (e *frameLimitError) Error() string { return e.msg }
+
+func (e *frameLimitError) Unwrap() error { return errFrameLimit }
+
+func allowsLargeFrame(env Envelope) bool {
+	return env.Kind == KindStream || env.Method == MethodMaterialize
+}
+
+func maxFrameLen(env Envelope) int {
+	if allowsLargeFrame(env) {
+		return MaxFrame
+	}
+	return MaxControlFrame
+}
 
 // Kind is the envelope kind.
 type Kind string
@@ -99,7 +132,7 @@ func WriteFrame(w io.Writer, env Envelope) error {
 	if err != nil {
 		return err
 	}
-	if len(body) > MaxFrame {
+	if len(body) > maxFrameLen(env) {
 		return fmt.Errorf("frame too large: %d", len(body))
 	}
 	var hdr [4]byte
@@ -119,20 +152,67 @@ func ReadFrame(r io.Reader) (Envelope, error) {
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 || n > MaxFrame {
-		return Envelope{}, fmt.Errorf("invalid frame length %d", n)
+		return Envelope{}, &frameLimitError{msg: fmt.Sprintf("invalid frame length %d", n)}
 	}
 	body := make([]byte, n)
 	if _, err := io.ReadFull(r, body); err != nil {
 		return Envelope{}, err
 	}
+	if jsonTooDeep(body, MaxJSONDepth) {
+		return Envelope{}, &frameLimitError{msg: "json nesting too deep"}
+	}
 	var env Envelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return Envelope{}, err
+	}
+	if len(body) > maxFrameLen(env) {
+		return Envelope{}, &frameLimitError{msg: fmt.Sprintf("frame too large: %d", len(body))}
 	}
 	if env.V != ProtocolVersion {
 		return Envelope{}, fmt.Errorf("unsupported protocol version %d", env.V)
 	}
 	return env, nil
+}
+
+// jsonTooDeep reports whether b nests objects or arrays deeper than max.
+// Bytes inside strings are not structure. The scan is a bound, not a
+// full parse: a hostile document is rejected before Unmarshal walks it.
+func jsonTooDeep(b []byte, max int) bool {
+	if max <= 0 {
+		max = MaxJSONDepth
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for _, c := range b {
+		if inStr {
+			if esc {
+				esc = false
+				continue
+			}
+			switch c {
+			case '\\':
+				esc = true
+			case '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			depth++
+			if depth > max {
+				return true
+			}
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return false
 }
 
 // EncodePayload marshals v to raw JSON.
@@ -259,7 +339,11 @@ func isNetTimeout(err error) bool {
 }
 
 func (c *FrameConn) Read() (Envelope, error) {
-	return ReadFrame(c.rw)
+	env, err := ReadFrame(c.rw)
+	if errors.Is(err, errFrameLimit) {
+		_ = c.rw.Close()
+	}
+	return env, err
 }
 
 func setReadDeadline(rw io.ReadWriteCloser, d time.Duration) {

@@ -181,9 +181,9 @@ func (m *oneSessionMachine) Stop(ctx context.Context, grace time.Duration) error
 	return m.Machine.Stop(ctx, grace)
 }
 
-// Status hides the fake runtime's IP. TCP fallback is off in the guest
-// agent by default, so a held vsock session must fail the dial immediately
-// instead of waiting out a connect to a guest that is not listening.
+// Status hides the fake runtime's IP. The guest agent is vsock-only, so a
+// held vsock session must fail the dial immediately instead of waiting out
+// a connect to a guest that is not listening.
 func (m *oneSessionMachine) Status() types.VMStatus {
 	st := m.Machine.Status()
 	st.IP = ""

@@ -377,8 +377,9 @@ func (e *Engine) launchSideProbe(ctx context.Context, rec *podRecord, flights *s
 	ns, podName, cName := pod.Namespace, pod.Name, c.Name
 	p := probe
 	started := s.StartedAt
+	ports := append([]corev1.ContainerPort(nil), c.Ports...)
 	flights.start(ctx, key, started, func(pctx context.Context) (bool, string) {
-		return runSidecarProbe(pctx, e.sidecar, ns, podName, cName, p)
+		return runSidecarProbe(pctx, e.sidecar, ns, podName, cName, p, ports)
 	})
 }
 
@@ -439,8 +440,8 @@ func (e *Engine) stopSidecarContainer(ctx context.Context, ns, name, container s
 	return stopper.StopContainer(ctx, ns, name, container)
 }
 
-func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe) (ok bool, msg string) {
-	req, supported := k8sProbe(p)
+func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe, ports []corev1.ContainerPort) (ok bool, msg string) {
+	req, supported := k8sProbe(p, ports)
 	if !supported {
 		return true, ""
 	}

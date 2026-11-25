@@ -25,9 +25,21 @@ advisory if this project is on GitHub.
   `system:nodes` so the Node authorizer and NodeRestriction apply.
   The chart default does not grant cluster-wide Secret, ConfigMap, or
   pod delete. See [docs/security.md](docs/security.md).
-- Guest-agent TCP fallback is **off**. vsock is the production path.
-  Do not pass `--agent-tcp-fallback` on a bridged network until TLS/PSK
-  for that path exists.
+- The guest agent is reached only over vsock. The plaintext TCP
+  fallback is gone: `--agent-tcp-fallback`, `--listen`, and
+  `DARWIN_NODE_AGENT_TCP_FALLBACK` do nothing. The pod token is not
+  sent on a TCP socket. Over the shared NAT the other VM could read
+  or stall that connection.
+- Treat the guest as hostile root. Workload exit codes are clamped to
+  0..255 before they are stored (a guest can still report 0). Guest
+  text written into PodStatus or events is truncated to 1024 printable
+  UTF-8 characters. Control frames are capped at 64 KiB; a larger
+  frame, or JSON nested deeper than 32, closes the session. Stream
+  and materialize frames keep the 16 MiB cap.
+- Guest-reported CPU and memory are untrusted telemetry for
+  `kubectl top`. They are not a scheduling input. An agent that does
+  not advertise the `metrics` capability is not asked, and the metrics
+  API falls back to the VM's configured size.
 - SSH fallback is **off** and never uses password auth.
 - `hostPath` is **denied** unless `--allowed-host-paths` is set. `/`
   is never shared.
