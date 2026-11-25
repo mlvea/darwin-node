@@ -9,6 +9,14 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 
 ## Log
 
+### 2026-11-25 (Asia/Singapore) — merge guest-agent trust into sidecar isolation
+
+- **HEAD:** `cursor/sidecar-isolation-batch-k-49e5` after merging `origin/main` at `0ba597a` (PR #42). `main` was not pushed. No rebase, no force-push.
+- **Kept from PR #42:** the guest agent is reached only over vsock. `--agent-tcp-fallback`, `--listen`, `DARWIN_NODE_AGENT_TCP_FALLBACK`, and `GuestTCPPort` stay removed. Workload exit codes are stored in 0..255. Guest text written to PodStatus or an event is truncated to 1024 printable UTF-8 characters. Control frames are capped at 64 KiB. The handshake negotiates capabilities. `ExecInVM` returns the command exit code. An `httpGet` or `tcpSocket` probe port that is a name is resolved from that container's ports, including sidecars. An unknown name stays port 0 and the probe fails.
+- **Kept from this branch:** each pod's sidecars share a bridge, security context is enforced, HTTP and TCP probes dial the container address and refuse loopback and link-local, exec closes its stream and copies stdin, `kubectl logs` with no tail reads the whole log, and create applies `valueFrom`, CPU and memory limits, `subPath`, and `imagePullSecrets`.
+- **Combination:** a sidecar named port is resolved and then dialed on the container address from Docker inspect. An unknown name fails before the dial. The container-address rules are unchanged.
+- **Verification (Linux):** `go vet ./...` PASS. `golangci-lint` 2.12.2 reports 0 issues. `go test ./... -short -count=1 -race -timeout 600s` PASS (`pkg/engine` 91.039s, `pkg/provider` 13.423s, `pkg/guest` 12.612s, `cmd/darwin-node` 4.015s, `pkg/image` 3.019s, `pkg/sidecar` 1.121s, `pkg/volume` 1.049s). `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go test -c` of `pkg/guest` and `pkg/engine`, and `go build` of `cmd/guest-agent`, produced arm64 Mach-O binaries.
+
 ### 25 Nov 2026 (Asia/Singapore) — Batch K: sidecar isolation S-13, S-14, S-18, T-8, B-9, B-12
 
 - **HEAD:** `cursor/sidecar-isolation-batch-k-49e5`, branched from `main` at `0d93b79c`. `main` was not pushed. No rebase, no force-push.
@@ -21,6 +29,18 @@ Find bugs and push the idea toward its **penultimate** (near-final) version: pro
 - **Verification (Linux):** `go vet ./...` PASS. `go test ./... -short -count=1 -race -timeout 600s` PASS (`pkg/engine` 90.131s, `pkg/provider` 13.402s, `pkg/guest` 12.016s, `cmd/darwin-node` 3.961s, `pkg/image` 3.059s, `pkg/sidecar` 1.085s, `pkg/volume` 1.049s). `golangci-lint` 2.12.2 reports 0 issues.
 - **Open risks:** S-13 is hardware-pending for a live dial from macOS to a Docker bridge. Docker Desktop and Colima often do not route `172.17.0.0/16` to the host, so a probe then fails with `probe dial failed`. The unit tests bind a non-loopback address and prove the dial target. The per-pod bridge is not `--internal`, so the daemon gateway can still reach the host network, and sidecars in one pod can reach each other. `supplementalGroups`, `fsGroup`, seccomp, and AppArmor are not applied. Named ports are rejected. Replacing the resolved hostPath directory after the check is still a host-root race; replacing the original symlink is not, because Docker receives the resolved path.
 - **Next priority:** confirm sidecar HTTP and TCP probes on a Mac whose Docker bridge is reachable from the host process.
+
+### 2026-11-25 (Asia/Singapore) — guest-agent trust boundary (batch J)
+
+- **Items:** S-12, workload exit clamp and guest text bound, 64 KiB control frames, handshake capabilities, B-13, B-26.
+- **S-12:** the host dialed plaintext TCP to port 1050 whenever vsock failed and sent the pod token on that socket. `AgentTCPFallback` was never read, so the setting in SECURITY.md did not match the code. The TCP dial, the guest-agent listener, `--agent-tcp-fallback`, `--listen`, `DARWIN_NODE_AGENT_TCP_FALLBACK`, and `GuestTCPPort` are removed. vsock uses the caller's full dial deadline. SSH fallback is unchanged.
+- **Exit and text:** guest workload exit codes are stored in 0..255 (below 0 becomes 0, above 255 becomes 255). A guest can still report 0. Guest text written to PodStatus or an event is truncated to 1024 printable UTF-8 characters. Exit reasons still have to be CamelCase of at most 128 characters.
+- **Frames:** handshake, health, probe, exit, and the other non-stream RPCs are capped at 64 KiB. Stream and materialize frames stay at 16 MiB. An over-limit frame, or JSON nested deeper than 32, closes the session. Unknown JSON fields are still accepted.
+- **Handshake:** the host sends `minProtocol`, `maxProtocol`, and its capability list. The guest replies with the selected protocol, its version, and its own list. The session exposes the intersection (`Protocol`, `HasCapability`, `Capabilities`). An older agent that omits the list keeps working with an empty set. `PodMetrics` returns false without the `metrics` capability so `kubectl top` uses the VM allocation instead of zeros.
+- **B-13:** `ExecInVM` returns an error that implements `k8s.io/utils/exec.ExitError`, which virtual-kubelet maps to the exec exit code. Exit 0 is nil. A transport error stays a plain error. The SSH fallback in the same function does this too. Sidecar `docker exec` still returns a plain `exit code N` error; that package was left alone.
+- **B-26:** an `httpGet` or `tcpSocket` probe whose port is a name is resolved from that container's ports, including sidecars. An unknown name stays port 0 and the probe fails. The guest agent samples CPU and memory with gopsutil (working set is total minus available; CPU is the busy fraction of the aggregate times the logical core count). The first CPU sample is 0. Linux CI runs that path. The numbers are untrusted telemetry, not a scheduling input.
+- **Open risks:** a guest that reports exit 0 is still treated as success. Guest metrics can lie; they only affect `kubectl top`. Real vsock on a booted VM is not covered here. Sidecar exec exit codes are still a plain error.
+- **Next priority:** map sidecar exec's non-zero status the same way, then a hardware pass of vsock handshake and guest metrics on a booted VM.
 
 ### 2026-11-25 (Asia/Singapore) — client Close stops the host heartbeat
 

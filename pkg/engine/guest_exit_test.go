@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -155,6 +156,45 @@ func TestGuestExitBadReasonKeepsHostReason(t *testing.T) {
 	term := terminated(t, p)
 	if term.ExitCode != 9 || term.Reason != "VMStopped" {
 		t.Fatalf("exit %d reason %q, bad guest reason replaced the host reason", term.ExitCode, term.Reason)
+	}
+}
+
+func TestGuestExitCodeIsClamped(t *testing.T) {
+	cases := []struct {
+		in   int32
+		want int32
+	}{
+		{1000, 255},
+		{256, 255},
+		{-1, 0},
+		{137, 137},
+		{0, 0},
+	}
+	for _, tc := range cases {
+		rt := fake.New()
+		e := sidecarEngine(t, rt, sidecar.None{})
+		name := fmt.Sprintf("die-%d", tc.in)
+		pod := samplePod(name, "uid-clamp-"+name)
+		pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+		if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
+			t.Fatal(err)
+		}
+		waitPhase(t, e, "default", name, corev1.PodRunning)
+		code := tc.in
+		rt.ReportExit(guest.ExitReport{ExitCode: &code, Reason: "Error"})
+		waitGuestExit(t, e, "default/"+name, tc.want)
+		if err := podMachine(t, e, "default/"+name).Stop(context.Background(), 0); err != nil {
+			t.Fatal(err)
+		}
+		phase := corev1.PodFailed
+		if tc.want == 0 {
+			phase = corev1.PodSucceeded
+		}
+		p := waitPhase(t, e, "default", name, phase)
+		term := terminated(t, p)
+		if term.ExitCode != tc.want {
+			t.Fatalf("guest exit %d published as %d, want %d", tc.in, term.ExitCode, tc.want)
+		}
 	}
 }
 

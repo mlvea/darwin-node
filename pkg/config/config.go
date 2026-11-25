@@ -84,9 +84,6 @@ type Config struct {
 
 	OTELEndpoint string
 
-	// AgentTCPFallback enables plaintext TCP to the guest agent (opt-in; vsock is primary).
-	AgentTCPFallback bool
-
 	// SerialConsole attaches a VM serial port for break-glass access via
 	// `darwin-node console`. Opt-in; independent of the guest agent.
 	SerialConsole bool
@@ -289,9 +286,9 @@ func (c *Config) ApplyEnv() error {
 		}
 		c.AgentReadyTimeout = d
 	}
-	if v := os.Getenv("DARWIN_NODE_AGENT_TCP_FALLBACK"); v != "" {
-		c.AgentTCPFallback = v == "true" || v == "1"
-	}
+	// DARWIN_NODE_AGENT_TCP_FALLBACK is ignored. The guest agent is
+	// reached only over vsock. The variable used to turn on a plaintext
+	// TCP dial that sent the pod token in the clear.
 	if v := os.Getenv("DARWIN_NODE_WARM_SLOTS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {

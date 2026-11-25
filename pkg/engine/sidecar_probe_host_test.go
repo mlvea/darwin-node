@@ -121,7 +121,7 @@ func TestSidecarProbeEmptyHostDoesNotDialNodeLoopback(t *testing.T) {
 			Port: intstr.FromInt(port), Path: "/healthz",
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if hits.Load() != 0 {
 		t.Fatalf("empty HTTP host dialed the node loopback (%d hits); probe ok=%v msg=%q", hits.Load(), ok, msg)
 	}
@@ -153,7 +153,7 @@ func TestSidecarProbeEmptyHostDoesNotDialNodeLoopback(t *testing.T) {
 			Port: intstr.FromInt(tcpLn.Addr().(*net.TCPAddr).Port),
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if tcpHits.Load() != 0 {
 		t.Fatalf("empty TCP host dialed the node loopback (%d hits); probe ok=%v msg=%q", tcpHits.Load(), ok, msg)
 	}
@@ -185,7 +185,7 @@ func TestSidecarProbeExplicitHostDoesNotDialNodeOrLeakBody(t *testing.T) {
 			Host: "127.0.0.1", Port: intstr.FromInt(port), Path: "/",
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if hits.Load() != 0 {
 		t.Fatalf("explicit loopback host was dialed on the node (%d hits) msg=%q", hits.Load(), msg)
 	}
@@ -210,7 +210,7 @@ func TestSidecarProbeDialsContainerAddress(t *testing.T) {
 			Port: intstr.FromInt(port), Path: "/healthz",
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if hits.Load() != 1 || ok || msg != "HTTP 500" || strings.Contains(msg, secret) {
 		t.Fatalf("hits=%d ok=%v msg=%q", hits.Load(), ok, msg)
 	}
@@ -219,7 +219,7 @@ func TestSidecarProbeDialsContainerAddress(t *testing.T) {
 			Host: ip, Port: intstr.FromInt(port),
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if !ok || msg != "" {
 		t.Fatalf("tcp ok=%v msg=%q", ok, msg)
 	}
@@ -229,7 +229,7 @@ func TestSidecarProbeDialsContainerAddress(t *testing.T) {
 			Host: "203.0.113.10", Port: intstr.FromInt(port), Path: "/",
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if ok || !strings.Contains(msg, "not the sidecar") || strings.Contains(msg, secret) {
 		t.Fatalf("foreign host ok=%v msg=%q hits=%d", ok, msg, hits.Load())
 	}
@@ -266,8 +266,50 @@ func TestSidecarProbeDoesNotFollowRedirectsOrUseProxy(t *testing.T) {
 			Port: intstr.FromInt(port), Path: "/healthz",
 		}},
 		TimeoutSeconds: 1,
-	})
+	}, nil)
 	if hits.Load() != 1 || loopHits.Load() != 0 || !ok || strings.Contains(msg, secret) {
 		t.Fatalf("hits=%d loop=%d ok=%v msg=%q", hits.Load(), loopHits.Load(), ok, msg)
+	}
+}
+
+// A named sidecar port is the container port, dialed on the container
+// address. An unknown name is port 0 and is not dialed.
+func TestSidecarProbeNamedPortDialsResolvedContainerPort(t *testing.T) {
+	var hits atomic.Int32
+	ip, port := serveRoutable(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "named-port-body", http.StatusInternalServerError)
+	}))
+	ports := []corev1.ContainerPort{{
+		Name: "http", ContainerPort: int32(port), Protocol: corev1.ProtocolTCP,
+	}}
+	rt := addressedRuntime{Runtime: sidecar.NewMemory(), ip: ip}
+	ok, msg := runSidecarProbe(context.Background(), rt, "ns", "pod", "log", &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+			Port: intstr.FromString("http"), Path: "/healthz",
+		}},
+		TimeoutSeconds: 1,
+	}, ports)
+	if hits.Load() != 1 || ok || msg != "HTTP 500" || strings.Contains(msg, "named-port-body") {
+		t.Fatalf("named http: hits=%d ok=%v msg=%q", hits.Load(), ok, msg)
+	}
+	ok, msg = runSidecarProbe(context.Background(), rt, "ns", "pod", "log", &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{
+			Port: intstr.FromString("http"),
+		}},
+		TimeoutSeconds: 1,
+	}, ports)
+	if !ok || msg != "" {
+		t.Fatalf("named tcp: ok=%v msg=%q", ok, msg)
+	}
+	before := hits.Load()
+	ok, msg = runSidecarProbe(context.Background(), rt, "ns", "pod", "log", &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+			Port: intstr.FromString("missing"), Path: "/",
+		}},
+		TimeoutSeconds: 1,
+	}, ports)
+	if ok || hits.Load() != before || !strings.Contains(msg, "port 0") {
+		t.Fatalf("unknown name: hits=%d ok=%v msg=%q", hits.Load(), ok, msg)
 	}
 }

@@ -70,7 +70,7 @@ cmd/darwin-node
   └─ pkg/provider     Virtual Kubelet PodLifecycleHandler (thin)
        └─ pkg/engine  Pod lifecycle, restart policy, hooks, probes, events
             ├─ pkg/runtime   VM create/start/stop (VZ or fake)
-            ├─ pkg/guest     Agent client (vsock / TCP / SSH)
+            ├─ pkg/guest     Agent client (vsock / SSH)
             ├─ pkg/sidecar   Host Docker/containerd containers
             ├─ pkg/volume    Host-side materialization + virtio-fs share list
             ├─ pkg/image     OCI pull, digest, clonefile overlay

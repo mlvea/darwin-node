@@ -23,28 +23,17 @@ var (
 	agentRedialBudget  = 30 * time.Second
 )
 
-// dialAgent is the vsock dial plus the TCP fallback used on the first
-// connect and on a later redial. A parent context with no deadline gets
-// AgentReadyTimeout (same budget as dialGuest). When DialAgent fails and
-// the pod context is still live, the fallback gets its own timeout. A
-// fallback failure returns the original DialAgent error.
-func (e *Engine) dialAgent(ctx context.Context, machine runtime.Machine, token string) (*guest.Client, error) {
+// dialAgent is the vsock dial used on the first connect and on a later
+// redial. A parent context with no deadline gets AgentReadyTimeout (same
+// budget as dialGuest).
+func (e *Engine) dialAgent(ctx context.Context, machine runtime.Machine) (*guest.Client, error) {
 	dialCtx := ctx
 	cancelDial := func() {}
 	if _, ok := ctx.Deadline(); !ok {
 		dialCtx, cancelDial = context.WithTimeout(ctx, e.agentDialBudget())
 	}
 	defer cancelDial()
-	cli, err := machine.DialAgent(dialCtx)
-	if err != nil && ctx.Err() == nil {
-		fbCtx, fbCancel := context.WithTimeout(ctx, tcpFallbackTimeout)
-		cli2, ferr := e.dialFallback(fbCtx, token, machine)
-		fbCancel()
-		if ferr == nil {
-			cli, err = cli2, nil
-		}
-	}
-	return cli, err
+	return machine.DialAgent(dialCtx)
 }
 
 func (e *Engine) agentSession(rec *podRecord) *guest.Client {
@@ -68,7 +57,6 @@ func (e *Engine) recoverAgent(ctx context.Context, rec *podRecord, lost *guest.C
 	rec.mu.Lock()
 	cur := rec.agent
 	machine := rec.machine
-	token := rec.token
 	rec.mu.Unlock()
 	if cur != lost {
 		return ctx.Err() == nil && podActive(rec)
@@ -96,7 +84,7 @@ func (e *Engine) recoverAgent(ctx context.Context, rec *podRecord, lost *guest.C
 		if replaced {
 			return true
 		}
-		cli, err := e.dialAgent(ctx, machine, token)
+		cli, err := e.dialAgent(ctx, machine)
 		if err == nil {
 			if e.installAgent(rec, lost, cli) {
 				e.watchGuestExit(rec, cli)
@@ -167,7 +155,7 @@ func (e *Engine) clearAgentLost(rec *podRecord) {
 	}
 	rec.message = ""
 	if rec.pod != nil && len(rec.pod.Spec.Containers) > 0 {
-		if _, has := k8sProbe(rec.pod.Spec.Containers[0].ReadinessProbe); has {
+		if _, has := k8sProbe(rec.pod.Spec.Containers[0].ReadinessProbe, rec.pod.Spec.Containers[0].Ports); has {
 			rec.ready = false
 			rec.reason = "ReadinessProbe"
 			rec.message = "guest agent reconnected"

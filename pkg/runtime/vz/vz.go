@@ -251,31 +251,28 @@ func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 	dialCtx, cancel := agentDialContext(ctx)
 	defer cancel()
 	m.ensureVsockListener()
-	if m.disp != nil {
-		vsockCtx, vcancel := vsockAttemptContext(dialCtx)
-		conn, err := m.disp.Wait(vsockCtx)
-		vcancel()
-		if err == nil {
-			cli, derr := guest.Dial(dialCtx, conn, m.token, "darwin-node")
-			if derr == nil {
-				m.trackAssignedIP()
-				return cli, nil
-			}
-			_ = conn.Close()
-		}
+	if m.disp == nil {
+		m.trackAssignedIP()
+		return nil, fmt.Errorf("guest agent unreachable over vsock")
 	}
-	// ARP is the host's record of the address it handed the VM. A miss
-	// leaves the previous address in place. The success path records it
-	// before returning. The guest's NetInfo is not this record.
+	vsockCtx, vcancel := vsockAttemptContext(dialCtx)
+	conn, err := m.disp.Wait(vsockCtx)
+	vcancel()
+	if err != nil {
+		// ARP is the host's record of the address it handed the VM. A miss
+		// leaves the previous address in place. The guest's NetInfo is not
+		// this record.
+		m.trackAssignedIP()
+		return nil, fmt.Errorf("guest agent unreachable over vsock: %w", err)
+	}
+	cli, derr := guest.Dial(dialCtx, conn, m.token, "darwin-node")
+	if derr != nil {
+		_ = conn.Close()
+		m.trackAssignedIP()
+		return nil, fmt.Errorf("guest agent handshake: %w", derr)
+	}
 	m.trackAssignedIP()
-	if m.ip != "" {
-		d := net.Dialer{}
-		addr := net.JoinHostPort(m.ip, fmt.Sprintf("%d", types.GuestTCPPort))
-		if conn, err := d.DialContext(dialCtx, "tcp", addr); err == nil {
-			return guest.Dial(dialCtx, conn, m.token, "darwin-node")
-		}
-	}
-	return nil, fmt.Errorf("guest agent unreachable over vsock or tcp")
+	return cli, nil
 }
 
 func (m *machine) ensureVsockListener() {

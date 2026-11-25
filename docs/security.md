@@ -135,11 +135,32 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
 
 ## Guest agent
 
-- launchd, root inside the *guest*, not on the host.
-- vsock is the preferred channel: not routed, not visible to other VMs
-  (each VM's vsock is isolated; Apple sets guest CID independently).
-- TCP fallback: per-pod 32-byte token in a 0600 file on the control share.
-  The token is generated on the host at CreatePod and never logged.
+- launchd, root inside the *guest*, not on the host. The host treats
+  that process as hostile: it can send any JSON it wants.
+- vsock is the only agent transport. It is not routed and not visible
+  to other VMs (each VM's vsock is isolated; Apple sets guest CID
+  independently). There is no TCP listener and no TCP dial. The pod
+  token stays in the 0600 file on the control share and is sent only
+  on the vsock handshake. It is generated at CreatePod and never logged.
+- Control frames are capped at 64 KiB. Stream and materialize frames
+  may be up to 16 MiB. A frame over its cap, or JSON nested deeper
+  than 32, closes the session. Unknown JSON fields are ignored.
+- Handshake carries the host's protocol range and capability list.
+  The guest replies with the selected protocol, its version, and its
+  own list. The session uses the intersection. An older agent that
+  omits the list keeps working; the intersection is empty and optional
+  features stay off.
+- Workload exit codes are stored in 0..255. Below 0 becomes 0, above
+  255 becomes 255. A guest can already report success. Guest text
+  copied into PodStatus or an event is limited to 1024 printable
+  UTF-8 characters.
+- CPU and memory figures from the guest are untrusted telemetry for
+  `kubectl top`. Scheduling uses the host probe and the pod's
+  requests, not these numbers. An agent without the `metrics`
+  capability does not supply them; the metrics API then reports the
+  configured VM size.
+- `kubectl exec` returns the command's exit code. A non-zero status
+  is that code, not a transport error.
 - Exec argv comes from the Kubernetes API (kubectl exec / probes). Same
   trust model as kubelet. There is no extra in-guest authorization.
 
@@ -186,7 +207,9 @@ is not subject to these checks.
   An empty host, `localhost`, or a loopback address means that container
   address. Any other host is rejected and is not dialed. Loopback,
   unspecified, link-local, and multicast inspect results are refused, so
-  a probe cannot target the node's own addresses. The HTTP client does
+  a probe cannot target the node's own addresses. A named port is
+  resolved from that container's ports before the dial. An unknown name
+  stays port 0, the probe fails, and nothing is dialed. The HTTP client does
   not use `HTTP_PROXY` and does not follow redirects. A failure message
   is `HTTP <code>`, `probe dial failed`, `probe timed out`, or
   `probe canceled`. Response bodies are discarded and are not written

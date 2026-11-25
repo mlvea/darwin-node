@@ -45,19 +45,45 @@ func TestK8sProbeExecHTTP(t *testing.T) {
 	req, ok := k8sProbe(&corev1.Probe{
 		ProbeHandler:   corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}},
 		TimeoutSeconds: 2,
-	})
+	}, nil)
 	if !ok || req.Type != "exec" || req.Argv[0] != "true" {
 		t.Fatalf("%+v %v", req, ok)
 	}
 	req, ok = k8sProbe(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 		Path: "/ready", Port: intstr.FromInt(8080),
-	}}})
+	}}}, nil)
 	if !ok || req.Type != "httpGet" {
 		t.Fatalf("%+v", req)
 	}
-	_, ok = k8sProbe(nil)
+	_, ok = k8sProbe(nil, nil)
 	if ok {
 		t.Fatal("nil")
+	}
+}
+
+func TestNamedProbePortResolvesFromContainer(t *testing.T) {
+	ports := []corev1.ContainerPort{{
+		Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP,
+	}, {
+		Name: "metrics", ContainerPort: 9090, Protocol: corev1.ProtocolTCP,
+	}}
+	req, ok := k8sProbe(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+		Path: "/ready", Port: intstr.FromString("http"),
+	}}}, ports)
+	if !ok || req.Port != 8080 || !strings.Contains(req.URL, ":8080") {
+		t.Fatalf("http named port: ok=%v port=%d url=%q", ok, req.Port, req.URL)
+	}
+	req, ok = k8sProbe(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{
+		Port: intstr.FromString("metrics"),
+	}}}, ports)
+	if !ok || req.Port != 9090 {
+		t.Fatalf("tcp named port: ok=%v port=%d", ok, req.Port)
+	}
+	req, ok = k8sProbe(&corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+		Port: intstr.FromInt(80),
+	}}}, nil)
+	if !ok || req.Port != 80 {
+		t.Fatalf("numeric port: ok=%v port=%d", ok, req.Port)
 	}
 }
 

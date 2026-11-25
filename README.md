@@ -18,8 +18,10 @@ time through Apple's
 Optional Linux sidecars run on the host next to the VM. Inside every
 guest, a **Guest Agent** (`bin/darwin-guest-agent`, launchd) is the
 control plane for exec, logs, probes, metrics, and shutdown, spoken as a
-length-prefixed JSON protocol over vsock. TCP is an opt-in fallback,
-SSH a last resort; no guest login session is ever used.
+length-prefixed JSON protocol over vsock. SSH is a last resort for
+an image with no agent; no guest login session is ever used. The
+guest is treated as hostile root: its exit codes, status text, and
+metrics are bounded before they reach the API.
 
 > **Hard cap:** two concurrent macOS VMs per physical host (Apple EULA
 > and XNU `hv_apple_isa_vm_quota`). Capacity, taints, and admission are
@@ -85,8 +87,7 @@ This tree exists because three of its central defaults are inverted here:
 1. **The guest is a peer, not an SSH target.** Upstream drives exec,
    readiness, and graceful shutdown over port 22 with credentials from
    environment variables. darwin-node ships a launchd daemon baked into
-   every image, serving the same surface over vsock with a
-   token-authenticated TCP fallback. There is now a control plane
+   every image, serving the same surface over vsock. There is now a control plane
    inside the guest with its own binary, lifecycle, and version skew.
 2. **Capacity is enforced, not queued.** Upstream advertises `pods=2`
    but blocks a third create until a slot frees. darwin-node rejects

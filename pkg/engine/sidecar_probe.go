@@ -380,8 +380,9 @@ func (e *Engine) launchSideProbe(ctx context.Context, rec *podRecord, flights *s
 	ns, podName, cName := pod.Namespace, pod.Name, c.Name
 	p := probe
 	started := s.StartedAt
+	ports := append([]corev1.ContainerPort(nil), c.Ports...)
 	flights.start(ctx, key, started, func(pctx context.Context) (bool, string) {
-		return runSidecarProbe(pctx, e.sidecar, ns, podName, cName, p)
+		return runSidecarProbe(pctx, e.sidecar, ns, podName, cName, p, ports)
 	})
 }
 
@@ -442,8 +443,8 @@ func (e *Engine) stopSidecarContainer(ctx context.Context, ns, name, container s
 	return stopper.StopContainer(ctx, ns, name, container)
 }
 
-func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe) (ok bool, msg string) {
-	req, supported := k8sProbe(p)
+func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe, ports []corev1.ContainerPort) (ok bool, msg string) {
+	req, supported := k8sProbe(p, ports)
 	if !supported {
 		return true, ""
 	}
@@ -472,7 +473,7 @@ func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, conta
 		}
 		return true, ""
 	case guest.ProbeHTTP, guest.ProbeTCP:
-		host, port, err := sidecarProbeTarget(pctx, rt, ns, podName, container, p)
+		host, port, err := sidecarProbeTarget(pctx, rt, ns, podName, container, p, ports)
 		if err != nil {
 			return false, clipProbe(err.Error())
 		}
@@ -489,8 +490,8 @@ func runSidecarProbe(ctx context.Context, rt sidecar.Runtime, ns, podName, conta
 // An empty host, localhost, or a loopback address means the sidecar.
 // Any other host is refused, and the dial never happens.
 // The message is published on the pod and on events, so it carries no body.
-func sidecarProbeTarget(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe) (string, int, error) {
-	specHost, port, err := probeSpecHostPort(p)
+func sidecarProbeTarget(ctx context.Context, rt sidecar.Runtime, ns, podName, container string, p *corev1.Probe, ports []corev1.ContainerPort) (string, int, error) {
+	specHost, port, err := probeSpecHostPort(p, ports)
 	if err != nil {
 		return "", 0, err
 	}
@@ -518,7 +519,7 @@ func sidecarProbeTarget(ctx context.Context, rt sidecar.Runtime, ns, podName, co
 	return host, port, nil
 }
 
-func probeSpecHostPort(p *corev1.Probe) (string, int, error) {
+func probeSpecHostPort(p *corev1.Probe, ports []corev1.ContainerPort) (string, int, error) {
 	if p == nil {
 		return "", 0, fmt.Errorf("sidecar probe: no probe")
 	}
@@ -527,10 +528,10 @@ func probeSpecHostPort(p *corev1.Probe) (string, int, error) {
 	switch {
 	case p.HTTPGet != nil:
 		host = p.HTTPGet.Host
-		port = p.HTTPGet.Port.IntValue()
+		port = probePort(p.HTTPGet.Port, ports)
 	case p.TCPSocket != nil:
 		host = p.TCPSocket.Host
-		port = p.TCPSocket.Port.IntValue()
+		port = probePort(p.TCPSocket.Port, ports)
 	default:
 		return "", 0, fmt.Errorf("sidecar probe: no host")
 	}

@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -820,10 +819,9 @@ func (h *consoleHub) close() {
 func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.Pod, creds Credentials, machine runtime.Machine, token string, places []volume.Placement) {
 	volRoot := filepath.Join(e.cfg.CacheDir, "pods", string(pod.UID), "volumes")
 	e.events.Normal(ctx, event.ReasonVMDialing, "dialing guest agent")
-	// vsock Accept consumes the whole dial budget on a slow guest. TCP
-	// fallback runs inside dialGuest with its own timeout, and a refused
-	// dial is retried. The budget is AgentReadyTimeout, not a fixed 45s.
-	cli, err := e.dialGuest(ctx, rec, machine, token)
+	// The guest agent is reached only over vsock. A refused dial is
+	// retried. The budget is AgentReadyTimeout, not a fixed 45s.
+	cli, err := e.dialGuest(ctx, rec, machine)
 	if err != nil {
 		if ctx.Err() == nil {
 			e.fail(rec, err)
@@ -901,7 +899,7 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 	// A readiness probe starts not-ready. One sample must not flip it;
 	// successThreshold successes do, and it stays ready until
 	// failureThreshold failures.
-	_, hasReadyProbe := k8sProbe(pod.Spec.Containers[0].ReadinessProbe)
+	_, hasReadyProbe := k8sProbe(pod.Spec.Containers[0].ReadinessProbe, pod.Spec.Containers[0].Ports)
 	rec.ready = rec.startupDone && !hasReadyProbe
 	ip := rec.pod.Status.PodIP
 	rec.mu.Unlock()
@@ -936,7 +934,7 @@ func failedExitLocked(rec *podRecord, vmStatus types.VMStatus) (int32, string) {
 	}
 	reason := rec.reason
 	if rec.guestExit != nil {
-		code := *rec.guestExit
+		code := guest.ClampExitCode(*rec.guestExit)
 		if rec.guestExitReason != "" {
 			reason = rec.guestExitReason
 		}
@@ -966,7 +964,7 @@ func (e *Engine) watchGuestExit(rec *podRecord, cli *guest.Client) {
 		if !rep.Reported() {
 			return
 		}
-		code := *rep.ExitCode
+		code := guest.ClampExitCode(*rep.ExitCode)
 		reason := guest.NormalizeExitReason(rep.Reason)
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
@@ -995,7 +993,7 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	}
 	rec.phase = corev1.PodFailed
 	rec.reason = reason
-	rec.message = err.Error()
+	rec.message = guest.SanitizeGuestText(err.Error())
 	rec.failedErr = err
 	rec.ready = false
 	uid := ""
@@ -1010,7 +1008,7 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	if uid != "" && !e.slots.Holds(uid) {
 		_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
 	}
-	e.events.Warn(context.Background(), event.ReasonFailed, err.Error())
+	e.events.Warn(context.Background(), event.ReasonFailed, guest.SanitizeGuestText(err.Error()))
 }
 
 // succeedWorkload marks a Running pod Succeeded after the guest reported
@@ -1389,9 +1387,7 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 		vmStatus = st.Status()
 		vmState = vmStatus.State
 		// Status.IP is the address the runtime recorded (DHCP, ARP, or the
-		// fake runtime). A loopback or link-local value is not published:
-		// the TCP fallback may still dial it, but kubelet must not be told
-		// the pod lives there.
+		// fake runtime). A loopback or link-local value is not published.
 		if canonical, ferr := forwardableIP(vmStatus.IP); ferr == nil {
 			ip = canonical
 		}
@@ -1415,12 +1411,12 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 	}
 	switch rec.phase {
 	case corev1.PodPending:
-		cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: rec.reason, Message: rec.message}
+		cs.State.Waiting = &corev1.ContainerStateWaiting{Reason: guest.SanitizeGuestText(rec.reason), Message: guest.SanitizeGuestText(rec.message)}
 	case corev1.PodFailed:
 		code, termReason := failedExitLocked(rec, vmStatus)
-		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: code, Reason: termReason, Message: rec.message}
+		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: code, Reason: guest.SanitizeGuestText(termReason), Message: guest.SanitizeGuestText(rec.message)}
 	case corev1.PodSucceeded:
-		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 0, Reason: rec.reason, Message: rec.message}
+		cs.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 0, Reason: guest.SanitizeGuestText(rec.reason), Message: guest.SanitizeGuestText(rec.message)}
 	default:
 		start := metav1.Now()
 		if rec.startedAt != nil {
@@ -1463,14 +1459,14 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 			msg = readinessBlock
 		}
 		containersReady.Reason = reason
-		containersReady.Message = msg
+		containersReady.Message = guest.SanitizeGuestText(msg)
 		podReady.Reason = reason
-		podReady.Message = msg
+		podReady.Message = guest.SanitizeGuestText(msg)
 	}
 	return corev1.PodStatus{
 		Phase:                 rec.phase,
-		Reason:                rec.reason,
-		Message:               rec.message,
+		Reason:                guest.SanitizeGuestText(rec.reason),
+		Message:               guest.SanitizeGuestText(rec.message),
 		HostIP:                e.hostIP,
 		PodIP:                 ip,
 		StartTime:             startTime,
@@ -1487,12 +1483,12 @@ func (e *Engine) buildStatusLocked(rec *podRecord) corev1.PodStatus {
 
 func materializeFailure(res guest.MaterializeRes, err error) error {
 	if err != nil {
-		return fmt.Errorf("materialize: %w", err)
+		return fmt.Errorf("materialize: %s", guest.SanitizeGuestText(err.Error()))
 	}
 	if res.OK {
 		return nil
 	}
-	msg := strings.TrimSpace(res.Message)
+	msg := guest.SanitizeGuestText(strings.TrimSpace(res.Message))
 	if msg == "" {
 		msg = "guest refused volume placement"
 	}
@@ -1501,8 +1497,8 @@ func materializeFailure(res guest.MaterializeRes, err error) error {
 
 func boolCond(t corev1.PodConditionType, ok bool, now metav1.Time, rec *podRecord) corev1.PodCondition {
 	st := corev1.ConditionFalse
-	reason := rec.reason
-	msg := rec.message
+	reason := guest.SanitizeGuestText(rec.reason)
+	msg := guest.SanitizeGuestText(rec.message)
 	if ok {
 		st = corev1.ConditionTrue
 		reason = "Ready"
@@ -1570,10 +1566,7 @@ func (e *Engine) ExecInVM(ctx context.Context, namespace, name string, cmd []str
 		if err != nil {
 			return err
 		}
-		if code != 0 {
-			return fmt.Errorf("exit code %d", code)
-		}
-		return nil
+		return commandExit(code)
 	}
 	req := guest.ExecReq{Argv: cmd, TTY: attach != nil && attach.TTY()}
 	var stdin io.Reader
@@ -1607,19 +1600,30 @@ func (e *Engine) ExecInVM(ctx context.Context, namespace, name string, cmd []str
 		if err != nil {
 			return err
 		}
-		if code != 0 {
-			return fmt.Errorf("exit code %d", code)
-		}
-		return nil
+		return commandExit(code)
 	}
 	_, _, code, err := cli.Exec(ctx, req)
 	if err != nil {
 		return err
 	}
-	if code != 0 {
-		return fmt.Errorf("exit code %d", code)
+	return commandExit(code)
+}
+
+// execExitError is the exit status virtual-kubelet maps onto the exec
+// stream. remotecommand type-asserts k8s.io/utils/exec.ExitError, so the
+// methods match that interface. A wrapped error would not be mapped.
+type execExitError struct{ code int }
+
+func (e execExitError) Error() string   { return fmt.Sprintf("exit code %d", e.code) }
+func (e execExitError) String() string  { return e.Error() }
+func (e execExitError) Exited() bool    { return true }
+func (e execExitError) ExitStatus() int { return e.code }
+
+func commandExit(code int) error {
+	if code == 0 {
+		return nil
 	}
-	return nil
+	return execExitError{code: code}
 }
 
 // LogsVM streams VM logs via the guest agent.
@@ -1703,27 +1707,6 @@ func (e *Engine) Console(namespace, name string) (io.ReadWriteCloser, error) {
 	}
 	return cons.Console()
 }
-
-func (e *Engine) dialFallback(ctx context.Context, token string, machine runtime.Machine) (*guest.Client, error) {
-	st := machine.Status()
-	ip := st.IP
-	if ip == "" && st.MAC != "" {
-		ip, _ = netutil.IPForMAC(st.MAC)
-	}
-	if ip == "" {
-		return nil, fmt.Errorf("no guest IP for tcp fallback")
-	}
-	d := net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(types.GuestTCPPort)))
-	if err != nil {
-		return nil, err
-	}
-	return guest.Dial(ctx, conn, token, "darwin-node")
-}
-
-// tcpFallbackTimeout is the budget for the TCP dial after vsock has used
-// its own budget (AgentReadyTimeout). It is a var so tests can shorten it.
-var tcpFallbackTimeout = 5 * time.Second
 
 func podMACDir(cacheDir, uid string) string {
 	return filepath.Join(cacheDir, "pods", uid)
@@ -2245,7 +2228,10 @@ func (e *Engine) PodMetrics(ctx context.Context, ns, name string) (guest.Metrics
 	rec.mu.Lock()
 	cli := rec.agent
 	rec.mu.Unlock()
-	if cli == nil {
+	// An older agent advertises no capabilities. Publishing its zeros
+	// would look like an idle VM. Allocation fallback is the honest
+	// number until the agent says it can measure.
+	if cli == nil || !cli.HasCapability(guest.CapMetrics) {
 		return guest.MetricsRes{}, false
 	}
 	m, err := cli.Metrics(ctx)

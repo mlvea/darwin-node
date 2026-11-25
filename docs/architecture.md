@@ -27,9 +27,8 @@ Lineage and third-party licenses: [credits.md](credits.md).
                  │   Image   Volume    │
                  │   Net     Capacity  │
                  └─────┬───────────────┘
-                       │ vsock (primary)
-                       │ TCP  (fallback)
-                       │ SSH  (last resort)
+                       │ vsock (only agent transport)
+                       │ SSH  (last resort, no agent)
                        ▼
                  ┌─────────────────────┐
                  │   macOS VM (x <= 2)  │
@@ -157,6 +156,7 @@ directly. The provider stays the Kubernetes *Pod* API.
 
 - Host agent is a privileged, entitled process (Virtualization, optional vmnet).
 - Guest agent runs as root *inside* the VM, not on the host.
-- vsock is host-process-only. TCP fallback is token-authenticated.
+- vsock is host-process-only. The guest agent has no TCP transport.
+  Guest-reported metrics and status text are untrusted.
 - Secrets exist on the host disk under a 0700 pod directory for the pod lifetime.
 - Sidecars run on a per-pod Docker bridge with `no-new-privileges`. Probes dial that container's address, and the response body is not published on the pod.
