@@ -92,6 +92,8 @@ func TestCreateRunningAndThirdFails(t *testing.T) {
 	if err := e.Create(ctx, samplePod("b", "uid-b"), Credentials{}); err != nil {
 		t.Fatal(err)
 	}
+	waitPhase(t, e, "default", "a", corev1.PodRunning)
+	waitPhase(t, e, "default", "b", corev1.PodRunning)
 	err := e.Create(ctx, samplePod("c", "uid-c"), Credentials{})
 	if !errors.Is(err, capacity.ErrVMCapacityExhausted) {
 		t.Fatalf("third pod: %v", err)
@@ -190,7 +192,8 @@ func TestHybridSidecar(t *testing.T) {
 
 func waitPhase(t *testing.T, e *Engine, ns, name string, phase corev1.PodPhase) *corev1.Pod {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// Liveness restarts wait 10s before the VM is stopped and started again.
+	deadline := time.Now().Add(20 * time.Second)
 	var p *corev1.Pod
 	for time.Now().Before(deadline) {
 		got, err := e.Get(ns, name)
@@ -260,7 +263,7 @@ func TestFailStopsMachineAndFreesSlot(t *testing.T) {
 	_ = e.Delete(context.Background(), "default", "next", 0)
 }
 
-func TestLivenessRestartsThenFailsClosed(t *testing.T) {
+func TestLivenessRestartKeepsThePodRunning(t *testing.T) {
 	slots, _ := capacity.New(2)
 	cfg := config.Default()
 	cfg.Runtime = "fake"
@@ -286,9 +289,20 @@ func TestLivenessRestartsThenFailsClosed(t *testing.T) {
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {
 		t.Fatal(err)
 	}
-	_ = waitPhase(t, e, "default", "lv", corev1.PodFailed)
+	_ = waitPhase(t, e, "default", "lv", corev1.PodRunning)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) && rt.Starts() < 2 {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if rt.Starts() < 2 {
 		t.Fatalf("expected VM restart, starts=%d", rt.Starts())
+	}
+	p, err := e.Get("default", "lv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Status.Phase != corev1.PodRunning {
+		t.Fatalf("liveness restart ended the pod: phase %s %s", p.Status.Phase, p.Status.Message)
 	}
 	_ = e.Delete(context.Background(), "default", "lv", 0)
 }

@@ -1,0 +1,64 @@
+{{- if .Values.runtimeClass.enabled }}
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: {{ .Values.runtimeClass.name }}
+handler: darwin-vm
+scheduling:
+  nodeSelector:
+    kubernetes.io/os: darwin
+  tolerations:
+    - key: darwin.node/macos
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+    - key: virtual-kubelet.io/provider
+      operator: Equal
+      value: darwin-node
+      effect: NoSchedule
+    {{- if .Values.runtimeClass.tolerateNAT }}
+    - key: darwin.node/nat-only
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+    {{- end }}
+{{- end }}
+{{- if .Values.admission.slotRequest }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: {{ .Values.runtimeClass.name }}-vm-slot
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: darwin-runtime-class
+      expression: "has(object.spec.runtimeClassName) && object.spec.runtimeClassName == '{{ .Values.runtimeClass.name }}'"
+  mutations:
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >-
+          !has(object.spec.containers) || size(object.spec.containers) == 0 ? [] :
+          !has(object.spec.containers[0].resources) ? [
+            JSONPatch{op: "add", path: "/spec/containers/0/resources", value: {"requests": {"darwin.node/vm-slot": "1"}}}
+          ] :
+          !has(object.spec.containers[0].resources.requests) ? [
+            JSONPatch{op: "add", path: "/spec/containers/0/resources/requests", value: {"darwin.node/vm-slot": "1"}}
+          ] :
+          !("darwin.node/vm-slot" in object.spec.containers[0].resources.requests) ? [
+            JSONPatch{op: "add", path: "/spec/containers/0/resources/requests/darwin.node~1vm-slot", value: "1"}
+          ] : []
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Values.runtimeClass.name }}-vm-slot
+spec:
+  policyName: {{ .Values.runtimeClass.name }}-vm-slot
+{{- end }}

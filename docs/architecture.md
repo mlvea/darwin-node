@@ -53,10 +53,17 @@ or artifact sidecar.
 Apple's EULA and XNU (`hv_apple_isa_vm_quota`) allow two concurrent macOS
 VMs per host. darwin-node:
 
-- Advertises `pods=2` and `darwin.node/vm=2`
-- Injects a `darwin.node/vm: 1` request on the primary container
-- **Rejects** a third pod (`VMCapacityExhausted`) instead of queueing
-- Taints the node `darwin.node/vm-full=true:NoSchedule` when both slots are used
+- Advertises `pods=2`, `darwin.node/vm=2`, and `darwin.node/vm-slot=2`
+  (capacity and allocatable follow `--max-vms`)
+- Does not inject a resource request. Pods request `darwin.node/vm-slot: 1`.
+  The optional Helm MutatingAdmissionPolicy adds that request on
+  container 0 when `runtimeClassName` is `darwin-vm`. The RuntimeClass
+  carries the static tolerations and nodeSelector. See
+  [scheduling](scheduling.md).
+- **Rejects** a pod when every slot is held by a running VM and nothing
+  warm can be reclaimed (`VMCapacityExhausted`). It does not queue.
+- Does not taint `darwin.node/vm-full`. A stale taint is removed on the
+  next node status publish. `VMCapacity` stays informational.
 
 See [ADR 0006](adr/0006-capacity-2vm.md).
 
@@ -69,8 +76,14 @@ primary container mounts nothing adopts a warm VM and skips the cold
 boot entirely. Invariants:
 
 - Warm VMs acquire real slots from the same fail-closed table.
-- Real demand evicts a warm guest before any pod is rejected; rejection
-  still happens once no warm entry remains.
+- Adoption requires the same image ref and the same vCPU and memory the
+  pod requested. The default request is 2 vCPU and 4 GiB, which is the
+  size the pool boots.
+- A real pod cancels an in-flight warm boot and evicts a pooled guest it
+  cannot adopt. A crashed warm VM is removed. A failed warm boot waits
+  1s, doubling to 30s.
+- Rejection still happens once no warm entry and no in-flight warm boot
+  remain and every slot is held.
 
 ## Cache volumes
 

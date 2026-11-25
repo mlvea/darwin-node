@@ -53,6 +53,11 @@ func TestConfigureNodeCapacity(t *testing.T) {
 	if vm.Value() != 2 {
 		t.Fatal("missing darwin.node/vm")
 	}
+	slot := n.Status.Capacity[corev1.ResourceName(types.ResourceVMSlot)]
+	alloc := n.Status.Allocatable[corev1.ResourceName(types.ResourceVMSlot)]
+	if slot.Value() != 2 || alloc.Value() != 2 {
+		t.Fatalf("vm-slot capacity %s allocatable %s", slot.String(), alloc.String())
+	}
 }
 
 func TestProviderLifecycle(t *testing.T) {

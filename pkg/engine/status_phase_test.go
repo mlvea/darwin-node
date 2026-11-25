@@ -104,29 +104,29 @@ func TestDeleteKeepsFailedPhase(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("failure path did not stop the VM")
 	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_ = e.Delete(context.Background(), "default", "failed", 0)
-	}()
-	select {
-	case <-rt.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("delete did not reach Stop")
-	}
+	// A permanent boot failure stops the VM and clears it before the pod
+	// is marked Failed, so the slot is free before any retry sleep. Delete
+	// then has no machine left to stop. Read the published status first:
+	// Delete removes the pod from the engine.
 	p, err := e.Get("default", "failed")
 	if err != nil {
 		t.Fatal(err)
 	}
-	phase := p.Status.Phase
 	exit := int32(-1)
 	if len(p.Status.ContainerStatuses) > 0 && p.Status.ContainerStatuses[0].State.Terminated != nil {
 		exit = p.Status.ContainerStatuses[0].State.Terminated.ExitCode
 	}
+	if p.Status.Phase != corev1.PodFailed || exit != 1 {
+		t.Fatalf("phase %s exit %d, failed start did not stay Failed", p.Status.Phase, exit)
+	}
 	release()
-	wg.Wait()
-	if phase != corev1.PodFailed || exit != 1 {
-		t.Fatalf("phase %s exit %d, failed pod was rewritten during delete", phase, exit)
+	if err := e.Delete(context.Background(), "default", "failed", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Get("default", "failed"); err == nil {
+		t.Fatal("deleted pod still registered")
+	}
+	if rt.stops.Load() != 1 {
+		t.Fatalf("stops %d, want the failure path only", rt.stops.Load())
 	}
 }

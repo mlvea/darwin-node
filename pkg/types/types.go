@@ -8,8 +8,9 @@ const AppleMaxConcurrentVMs = 2
 
 // Extended resource names advertised on the node.
 const (
-	ResourceVM    = "darwin.node/vm"
-	ResourceMetal = "darwin.node/metal"
+	ResourceVM     = "darwin.node/vm"
+	ResourceVMSlot = "darwin.node/vm-slot"
+	ResourceMetal  = "darwin.node/metal"
 )
 
 // Node labels.

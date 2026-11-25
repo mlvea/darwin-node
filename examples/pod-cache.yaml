@@ -21,6 +21,7 @@ spec:
         requests:
           cpu: "4"
           memory: 8Gi
+          darwin.node/vm-slot: "1"
           darwin.node/vm: "1"
           darwin.node/metal: "1"
       readinessProbe:

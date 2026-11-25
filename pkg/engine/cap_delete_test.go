@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"runtime"
 	"strings"
 	"sync"
@@ -123,20 +122,34 @@ func TestDeleteDuringInFlightCreateDoesNotAdmitAThirdVM(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	usedAtWait := e.slots.Used()
+	if usedAtWait != 1 {
+		t.Fatalf("pod a released its slot while Runtime.Create was still running: used=%d", usedAtWait)
+	}
 
+	// Both may be accepted: one free slot remains, and the slot is taken
+	// inside start rather than in Create. The third VM must not enter
+	// Runtime.Create while a and one of these hold the two slots.
 	errB := e.Create(context.Background(), samplePod("b", "uid-b"), Credentials{})
 	errC := e.Create(context.Background(), samplePod("c", "uid-c"), Credentials{})
-	if errB == nil && errC == nil {
-		t.Fatalf("admitted two pods while pod a was still inside Runtime.Create (slots at Delete wait: %d)", usedAtWait)
+	if errB != nil || errC != nil {
+		t.Fatalf("admission while one slot is free: b=%v c=%v", errB, errC)
 	}
-	if (errB == nil) == (errC == nil) {
-		t.Fatalf("want exactly one of the two pods admitted into the remaining slot, b=%v c=%v slots=%d", errB, errC, e.slots.Used())
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && e.slots.Used() < 2 {
+		time.Sleep(time.Millisecond)
 	}
-	rejected := errB
-	if errB == nil {
-		rejected = errC
+	if used := e.slots.Used(); used != 2 {
+		t.Fatalf("slots=%d, want both slots held while Runtime.Create has not returned", used)
 	}
-	if !errors.Is(rejected, capacity.ErrVMCapacityExhausted) {
-		t.Fatalf("rejection: %v", rejected)
+	if got := rt.Running(); got != 0 {
+		t.Fatalf("running=%d before Runtime.Create returned", got)
+	}
+	letCreateReturn()
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := rt.Running(); got > 2 {
+			t.Fatalf("running VMs %d exceed the 2-slot cap", got)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

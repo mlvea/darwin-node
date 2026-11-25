@@ -24,17 +24,20 @@ guest is treated as hostile root: its exit codes, status text, and
 metrics are bounded before they reach the API.
 
 > **Hard cap:** two concurrent macOS VMs per physical host (Apple EULA
-> and XNU `hv_apple_isa_vm_quota`). Capacity, taints, and admission are
-> built around that number. A third pod is rejected, not queued.
+> and XNU `hv_apple_isa_vm_quota`). The node advertises
+> `darwin.node/vm-slot` at that count. Once both slots are held, another
+> pod is rejected and is not queued.
 
 Intel Macs, nested virtualization, and exclusive GPU passthrough are
 out of scope. See [docs/limitations.md](docs/limitations.md).
 
 ## Design invariants
 
-- `pods=2` and `darwin.node/vm=2` are real slots from a fail-closed
-  table ([pkg/capacity](pkg/capacity/capacity.go)). Full means the node
-  taints itself `darwin.node/vm-full=true:NoSchedule`; it never queues.
+- `pods=2`, `darwin.node/vm=2`, and `darwin.node/vm-slot=2` come from
+  a fail-closed table ([pkg/capacity](pkg/capacity/capacity.go)).
+  Schedulers should request `darwin.node/vm-slot: 1`. The node does not
+  publish `darwin.node/vm-full`. A pod that would exceed the cap is
+  rejected and is not queued. See [docs/scheduling.md](docs/scheduling.md).
 - The guest boundary is a daemon speaking vsock, not port 22. Exec is
   full duplex (stdin, PTY, resize); probes run in-guest; shutdown is an
   RPC, not an SSH kill.
@@ -58,10 +61,14 @@ out of scope. See [docs/limitations.md](docs/limitations.md).
 One paragraph each:
 
 **Warm VM pool.** A replenisher keeps up to N pre-booted, agent-ready
-guests in slots pods do not need. Adoption matches on image ref and
-adds zero boot work; under capacity pressure real demand reclaims warm
-slots before any pod is rejected. Warm guests hold real slots from the
-same table that fails closed at two.
+guests in slots pods do not need. A pod adopts one when the image ref
+and the VM size match. The pool boots 2 vCPU and 4 GiB, which is also
+the default request, so adoption adds zero boot work. A real pod
+cancels an in-flight warm boot and evicts a pooled guest it cannot
+adopt. Warm guests hold real slots from the same table that fails
+closed at two. Before adoption of a registry image that is already in
+the pull cache, the pod's own pull credentials are checked again, and
+the guest gets a new agent token.
 
 **Cache volumes.** Annotate a pod and the node restores each declared
 path from its cache store via APFS clonefile before boot, shares it
@@ -90,9 +97,9 @@ This tree exists because three of its central defaults are inverted here:
    every image, serving the same surface over vsock. There is now a control plane
    inside the guest with its own binary, lifecycle, and version skew.
 2. **Capacity is enforced, not queued.** Upstream advertises `pods=2`
-   but blocks a third create until a slot frees. darwin-node rejects
-   the third pod, taints the node while both slots are held, and drives
-   admission through an explicit slot table.
+   but blocks a third create until a slot frees. darwin-node advertises
+   `darwin.node/vm-slot` at the configured maximum and rejects a pod
+   that would exceed it. Admission goes through an explicit slot table.
 3. **Operability is a default, not a flag.** Plaintext HTTP will not
    start; digest verification and crash recovery are unconditional;
    usage stats feed autoscaling instead of static capacity numbers.
@@ -142,7 +149,7 @@ export APISERVER_CA_CERT_LOCATION=$HOME/.kube/ca.crt
 ./bin/darwin-node --nodename="$(hostname | tr '[:upper:]' '[:lower:]')" \
   --listen-address="$(ipconfig getifaddr en0)" --allow-nat-workloads
 kubectl get node
-# Capacity: pods=2, darwin.node/vm=2, darwin.node/metal=2
+# Capacity: pods=2, darwin.node/vm-slot=2, darwin.node/vm=2, darwin.node/metal=2
 ```
 
 Hardware workloads need `--runtime=vz` (the default on `darwin/arm64`),
@@ -169,9 +176,8 @@ Kubernetes API
 |   warm pool: pre-booted, adoptable  |
 |   cache store: CoW snapshots        |
 +------------------+------------------+
-                   | vsock (primary)
-                   | TCP  (opt-in fallback)
-                   | SSH  (last resort)
+                   | vsock (only agent transport)
+                   | SSH  (last resort, no agent)
                    v
 +-------------------------------------+
 | macOS VM  (< 2 per host)            |
@@ -198,7 +204,7 @@ Kubernetes API
 | Node Ready, capacity, taints, labels | Yes |
 | Pod create / delete / status / conditions | Yes |
 | Fail-closed 2-VM admission | Yes |
-| Warm VM pool + adoption | Yes (matching image, mount-free primary) |
+| Warm VM pool + adoption | Yes (matching image and size, mount-free primary) |
 | Pod cache snapshots | Yes (annotation-declared, CoW) |
 | Interactive `kubectl exec -it` (stdin, PTY, resize) | Yes (vsock) |
 | True `logs -f` follow | Yes |
@@ -223,6 +229,7 @@ Kubernetes API
 | Doc | What it is |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit, package map |
+| [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass |
 | [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle, adoption rules, eviction |
 | [docs/cache-volumes.md](docs/cache-volumes.md) | Cache annotation spec and snapshot store |
 | [docs/console.md](docs/console.md) | Serial console socket, CLI, trust model |

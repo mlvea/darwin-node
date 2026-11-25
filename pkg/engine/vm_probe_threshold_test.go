@@ -252,6 +252,11 @@ func TestVMLivenessHonorsFailureThreshold(t *testing.T) {
 		t.Fatalf("liveness restarted before failureThreshold: starts=%d samples=%d", rt.Starts(), n.Load())
 	}
 	clk.Advance(5 * time.Second)
+	waitSamples(t, clk, &n, 3)
+	if rt.Starts() != 1 {
+		t.Fatalf("liveness restarted before the 10s backoff: starts=%d samples=%d", rt.Starts(), n.Load())
+	}
+	clk.Advance(10 * time.Second)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if n.Load() >= 3 && rt.Starts() >= 2 {
@@ -306,6 +311,11 @@ func TestVMLivenessSuccessClearsFailureStreak(t *testing.T) {
 		}
 	}
 	clk.Advance(5 * time.Second)
+	waitSamples(t, clk, &n, 6)
+	if rt.Starts() != 1 {
+		t.Fatalf("liveness restarted before the 10s backoff: starts=%d samples=%d", rt.Starts(), n.Load())
+	}
+	clk.Advance(10 * time.Second)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if rt.Starts() >= 2 {
@@ -382,7 +392,7 @@ func TestVMReadinessInitialDelay(t *testing.T) {
 // inside that budget is a failure, and failureThreshold 1 restarts the VM.
 func TestVMLivenessTimeoutCountsAsFailure(t *testing.T) {
 	var n atomic.Int32
-	e, rt, _ := clockedVM(t, func(ctx context.Context, req guest.ExecReq, _ io.Reader, _, _ io.Writer) (int, error) {
+	e, rt, clk := clockedVM(t, func(ctx context.Context, req guest.ExecReq, _ io.Reader, _, _ io.Writer) (int, error) {
 		if len(req.Argv) > 0 && req.Argv[0] == "live" {
 			n.Add(1)
 			<-ctx.Done()
@@ -400,7 +410,18 @@ func TestVMLivenessTimeoutCountsAsFailure(t *testing.T) {
 	}
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		if n.Load() >= 1 && rt.Starts() >= 2 {
+		if n.Load() >= 1 && clk.armed() && rt.Starts() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n.Load() < 1 || !clk.armed() || rt.Starts() != 1 {
+		t.Fatalf("liveness timeout did not arm backoff: samples=%d starts=%d armed=%v", n.Load(), rt.Starts(), clk.armed())
+	}
+	clk.Advance(10 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if rt.Starts() >= 2 {
 			if e.slots.Used() != 1 {
 				t.Fatalf("slots=%d", e.slots.Used())
 			}

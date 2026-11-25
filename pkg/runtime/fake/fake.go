@@ -136,6 +136,35 @@ func (m *machine) ConsoleGuestEnd() io.ReadWriteCloser {
 
 func (m *machine) ID() types.MachineID { return m.id }
 
+// AgentToken is the handshake token the in-process guest will accept.
+func (m *machine) AgentToken() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.token
+}
+
+// SetAgentToken rotates the handshake token. The fake guest does not watch
+// the control-share file; the vz guest does. Tests and warm adoption call
+// this so the next dial matches the token written for the pod.
+func (m *machine) SetAgentToken(token string) {
+	m.mu.Lock()
+	m.token = token
+	h := m.handler
+	m.mu.Unlock()
+	h.SetToken(token)
+	m.mu.Lock()
+	m.handler = h
+	m.mu.Unlock()
+}
+
+// AgentToken is the handshake token of the most recently created machine.
+func (r *Runtime) AgentToken() string {
+	if m := r.last.Load(); m != nil {
+		return m.AgentToken()
+	}
+	return ""
+}
+
 // ReportExit asks the in-process guest to send an Exit notify. Tests use it
 // for the same frame a real guest writes on vsock before it halts.
 func (m *machine) ReportExit(rep guest.ExitReport) {

@@ -150,16 +150,21 @@ func (s *Slots) TryAcquire(uid string) error {
 }
 ```
 
-Three properties matter more than the code. Admission happens **before**
+Three properties matter more than the code. Validation happens **before**
 any expensive work — image pulls, volume materialization, VM construction —
 so a malformed pod burns zero resources. Release is idempotent, because
 delete paths race and double-release must be harmless. And the table keys on
 **pod UID**, not name, because Kubernetes guarantees a recreated pod gets a
 new identity even when it reuses a name.
 
+The slot is not taken at that validation step. Image pull and volume
+preparation run without one. It is acquired immediately before the VM is
+created, and a boot failure releases it before the retry sleeps. A dial
+retry keeps it, because the guest is already running.
+
 But refusing pods is only half of honesty. The other half is *telling the
-scheduler to stop asking*. The node publishes a custom condition and taint
-that track the slot table, refreshed on a 15-second heartbeat:
+scheduler to stop asking*. The first cut published a condition and a taint
+that tracked the slot table, refreshed on a 15-second heartbeat:
 
 ```
         slot acquired                                slot released
@@ -178,11 +183,20 @@ that track the slot table, refreshed on a 15-second heartbeat:
                                              new pods route elsewhere
 ```
 
-With two slots this sounds like overkill — you could almost count on your
-fingers. But the mechanism is the point: the same loop carries memory
-pressure, disk pressure, and Metal availability. A node whose status is
-recomputed from reality on a timer is a node you can reason about at 3am.
-One whose status was computed once at boot is a museum exhibit.
+That taint lost the race. kube-scheduler binds several pods before the
+heartbeat lands, and a cluster autoscaler cannot model a taint that
+appears only when the node is already full. As of 25 Nov 2026 the node
+does not publish `darwin.node/vm-full`. A stale taint is removed on the
+next status publish. The live contract is the extended resource
+`darwin.node/vm-slot`, with capacity and allocatable equal to the
+configured maximum. `VMCapacity` is still published and is informational.
+See [docs/scheduling.md](../scheduling.md).
+
+The heartbeat is still the point for everything else: the same loop
+carries memory pressure, disk pressure, and Metal availability. A node
+whose status is recomputed from reality on a timer is a node you can
+reason about at 3am. One whose status was computed once at boot is a
+museum exhibit.
 
 Allocatable follows the same honesty rule. The node reports host CPU/memory
 minus explicit reservations (defaults: 2 cores, 4 GiB, 20 GiB of disk), and
@@ -664,9 +678,9 @@ number you did not measure.**
 - Per-container stats exist because `kubectl top pods` renders containers,
   not just pods; a summary missing them is technically valid and practically
   broken.
-- Conditions and taints are recomputed from the live slot table and host
-  probes on a heartbeat; `vm-full` appears when the second slot fills, not
-  when the node rebooted.
+- Conditions are recomputed from the live slot table and host probes on
+  a heartbeat. `VMCapacity` flips when the second slot fills.
+  `darwin.node/vm-full` is not published; capacity is `darwin.node/vm-slot`.
 - Events narrate the lifecycle in the vocabulary operators already know —
   `Pulling/Pulled`, `Starting`, `VMDialing`, `Started`, `Killing`,
   `ProbeFailed` — so `kubectl describe pod` tells the same story the engine

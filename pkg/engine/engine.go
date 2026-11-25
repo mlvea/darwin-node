@@ -168,9 +168,13 @@ type podRecord struct {
 	sidecarWait     map[string]sidecarWait
 	sidecarExitAt   map[string]sidecarExitMark
 	initStatuses    []corev1.ContainerStatus
-	warmDir         string       // set when the VM was adopted from the warm pool
-	warmDisk        string       // cache/pods/<warm-slot> overlay; not the pod uid dir
-	adopt           *warmEntry   // claimed under capacity pressure, adopted in start()
+	warmDir         string // set when the VM was adopted from the warm pool
+	warmDisk        string // cache/pods/<warm-slot> overlay; not the pod uid dir
+	// liveBackoff is the next liveness restart delay. liveBackoffAt is when
+	// the last liveness restart happened. Ten minutes of healthy running
+	// resets the delay to 10s.
+	liveBackoff     time.Duration
+	liveBackoffAt   time.Time
 	consoleLn       net.Listener // per-VM unix socket for break-glass console
 	consoleSock     string
 	consoleHub      *consoleHub
@@ -358,7 +362,10 @@ func (e *Engine) SetTokenMinter(m TokenMinter) {
 	e.mu.Unlock()
 }
 
-// Create validates, fail-closed acquires a VM slot, and starts asynchronously.
+// Create validates and accepts the pod. The VM slot is acquired in start,
+// immediately before Runtime.Create, so an image pull or a boot retry does
+// not pin a slot. A pod is rejected here only when every slot is already
+// held by a running VM and nothing warm can be reclaimed.
 func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials) error {
 	if err := ValidatePod(pod, e.cfg.AllowedHostPaths); err != nil {
 		e.events.Warn(ctx, event.ReasonFailedCreate, err.Error())
@@ -379,45 +386,37 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		}
 		return nil
 	}
-	credit := e.takeRestartCreditLocked(uid)
 	if e.draining.Load() {
 		e.mu.Unlock()
 		e.events.Warn(ctx, event.ReasonDraining, "pod create rejected: node is draining")
 		return fmt.Errorf("node is draining; pod will be scheduled elsewhere")
 	}
-	var adopt *warmEntry
-	acqErr := e.slots.TryAcquire(uid)
-	if errors.Is(acqErr, capacity.ErrVMCapacityExhausted) {
-		// Real demand reclaims warm capacity before any pod is rejected.
-		entry, freed := e.reclaimWarmForPod(pod.Spec.Containers[0].Image, canAdopt(pod))
-		if freed {
-			if entry != nil {
-				e.slots.Release(entry.slotID)
-			}
-			if acqErr = e.slots.TryAcquire(uid); acqErr != nil && entry != nil {
-				// Slot raced away; the claimed VM cannot be adopted.
-				e.stopWarmEntry(entry)
-				entry = nil
-			} else if acqErr == nil {
-				adopt = entry
-			}
-		}
+	e.mu.Unlock()
+
+	// Sweep and the slot table take their own locks. Doing this outside
+	// e.mu keeps a crashed warm VM's Stop off the pod map.
+	if err := e.rejectIfFull(); err != nil {
+		e.events.Warn(ctx, event.ReasonVMCapacityExhausted, err.Error())
+		return err
 	}
-	if acqErr != nil {
+
+	e.mu.Lock()
+	if _, exists := e.pods[key]; exists {
 		e.mu.Unlock()
-		if errors.Is(acqErr, capacity.ErrVMCapacityExhausted) {
-			e.events.Warn(ctx, event.ReasonVMCapacityExhausted, acqErr.Error())
-			return acqErr
-		}
-		return acqErr
+		return nil
 	}
+	if e.draining.Load() {
+		e.mu.Unlock()
+		e.events.Warn(ctx, event.ReasonDraining, "pod create rejected: node is draining")
+		return fmt.Errorf("node is draining; pod will be scheduled elsewhere")
+	}
+	credit := e.takeRestartCreditLocked(uid)
 	pctx, cancel := context.WithCancel(context.Background())
 	rec := &podRecord{
 		pod:          pod.DeepCopy(),
 		phase:        corev1.PodPending,
 		reason:       "Starting",
 		cancel:       cancel,
-		adopt:        adopt,
 		restartCount: credit,
 	}
 	// Count the goroutine before the pod is visible. Delete waits on
@@ -437,17 +436,11 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 	if maps := hostPortReservations(pod, bindHost); len(maps) > 0 {
 		if err := e.hostports.Reserve(key, maps); err != nil {
 			e.mu.Lock()
-			adopted := rec.adopt
-			rec.adopt = nil
 			delete(e.pods, key)
 			e.mu.Unlock()
 			cancel()
+			// Create has not acquired a slot. Release is idempotent.
 			e.slots.Release(uid)
-			// The warm VM was already taken out of the pool and its slot
-			// released. Leaving it running would exceed the 2-VM cap.
-			if adopted != nil {
-				e.stopWarmEntry(adopted)
-			}
 			rec.startDone.Done()
 			return err
 		}
@@ -466,16 +459,14 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 	pod := rec.pod.DeepCopy()
 	rec.mu.Unlock()
 
-	// Warm adoption: virtio-fs shares are fixed at VM creation, so only pods
-	// whose primary container mounts nothing (and declares no caches) can
-	// adopt a pre-booted VM. rec.adopt was claimed in Create under capacity
-	// pressure; otherwise try the pool directly.
-	rec.mu.Lock()
-	entry := rec.adopt
-	rec.adopt = nil
-	rec.mu.Unlock()
-	if entry == nil && canAdopt(pod) {
-		entry = e.takeWarm(pod.Spec.Containers[0].Image)
+	// Warm adoption happens before any slot is taken for a cold boot.
+	// A size or credential mismatch leaves the warm VM in the pool.
+	entry, aerr := e.tryAdoptWarm(ctx, pod, creds)
+	if aerr != nil {
+		if ctx.Err() == nil {
+			e.fail(rec, aerr)
+		}
+		return
 	}
 	if entry != nil {
 		e.startAdopted(ctx, rec, pod, creds, entry)
@@ -578,10 +569,27 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 	}
 
 	var machine runtime.Machine
+	uid := string(pod.UID)
 	if err := e.retryTransient(ctx, rec, "VM boot", func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// The slot is taken only for the Create/Start attempt. A failure
+		// releases it before retryTransient sleeps, so a pod stuck backing
+		// off does not pin half the node.
+		if err := e.acquireColdSlot(ctx, uid); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		release := true
+		defer func() {
+			if release {
+				e.stopMachineKeepSlot(rec)
+				e.slots.Release(uid)
+			}
+		}()
 		e.stopMachineKeepSlot(rec)
 		m, cerr := e.rt.Create(ctx, spec)
 		if cerr != nil {
@@ -593,7 +601,11 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 		if serr := m.Start(ctx); serr != nil {
 			return serr
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		machine = m
+		release = false
 		return nil
 	}); err != nil {
 		if ctx.Err() == nil {
@@ -606,8 +618,8 @@ func (e *Engine) start(ctx context.Context, rec *podRecord, creds Credentials) {
 	e.runConnected(ctx, rec, pod, creds, machine, token, places)
 }
 
-// startAdopted hands a pre-booted warm VM to a pod. The guest is already
-// running and agent-ready; the pod keeps the token it was booted with.
+// startAdopted hands a pre-booted warm VM to a pod. tryAdoptWarm has
+// already moved the slot onto the pod and written a fresh agent token.
 func (e *Engine) startAdopted(ctx context.Context, rec *podRecord, pod *corev1.Pod, creds Credentials, entry *warmEntry) {
 	rec.mu.Lock()
 	rec.machine = entry.machine
