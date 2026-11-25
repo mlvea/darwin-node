@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,35 +369,27 @@ func TestSidecarStartupProbeFailureWithoutStopFailsPod(t *testing.T) {
 }
 
 func TestSidecarHTTPStartupProbeHitsTheHost(t *testing.T) {
+	const secret = "STARTUP-SECRET-BODY"
 	var pass atomic.Bool
 	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	rt := fake.New()
+	e := sidecarEngine(t, rt, nil)
+	ip, port := serveRoutable(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		if r.URL.Path != "/healthz" {
 			http.NotFound(w, r)
 			return
 		}
 		if !pass.Load() {
-			http.Error(w, "early", http.StatusServiceUnavailable)
+			http.Error(w, secret, http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer srv.Close()
-	host, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rt := fake.New()
-	e := sidecarEngine(t, rt, sidecar.NewMemory())
+	e.sidecar = addressedRuntime{Runtime: sidecar.NewMemory(), ip: ip}
 	pod := sidecarStartupPod("http", &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
-			Host: host, Port: intstr.FromInt(port), Path: "/healthz",
+			Port: intstr.FromInt(port), Path: "/healthz",
 		}},
 		PeriodSeconds:    1,
 		TimeoutSeconds:   1,
@@ -433,6 +423,7 @@ func TestSidecarHTTPStartupProbeHitsTheHost(t *testing.T) {
 		if statusStarted(side) || podReady(p) {
 			t.Fatalf("HTTP startup probe returned 503 but the sidecar is started: %+v hits=%d", side, hits.Load())
 		}
+		assertNoProbeBody(t, p, secret)
 		held = true
 		break
 	}
@@ -463,7 +454,8 @@ func TestSidecarHTTPStartupProbeHitsTheHost(t *testing.T) {
 }
 
 func TestSidecarTCPStartupProbeDialsTheHost(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ip := routableIPv4s(t)[0]
+	ln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,20 +471,13 @@ func TestSidecarTCPStartupProbeDialsTheHost(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	_, portStr, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	port := ln.Addr().(*net.TCPAddr).Port
 
 	rt := fake.New()
-	e := sidecarEngine(t, rt, sidecar.NewMemory())
+	e := sidecarEngine(t, rt, addressedRuntime{Runtime: sidecar.NewMemory(), ip: ip})
 	pod := sidecarStartupPod("tcp", &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{
-			Host: "127.0.0.1", Port: intstr.FromInt(port),
+			Port: intstr.FromInt(port),
 		}},
 		PeriodSeconds:    1,
 		TimeoutSeconds:   1,

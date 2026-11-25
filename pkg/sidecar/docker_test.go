@@ -23,12 +23,14 @@ func TestDrainImagePull(t *testing.T) {
 }
 
 func TestVolumeBindsAndResources(t *testing.T) {
+	hp := t.TempDir()
+	vol := t.TempDir()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
 		Spec: corev1.PodSpec{
 			Volumes: []corev1.Volume{
 				{Name: "cfg", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "cm"}}}},
-				{Name: "hp", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/host/ci"}}},
+				{Name: "hp", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: hp}}},
 			},
 		},
 	}
@@ -45,7 +47,10 @@ func TestVolumeBindsAndResources(t *testing.T) {
 			},
 		},
 	}
-	hc := dockerHostConfig(pod, c, "/vol")
+	hc, err := dockerHostConfig(pod, c, vol, []string{hp})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(hc.Binds) != 2 {
 		t.Fatalf("binds %v", hc.Binds)
 	}
@@ -67,6 +72,8 @@ func TestVolumeBindsAndResources(t *testing.T) {
 }
 
 func TestContentVolumesBindReadOnly(t *testing.T) {
+	hp := t.TempDir()
+	vol := t.TempDir()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"},
 		Spec: corev1.PodSpec{
@@ -80,7 +87,7 @@ func TestContentVolumesBindReadOnly(t *testing.T) {
 					{Path: "ns", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}},
 				}}}},
 				{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				{Name: "hp", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/host/ci"}}},
+				{Name: "hp", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: hp}}},
 			},
 		},
 	}
@@ -95,7 +102,10 @@ func TestContentVolumesBindReadOnly(t *testing.T) {
 			{Name: "hp", MountPath: "/host"},
 		},
 	}
-	binds := volumeBinds(pod, c, "/vol")
+	binds, err := volumeBinds(pod, c, vol, []string{hp})
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := map[string]string{
 		"/etc/cfg": ":ro",
 		"/etc/sec": ":ro",

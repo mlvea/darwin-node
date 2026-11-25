@@ -13,25 +13,20 @@ import (
 // AllowHostPath reports whether path may be shared into a guest.
 // An empty allowlist denies every hostPath. The host root is never allowed.
 func AllowHostPath(path string, allowed []string) error {
-	resolved, err := resolvePath(path)
-	if err != nil {
-		return err
-	}
-	return allowResolved(resolved, allowed)
+	_, err := ResolveAllowedHostPath(path, allowed)
+	return err
 }
 
-func materializeHostPath(src *corev1.HostPathVolumeSource, allowed []string) (string, error) {
-	if src == nil {
-		return "", fmt.Errorf("nil hostPath")
-	}
-	resolved, err := resolvePath(src.Path)
+// ResolveAllowedHostPath returns the symlink-resolved path when it is on
+// the allowlist. Callers that hand the path to a mount must pass this
+// result, not the original string: a check of the original path and a
+// later resolve can land outside the allowlist.
+func ResolveAllowedHostPath(path string, allowed []string) (string, error) {
+	resolved, err := resolvePath(path)
 	if err != nil {
 		return "", err
 	}
 	if err := allowResolved(resolved, allowed); err != nil {
-		return "", err
-	}
-	if err := ensureHostPathType(resolved, src.Type); err != nil {
 		return "", err
 	}
 	out, err := resolvePath(resolved)
@@ -42,6 +37,20 @@ func materializeHostPath(src *corev1.HostPathVolumeSource, allowed []string) (st
 		return "", err
 	}
 	return out, nil
+}
+
+func materializeHostPath(src *corev1.HostPathVolumeSource, allowed []string) (string, error) {
+	if src == nil {
+		return "", fmt.Errorf("nil hostPath")
+	}
+	resolved, err := ResolveAllowedHostPath(src.Path, allowed)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureHostPathType(resolved, src.Type); err != nil {
+		return "", err
+	}
+	return ResolveAllowedHostPath(resolved, allowed)
 }
 
 func allowResolved(resolved string, allowed []string) error {

@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -614,10 +613,13 @@ func TestSidecarLivenessTimeoutCountsAsFailure(t *testing.T) {
 }
 
 func TestSidecarReadinessHTTP(t *testing.T) {
+	const secret = "READY-SECRET-BODY"
 	var pass atomic.Bool
 	var hits atomic.Int32
 	var saw503 atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	rt := fake.New()
+	e := sidecarEngine(t, rt, nil)
+	ip, port := serveRoutable(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		if r.URL.Path != "/ready" {
 			http.NotFound(w, r)
@@ -625,26 +627,16 @@ func TestSidecarReadinessHTTP(t *testing.T) {
 		}
 		if !pass.Load() {
 			saw503.Store(true)
-			http.Error(w, "no", http.StatusServiceUnavailable)
+			http.Error(w, secret, http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer srv.Close()
-	host, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rt := fake.New()
-	e := sidecarEngine(t, rt, sidecar.NewMemory())
+	e.sidecar = addressedRuntime{Runtime: sidecar.NewMemory(), ip: ip}
 	pod := hybridPod("side", "uid-http-ready", corev1.RestartPolicyAlways)
 	pod.Spec.Containers[1].ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
-			Host: host, Port: intstr.FromInt(port), Path: "/ready",
+			Port: intstr.FromInt(port), Path: "/ready",
 		}},
 		PeriodSeconds:    1,
 		TimeoutSeconds:   1,
@@ -670,6 +662,7 @@ func TestSidecarReadinessHTTP(t *testing.T) {
 		if side != nil && (side.Ready || podReady(p)) {
 			t.Fatalf("HTTP 503 left the sidecar ready: %+v hits=%d", side, hits.Load())
 		}
+		assertNoProbeBody(t, p, secret)
 		held = true
 		break
 	}

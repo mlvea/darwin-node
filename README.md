@@ -433,13 +433,22 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
   are not followed on rewrite. Image digests are always verified. Image cache
   paths are separated by tenant, credentials are sent only to their own
   registry, and cache directories are `0700`.
-- **Host sidecars.** [pending #43] Each pod's sidecars get their own Docker
-  bridge (`darwin-node-<uid>`) and `no-new-privileges`. `privileged`, privilege
-  escalation, added capabilities, `hostNetwork/PID/IPC` and `docker.sock`
-  mounts are rejected **before** a VM slot is taken. Probes dial the container
-  address, never the node's loopback. hostPath binds are resolved and checked
-  twice. Still open after #43: the bridge is not `--internal`, and seccomp,
-  AppArmor, `fsGroup` and `supplementalGroups` are not applied.
+- **Host sidecars.** Each pod's sidecars share one Docker bridge
+  (`darwin-node-<uid>`, label `darwin-node=pod`) with `no-new-privileges`.
+  `runAsUser`, `runAsGroup`, `readOnlyRootFilesystem`, and capability drops
+  are applied. `privileged`, `allowPrivilegeEscalation`, added capabilities,
+  `hostNetwork`, `hostPID`, `hostIPC`, and `docker.sock` mounts are rejected
+  before a VM slot is taken. `runAsNonRoot` needs an explicit non-zero
+  `runAsUser`; the image `USER` is not inspected. HTTP and TCP probes dial
+  the container address from Docker inspect. An empty host, `localhost`, or
+  a loopback address means that address, and any other host is refused
+  without a dial. Loopback, unspecified, link-local, and multicast inspect
+  results are refused. A named port is resolved from that container; an
+  unknown name fails before the dial. hostPath binds are resolved and
+  checked against the allowlist twice, and Docker receives the resolved
+  path. Still open: the bridge is not `--internal` (the daemon gateway can
+  reach the host network, and sidecars in one pod can reach each other),
+  and seccomp, AppArmor, `fsGroup`, and `supplementalGroups` are not applied.
 - **SSH fallback** is off by default, key-only, and never uses passwords.
 
 **Reporting a vulnerability:** do **not** open a public issue. GitHub
@@ -461,9 +470,10 @@ matter most:
   In-place pod updates mean the pod is recreated.
 - **NAT is the default.** Bridged mode needs an Apple-approved entitlement.
   Cluster-routable pod networking is designed but not built (see Roadmap).
-- **Sidecars need Docker on the host.** Container-IP probes may fail closed on
-  Docker Desktop or Colima, which often don't route the bridge subnet to the
-  Mac. [pending #43]
+- **Sidecars need Docker on the host.** HTTP and TCP probes dial the
+  container's bridge address. Docker Desktop and Colima often do not route
+  that subnet to the Mac, and the probe then fails closed with
+  `probe dial failed`.
 - **Liveness restarts.** Main today fails the pod after 6 restarts. [pending
   #44] Kubelet-style backoff (10 s doubling to 5 m, reset after 10 m healthy),
   with the pod kept `Running` and its slot held.
@@ -491,10 +501,13 @@ to beta.
 
 1. **Hardware gate + 24 h soak** on a bare-metal Mac Mini, run as a pull-based
    gate. This blocks any "beta" label.
-2. **Finish the hardening pass:** [#43] sidecar isolation and [#44]
-   `vm-slot` scheduling, warm-pool safety and liveness backoff. Then the
-   remaining stability and bug items (hostPort connection lifecycle, among
-   others).
+2. **Finish the hardening pass.** Sidecar isolation is on main: a per-pod
+   bridge, `no-new-privileges`, admission rejects for privileged and host
+   namespaces, and container-address probes. Still open on that path: an
+   `--internal` bridge, plus seccomp, AppArmor, `fsGroup`, and
+   `supplementalGroups`. [pending #44] covers `vm-slot` scheduling,
+   warm-pool safety, and liveness backoff. After that, the remaining
+   stability items (hostPort connection lifecycle, among others).
 3. **Pod networking:** an in-process L2→L3 router that gives VMs
    cluster-routable IPs, compatible with the cluster CNI. The design is chosen;
    it needs CNI confirmation.
