@@ -66,8 +66,15 @@ VMs per host. darwin-node:
 - Does not inject a resource request. Pods request `darwin.node/vm-slot: 1`.
   The optional Helm MutatingAdmissionPolicy adds that request on
   container 0 when `runtimeClassName` is `darwin-vm`. The RuntimeClass
-  carries the static tolerations and nodeSelector. See
-  [scheduling](scheduling.md).
+  carries the static tolerations, including
+  `darwin.node/os=macos:NoSchedule`, and `kubernetes.io/os=darwin`.
+  See [scheduling](scheduling.md).
+- Publishes `darwin.node/os=macos:NoSchedule` on every node, including
+  when `--disable-taint` drops `virtual-kubelet.io/provider` and
+  `darwin.node/macos`. The node label stays `kubernetes.io/os=darwin`.
+  A pod tolerates it with key `darwin.node/os`, operator `Equal`,
+  value `macos`, effect `NoSchedule`. Which images and CPU/memory sums
+  `CreatePod` accepts are in [admission](admission.md).
 - **Rejects** a pod when every slot is held by a running VM and nothing
   warm can be reclaimed (`VMCapacityExhausted`). It does not queue.
 - Does not taint `darwin.node/vm-full`. A stale taint is removed on the
@@ -199,9 +206,17 @@ Production examples are LaunchAgents `io.darwin-node.slot-0` and
 that slot stopped until `launchctl kickstart gui/$UID/io.darwin-node.slot-N`
 or the agent is using `--vm-supervisor-spawn=subprocess`.
 
-The engine does not call the adapter's `Recover` yet, so a restarted
-agent leaves a live supervisor VM unadopted. The guest agent still
-dials the host, while `AttachChannels` dials the guest, and those meet
+The supervised adapter calls `supervisor.Adopt` on first attach and on
+`Recover`: a fresh `AttachChannels` Connect over `SCM_RIGHTS`, never a
+saved fd. Supervisor death is `SlotLost` / `VMFailed` with message
+`supervisor lost` within about 2 seconds. The watch is edge-triggered
+epoll on Linux and kqueue on Darwin, and it does not wait for the
+dead-man switch. The engine does not call the adapter's `Recover`, so a
+restarted agent leaves a live supervisor VM unadopted. The pod status
+for that loss is still the engine's `macOS VM Failed unexpectedly`.
+`Connect` during `Start` on real Virtualization.framework is
+hardware-pending. The guest agent still dials the host, while
+`AttachChannels` dials the guest, and those meet
 when the guest listens. The datagram descriptor is handed to the agent
 and is not bridged, so a guest booted with the flag on has no host
 network. A recovered machine has an empty guest-agent token because the
@@ -232,8 +247,8 @@ that flag.
 | `pkg/runtime/vz` | Virtualization.framework (`darwin/arm64`) |
 | `pkg/runtime/fake` | In-process VM for tests |
 | `pkg/runtime/simvz` | Linux stand-in that opens real sockets. See [simvz.md](simvz.md). Not selected by `--runtime` |
-| `pkg/runtime/supervised` | Agent-side adapter that speaks the slot control socket when `--vm-supervisor=on` |
-| `pkg/supervisor` | Slot control socket, boot lease, peer-uid check. See [vm-supervisor.md](vm-supervisor.md) |
+| `pkg/runtime/supervised` | Agent-side adapter for `--vm-supervisor=on`. First attach and `Recover` call `supervisor.Adopt` (a fresh Connect over `SCM_RIGHTS`) |
+| `pkg/supervisor` | Slot control socket, `supervisor.Adopt`, boot lease, peer-uid check, edge-triggered death watch. See [vm-supervisor.md](vm-supervisor.md) |
 | `pkg/guest` | Agent protocol, client, server, transports |
 | `pkg/capacity` | Slot table, fail-closed acquire/release |
 | `pkg/image` | OCI pull/cache/verify, clonefile overlay |

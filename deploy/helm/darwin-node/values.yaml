@@ -9,8 +9,10 @@ clusterRole:
 
 # Optional RuntimeClass for macOS pods. Default off: the chart stays
 # RBAC-only unless this is turned on. runtimeClassName darwin-vm then
-# carries the node's static tolerations and nodeSelector. It does not
-# add darwin.node/vm-slot; admission.slotRequest does that.
+# carries the node's static tolerations, including
+# darwin.node/os=macos:NoSchedule, and nodeSelector
+# kubernetes.io/os=darwin. It does not add darwin.node/vm-slot;
+# admission.slotRequest does that.
 runtimeClass:
   enabled: false
   name: darwin-vm

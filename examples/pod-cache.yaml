@@ -45,6 +45,10 @@ spec:
         initialDelaySeconds: 5
         periodSeconds: 10
   tolerations:
+    - key: darwin.node/os
+      operator: Equal
+      value: macos
+      effect: NoSchedule
     - key: darwin.node/macos
       operator: Equal
       value: "true"

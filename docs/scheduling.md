@@ -38,10 +38,27 @@ the sleep. A guest-agent dial retry keeps it, because the VM is running.
 
 These are static. They do not track how many VMs are running.
 
-- `darwin.node/macos=true:NoSchedule`
-- `virtual-kubelet.io/provider=darwin-node:NoSchedule`
+- `darwin.node/os=macos:NoSchedule` on every node, including when
+  `--disable-taint` drops the provider and `darwin.node/macos` taints
+- `darwin.node/macos=true:NoSchedule`, unless `--disable-taint`
+- `virtual-kubelet.io/provider=darwin-node:NoSchedule`, unless
+  `--disable-taint`
 - `darwin.node/nat-only=true:NoSchedule`, unless the process was started
   with `--allow-nat-workloads`
+
+The node label stays `kubernetes.io/os=darwin`. A pod scheduled here
+tolerates the OS taint:
+
+```yaml
+tolerations:
+  - key: darwin.node/os
+    operator: Equal
+    value: macos
+    effect: NoSchedule
+```
+
+Which images and resource sums `CreatePod` accepts are in
+[admission.md](admission.md).
 
 `darwin.node/vm-full` is not published. A node object that still has it
 loses it on the next status update.
@@ -54,7 +71,8 @@ scheduler. The extended resource does.
 
 The Helm chart can install a RuntimeClass named `darwin-vm`
 (`runtimeClass.enabled`, default `false`). Its scheduling block carries
-the static tolerations and `nodeSelector: kubernetes.io/os=darwin`.
+the static tolerations, including `darwin.node/os=macos:NoSchedule`, and
+`nodeSelector: kubernetes.io/os=darwin`.
 `runtimeClass.tolerateNAT` (default `true`) includes the NAT taint.
 The API server's RuntimeClass admission plugin copies that scheduling
 onto a pod that sets `runtimeClassName: darwin-vm`.

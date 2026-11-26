@@ -129,6 +129,47 @@ stops the VM and exits 0.
 `SIGTERM` and a cancelled process context also stop the VM and exit 0.
 A failure to listen exits non-zero, which is what launchd restarts.
 
+## Restart and death
+
+A restarted node-agent re-adopts a live slot through `supervisor.Adopt`.
+Adopt dials the control socket, fences the boot lease, and calls
+`AttachChannels`. The guest descriptor is the one that call just
+received: a fresh Connect passed with `SCM_RIGHTS`. Adopt does not take
+a saved fd.
+
+The session watches dups of the control connection and the guest fd.
+The watch is edge-triggered: epoll with `EPOLLET` on Linux, kqueue with
+`EV_CLEAR` on Darwin. A queued guest byte stays queued for the agent.
+Peer close, including SIGKILL of the supervisor, wakes the wait.
+
+That wake marks the slot `SlotLost`. Status becomes `VMFailed` with
+message `supervisor lost`, within about 2 seconds. The watch does not
+wait for the dead-man switch. The contract test sets that switch to 1
+hour so a poll of the RPC would miss the bound. The operator default
+stays 5 minutes (`--vm-supervisor-deadman`).
+
+`pkg/runtime/supervised` calls Adopt on the first attach, after
+`StartVM` and the lease are written, and again from `Recover`.
+`Recover` does not spawn a supervisor and does not boot another VM. It
+takes a fresh Connect, arms the death watch, and releases the supervisor
+slot exactly once when the message is `supervisor lost`. A later `Stop`
+does not free a slot a new VM has taken.
+
+`--vm-supervisor` stays default `off`. This path is not used while the
+flag is off.
+
+`pkg/engine` still does not call the adapter's `Recover`. Its own
+`Recover` only republishes cache stores and deletes unheld pod
+directories. A restarted node-agent process therefore leaves a live VM
+unadopted. The machine status is `Failed` / `supervisor lost`. The pod
+status the engine writes is still its generic text: reason `VMFailed`,
+message `macOS VM Failed unexpectedly`.
+
+`Connect` during `Start` on real Virtualization.framework is
+hardware-pending. Adopt calls `Connect` immediately. A guest that is
+not listening yet can stall that call. SimVZ registers the agent during
+`Start`, so the Linux tests do not show the stall.
+
 ## Peer check
 
 On accept, the supervisor reads the peer uid. macOS uses
@@ -197,7 +238,9 @@ not been run on Apple hardware in this change:
   `Connect` has no context. If the guest never listens, the call may
   not return; the cancel path closes a connection that arrives later
   and can leave that goroutine waiting. Today's guest dials the host,
-  so `Connect` does not complete until the guest listens.
+  so `Connect` does not complete until the guest listens. Adopt during
+  `Start` calls `Connect` immediately, so that stall is on the first
+  attach as well. This has not been run on a Mac Mini.
 - `Pause` plus `SaveMachineStateToPath`. The save API is macOS 14. On
   macOS 13 the framework returns an error. The minimum system stays
   macOS 13.
@@ -205,11 +248,11 @@ not been run on Apple hardware in this change:
   codesign of the binary. The plist text is checked in CI. launchd
   itself is not.
 
-## Follow-ups that are not in this change
+## Still open
 
-- `pkg/engine` recovery does not call the adapter's `Recover` yet. A
-  restarted agent with the flag on does not adopt a live VM until that
-  wire-up lands. The adapter method and the lease check exist.
+- `pkg/engine` still does not call the adapter's `Recover`. A restarted
+  agent with the flag on leaves a live VM unadopted. See
+  [Restart and death](#restart-and-death).
 - The guest agent still dials the host. `AttachChannels` dials the
   guest. Those meet when the guest listens.
 - The datagram descriptor is handed to the agent and not bridged.
