@@ -162,4 +162,7 @@ func (m *machine) cleanup() {
 	}
 	m.dropFlows()
 	m.q.stop()
+	if m.rt != nil {
+		m.rt.untrack(m)
+	}
 }
