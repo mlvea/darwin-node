@@ -35,6 +35,9 @@ type Runtime struct {
 	mu       sync.Mutex
 	live     int
 	failLeft int
+	// machines are created VMs until cleanup removes them. The lifecycle
+	// fuzzer crashes a guest by name without holding the Machine pointer.
+	machines []*machine
 	seq      atomic.Uint64
 
 	order     string
@@ -100,7 +103,9 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if r == nil {
 		return nil, fmt.Errorf("simvz: nil runtime")
 	}
-	return newMachine(r, spec), nil
+	m := newMachine(r, spec)
+	r.track(m)
+	return m, nil
 }
 
 func (r *Runtime) reserve() error {

@@ -1,0 +1,14 @@
+{"seed":"create-delete-drain","ops":[{"op":"create","policy":"Always"},{"op":"delete"},{"op":"drain"}]}
+{"seed":"create-restart-drain","ops":[{"op":"create","policy":"Always"},{"op":"restart"},{"op":"drain"}]}
+{"seed":"create-two-delete-one","ops":[{"op":"create","policy":"Always"},{"op":"create","slot":1,"policy":"Always"},{"op":"delete"},{"op":"drain"}]}
+{"seed":"delete-absent","ops":[{"op":"delete"},{"op":"drain"}]}
+{"seed":"drain-then-create","ops":[{"op":"create","policy":"Always"},{"op":"drain"},{"op":"create","slot":1,"policy":"Always"}]}
+{"seed":"empty","ops":[]}
+{"seed":"never-and-always","ops":[{"op":"create","policy":"Never"},{"op":"create","slot":1,"policy":"Always"},{"op":"restart"},{"op":"drain"}]}
+{"seed":"never-restart-drain","ops":[{"op":"create","policy":"Never"},{"op":"restart"},{"op":"drain"}]}
+{"seed":"onfailure-delete","ops":[{"op":"create","policy":"OnFailure"},{"op":"delete"},{"op":"drain"}]}
+{"seed":"onfailure-restart-drain","ops":[{"op":"create","policy":"OnFailure"},{"op":"restart"},{"op":"drain"}]}
+{"seed":"refill-slot","ops":[{"op":"create","policy":"Always"},{"op":"delete"},{"op":"create","policy":"Always"},{"op":"drain"}]}
+{"seed":"restart-after-delete","ops":[{"op":"create","policy":"Always"},{"op":"delete"},{"op":"restart"},{"op":"drain"}]}
+{"seed":"restart-idle","ops":[{"op":"restart"},{"op":"drain"}]}
+{"seed":"two-vms-third-drain","ops":[{"op":"create","policy":"Always"},{"op":"create","slot":1,"policy":"Always"},{"op":"create","slot":2,"policy":"Always"},{"op":"drain"}]}

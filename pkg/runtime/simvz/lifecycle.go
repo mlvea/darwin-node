@@ -19,6 +19,9 @@ func (m *machine) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// cleanup drops the machine. A later Start is the same object, so
+	// register it again before boot.
+	m.rt.track(m)
 	if err := m.enterStarting(ctx); err != nil {
 		return err
 	}
