@@ -28,6 +28,7 @@ func TestBarrierNamesMatchContract(t *testing.T) {
 		{BarrierBeforeKVOSaving, vzcontract.BarrierBeforeKVOSaving},
 		{BarrierBeforeKVOResuming, vzcontract.BarrierBeforeKVOResuming},
 		{BarrierBeforeKVORestoring, vzcontract.BarrierBeforeKVORestoring},
+		{BarrierBeforeAcceptWait, vzcontract.BarrierBeforeAcceptWait},
 		{OrderKVOBeforeCompletion, vzcontract.OrderKVOBeforeCompletion},
 		{OrderCompletionBeforeKVO, vzcontract.OrderCompletionBeforeKVO},
 		{OrderJitter, vzcontract.OrderJitter},

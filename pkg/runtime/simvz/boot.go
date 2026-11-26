@@ -55,6 +55,7 @@ func (m *machine) cloneDisk(ctx context.Context) error {
 	m.mu.Lock()
 	m.dir = dir
 	m.disk = dst
+	m.bindGenLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -88,6 +89,7 @@ func (m *machine) openNIC() error {
 	m.mu.Lock()
 	m.hostNIC = host
 	m.guestNIC = guest
+	m.bindGenLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -103,69 +105,22 @@ func (m *machine) armFailResources() error {
 	m.mu.Lock()
 	m.sock = path
 	m.ln = ln
+	m.bindGenLocked()
 	m.mu.Unlock()
 	return nil
 }
 
 func (m *machine) startLife() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gen != nil && m.gen.ctx != nil {
+		m.life = m.gen.ctx
+		m.lifeCancel = m.gen.cancel
+		return m.gen.ctx
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	m.life = ctx
 	m.lifeCancel = cancel
-	m.mu.Unlock()
+	m.bindGenLocked()
 	return ctx
-}
-
-func (m *machine) cancelLife() {
-	m.mu.Lock()
-	cancel := m.lifeCancel
-	m.lifeCancel = nil
-	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-func (m *machine) cleanup() {
-	m.cancelLife()
-	m.mu.Lock()
-	ln := m.ln
-	m.ln = nil
-	host, guestFile := m.hostNIC, m.guestNIC
-	m.hostNIC, m.guestNIC = nil, nil
-	proc := m.proc
-	m.proc = nil
-	sock := m.sock
-	dir := m.dir
-	m.dir = ""
-	m.disk = ""
-	m.agentReady = false
-	m.mu.Unlock()
-	if ln != nil {
-		_ = ln.Close()
-	}
-	if proc != nil {
-		proc.kill()
-	}
-	// After the listener is closed, before Wait. A Start that observed
-	// Stopped can run here. Unarmed barriers return immediately.
-	m.barrier(context.Background(), BarrierBeforeAcceptWait)
-	m.wg.Wait()
-	if host != nil {
-		_ = host.Close()
-	}
-	if guestFile != nil {
-		_ = guestFile.Close()
-	}
-	if sock != "" {
-		_ = os.Remove(sock)
-	}
-	if dir != "" {
-		_ = os.RemoveAll(dir)
-	}
-	m.dropFlows()
-	m.q.stop()
-	if m.rt != nil {
-		m.rt.untrack(m)
-	}
 }

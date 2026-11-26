@@ -38,7 +38,7 @@ func (m *machine) Start(ctx context.Context) error {
 		// Still Starting, so a concurrent Stop is refused and cannot
 		// Wait the accept loop out from under this crash.
 		m.crashGuest()
-		m.wg.Wait()
+		m.waitGen()
 	}
 	if err := m.markRunning(ctx, immediate); err != nil {
 		m.failStart(err)
@@ -68,19 +68,12 @@ func (m *machine) enterStarting(ctx context.Context) error {
 		m.deliverLimit(ctx, err, true)
 		return err
 	}
-	m.mu.Lock()
-	if m.state != from {
-		st := m.state.String()
-		m.mu.Unlock()
+	release, err := m.beginBoot(from, vzStarting, "start")
+	if err != nil {
 		m.rt.release()
-		err := &StateError{Op: "start", State: st}
 		m.recordCompletion(err)
 		return err
 	}
-	m.held = true
-	m.bootErr = nil
-	release := m.commitLocked(vzStarting)
-	m.mu.Unlock()
 	m.releaseSlot(release)
 	m.barrier(ctx, BarrierBeforeKVOStarting)
 	return nil
@@ -140,9 +133,13 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 		return fmt.Errorf("simvz: nil machine")
 	}
 	m.mustOutside()
+	var stopping *generation
 	m.mu.Lock()
 	switch m.state {
 	case vzRunning, vzPaused:
+		// Capture the boot before Stopped is published. A Start that
+		// observes Stopped installs a different generation.
+		stopping = m.gen
 		release := m.commitLocked(vzStopping)
 		m.mu.Unlock()
 		m.releaseSlot(release)
@@ -179,7 +176,7 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 			}
 		}
 	})
-	m.cleanup()
+	m.cleanupGen(ctx, stopping)
 	return nil
 }
 
@@ -347,19 +344,12 @@ func (m *machine) Restore(ctx context.Context, path string) error {
 		m.deliverLimit(ctx, err, false)
 		return err
 	}
-	m.mu.Lock()
-	if m.state != from {
-		st := m.state.String()
-		m.mu.Unlock()
+	release, err := m.beginBoot(from, vzRestoring, "restore")
+	if err != nil {
 		m.rt.release()
-		err = &StateError{Op: "restore", State: st}
 		m.recordCompletion(err)
 		return err
 	}
-	m.held = true
-	m.bootErr = nil
-	release := m.commitLocked(vzRestoring)
-	m.mu.Unlock()
 	m.releaseSlot(release)
 	m.barrier(ctx, BarrierBeforeKVORestoring)
 	if err := m.pauseTransition(ctx); err != nil {

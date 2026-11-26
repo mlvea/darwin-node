@@ -162,8 +162,11 @@ type machine struct {
 	proc       *guestProc
 	life       context.Context
 	lifeCancel context.CancelFunc
+	// gen is the boot cleanup must not confuse with a later Start.
+	// finishMu serializes claiming one with the idle finalizer.
+	gen      *generation
+	finishMu sync.Mutex
 
-	wg           sync.WaitGroup
 	events       []traceEvent
 	agentReady   bool
 	flow         *flowGroup

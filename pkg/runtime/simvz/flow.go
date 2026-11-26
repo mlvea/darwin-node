@@ -170,11 +170,18 @@ func (m *machine) dropFlows() {
 		return
 	}
 	m.mu.Lock()
-	g := m.flow
-	m.flow = newFlowGroup()
+	old := m.flow
+	ng := newFlowGroup()
+	m.flow = ng
+	// Keep the current generation's pointer aligned. A generation that
+	// Stop already captured keeps the flow it had; this writes only
+	// the boot that is current now.
+	if m.gen != nil {
+		m.gen.flow = ng
+	}
 	m.mu.Unlock()
-	if g != nil {
-		g.close()
+	if old != nil {
+		old.close()
 	}
 }
 
