@@ -2,6 +2,7 @@ package supervised
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -19,12 +20,16 @@ type machine struct {
 	spec   types.VMSpec
 	slot   int
 	client *supervisor.Client
+	sess   *supervisor.Session
 	netFD  *os.File
 
-	mu       sync.Mutex
-	stopped  bool
-	hbCancel context.CancelFunc
-	status   types.VMStatus
+	mu          sync.Mutex
+	stopped     bool
+	lostNoted   bool
+	lostOnce    sync.Once
+	releaseOnce sync.Once
+	hbCancel    context.CancelFunc
+	status      types.VMStatus
 }
 
 func (m *machine) ID() types.MachineID { return m.id }
@@ -63,9 +68,27 @@ func (m *machine) Start(ctx context.Context) error {
 		_ = m.client.Close()
 		return err
 	}
+	pod := supervisor.PodPresence{
+		Namespace: insp.Namespace,
+		Name:      insp.PodName,
+		UID:       insp.PodUID,
+		Found:     true,
+	}
+	if err := m.adoptLive(ctx, lease, pod); err != nil {
+		_ = m.client.StopVM(context.Background(), 0)
+		_ = m.client.Close()
+		_ = supervisor.RemoveLease(m.rt.RunDir, m.slot)
+		return err
+	}
 	m.mu.Lock()
-	m.status = statusFrom(insp)
+	lost := m.lostNoted
+	if !lost {
+		m.status = statusFrom(insp)
+	}
 	m.mu.Unlock()
+	if lost {
+		return fmt.Errorf("supervisor lost")
+	}
 	m.startHeartbeat()
 	return nil
 }
@@ -79,6 +102,8 @@ func (m *machine) Stop(ctx context.Context, grace time.Duration) error {
 	m.stopped = true
 	cancel := m.hbCancel
 	netFD := m.netFD
+	client := m.client
+	sess := m.sess
 	m.netFD = nil
 	m.mu.Unlock()
 	if cancel != nil {
@@ -88,16 +113,28 @@ func (m *machine) Stop(ctx context.Context, grace time.Duration) error {
 		_ = netFD.Close()
 	}
 	var err error
-	if m.client != nil {
-		err = m.client.StopVM(ctx, grace)
-		_ = m.client.Close()
+	// Start keeps its own control connection. Recover's control
+	// connection is a second dial. The session closes only the
+	// connection Adopt opened.
+	sessionClient := sess != nil && client == sess.Client()
+	if client != nil {
+		err = client.StopVM(ctx, grace)
 	}
-	if m.rt != nil {
-		_ = supervisor.RemoveLease(m.rt.RunDir, m.slot)
-		m.rt.free(m.slot)
+	if sess != nil {
+		if cerr := sess.Close(); err == nil {
+			err = cerr
+		}
 	}
+	if client != nil && !sessionClient {
+		if cerr := client.Close(); err == nil {
+			err = cerr
+		}
+	}
+	m.finishRelease()
 	m.mu.Lock()
-	m.status.State = types.VMStopped
+	if !m.lostNoted {
+		m.status.State = types.VMStopped
+	}
 	m.mu.Unlock()
 	return err
 }
@@ -109,21 +146,35 @@ func (m *machine) dropConn() {
 	m.mu.Lock()
 	m.stopped = true
 	cancel := m.hbCancel
+	client := m.client
+	sess := m.sess
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	if m.client != nil {
-		_ = m.client.Close()
+	if client != nil && (sess == nil || client != sess.Client()) {
+		_ = client.Close()
+	}
+	if sess != nil {
+		_ = sess.Close()
 	}
 }
 
 func (m *machine) Status() types.VMStatus {
 	m.mu.Lock()
 	c := m.client
+	sess := m.sess
 	stopped := m.stopped
+	lost := m.lostNoted
 	cached := m.status
 	m.mu.Unlock()
+	if !stopped && (lost || (sess != nil && sess.State() == supervisor.SlotLost)) {
+		m.noteLost()
+		m.mu.Lock()
+		st := m.status
+		m.mu.Unlock()
+		return st
+	}
 	if c == nil || stopped {
 		return cached
 	}
@@ -131,17 +182,53 @@ func (m *machine) Status() types.VMStatus {
 	defer cancel()
 	insp, err := c.InspectVM(ctx)
 	if err != nil {
+		if sess != nil && sess.State() == supervisor.SlotLost {
+			m.noteLost()
+			m.mu.Lock()
+			st := m.status
+			m.mu.Unlock()
+			return st
+		}
 		return cached
 	}
 	st := statusFrom(insp)
 	m.mu.Lock()
-	m.status = st
+	if m.lostNoted {
+		st = m.status
+	} else {
+		m.status = st
+	}
 	m.mu.Unlock()
 	return st
 }
 
 func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
-	netFD, agentFD, err := m.client.AttachChannels(ctx)
+	m.mu.Lock()
+	sess := m.sess
+	client := m.client
+	token := m.spec.AgentToken
+	ver := ""
+	if m.rt != nil {
+		ver = m.rt.version()
+	}
+	m.mu.Unlock()
+	if sess != nil {
+		src := sess.Guest()
+		dup, err := dupFD(src)
+		if err != nil {
+			return nil, err
+		}
+		cli, err := guest.Dial(ctx, dup, token, ver)
+		if err != nil {
+			_ = dup.Close()
+			return nil, err
+		}
+		return cli, nil
+	}
+	if client == nil {
+		return nil, fmt.Errorf("supervisor connection is closed")
+	}
+	netFD, agentFD, err := client.AttachChannels(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +237,6 @@ func (m *machine) DialAgent(ctx context.Context) (*guest.Client, error) {
 		_ = m.netFD.Close()
 	}
 	m.netFD = netFD
-	token := m.spec.AgentToken
-	ver := m.rt.version()
 	m.mu.Unlock()
 	return guest.Dial(ctx, agentFD, token, ver)
 }
@@ -180,8 +265,14 @@ func (m *machine) startHeartbeat() {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
+				m.mu.Lock()
+				c := m.client
+				m.mu.Unlock()
+				if c == nil {
+					continue
+				}
 				cctx, ccancel := context.WithTimeout(context.Background(), interval)
-				_ = m.client.Heartbeat(cctx)
+				_ = c.Heartbeat(cctx)
 				ccancel()
 			}
 		}

@@ -20,6 +20,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(envSupervisedChild) == "1" {
+		if err := runSupervisedChild(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	goleak.VerifyTestMain(m)
 }
 

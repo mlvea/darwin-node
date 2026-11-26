@@ -50,8 +50,12 @@ type Session struct {
 	closed bool
 
 	lost chan struct{}
+	done chan struct{}
 	once sync.Once
-	wg   sync.WaitGroup
+	// doneOnce closes done on loss and on Close. Waiters must leave
+	// either way, or a voluntary close leaks the wait goroutine.
+	doneOnce sync.Once
+	wg       sync.WaitGroup
 
 	ctrlFD  int
 	guestFD int
@@ -100,6 +104,7 @@ func Adopt(ctx context.Context, req AdoptRequest) (*Session, error) {
 		status:  st,
 		state:   SlotRunning,
 		lost:    make(chan struct{}),
+		done:    make(chan struct{}),
 		ctrlFD:  -1,
 		guestFD: -1,
 		wakeR:   -1,
@@ -152,6 +157,34 @@ func (s *Session) Status() types.VMStatus {
 	return st
 }
 
+// Client is the control connection from this adopt. Close owns it.
+// The caller uses it for inspect, heartbeat, and stop, and must not
+// close it.
+func (s *Session) Client() *Client {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.client
+}
+
+// WaitDone blocks until the slot is lost or the session is closed.
+// The state after the wait says which one happened.
+func (s *Session) WaitDone(ctx context.Context) SlotState {
+	if s == nil {
+		return SlotClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-s.done:
+	case <-ctx.Done():
+	}
+	return s.State()
+}
+
 // Guest is the connected guest fd from this adopt. The caller must not
 // close it; Close does.
 func (s *Session) Guest() *os.File {
@@ -196,6 +229,7 @@ func (s *Session) Close() error {
 		s.state = SlotClosed
 	}
 	s.mu.Unlock()
+	s.signalDone()
 	s.wake()
 	s.wg.Wait()
 	return s.closeFDs()
@@ -260,6 +294,15 @@ func (s *Session) markLost() {
 		}
 		s.mu.Unlock()
 		close(s.lost)
+		s.signalDone()
+	})
+}
+
+func (s *Session) signalDone() {
+	s.doneOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
 	})
 }
 
