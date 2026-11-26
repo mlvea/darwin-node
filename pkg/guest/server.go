@@ -34,6 +34,10 @@ type Handler struct {
 	HandshakeTimeout time.Duration
 	// IdleTimeout is reset on every successful frame read after handshake (default 30s).
 	IdleTimeout time.Duration
+	// clock drives IdleTimeout. Nil uses the wall clock. Tests set a manual
+	// clock so the window can elapse without sleeping. Not part of the
+	// agent protocol.
+	clock idleClock
 	// WriteTimeout is applied per frame write (default 30s).
 	WriteTimeout time.Duration
 
@@ -243,21 +247,23 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 
 	setConnDeadline(rw, h.handshakeTimeout())
 
-	// Idle watchdog instead of per-read deadlines: arming a deadline before
+	// Idle deadline instead of per-read deadlines: arming a deadline before
 	// every read raced stream accounting (an open shell is silent by
 	// design). The connection closes only when no frame has arrived for the
-	// idle window AND no interactive stream is running.
-	var lastRead atomic.Int64
-	lastRead.Store(time.Now().UnixNano())
+	// idle window AND no interactive stream is running. The watchdog
+	// goroutine only waits for shutdown; the deadline is a timer, so the
+	// goroutine does not poll.
+	track := newIdleTrack(h, rw, conn)
 	wdone := make(chan struct{})
-	defer close(wdone)
 	// Join the watchdog before Serve returns. close(wdone) is deferred
 	// ahead of wg.Wait, so the goroutine observes shutdown and Done
-	// before Wait unblocks.
+	// before Wait unblocks. stop runs after that signal.
+	defer track.stop()
+	defer close(wdone)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		h.idleWatchdog(ctx, rw, conn, &lastRead, wdone)
+		h.idleWatchdog(ctx, rw, wdone)
 	}()
 
 	for {
@@ -271,10 +277,11 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			}
 			return err
 		}
-		// Any accepted frame is client activity. The idle watchdog used to
-		// keep the connect-time stamp, so a busy non-interactive session
-		// (probes, health, logs) was closed one IdleTimeout after dial.
-		lastRead.Store(time.Now().UnixNano())
+		// Any accepted frame is client activity. Reset the idle deadline
+		// from this read. The old watchdog kept the connect-time stamp, so
+		// a busy non-interactive session (probes, health, logs) was closed
+		// one IdleTimeout after dial.
+		track.touch()
 		// Client→agent stream frames (stdin, tty resize) route to the
 		// goroutine serving that envelope ID. Unknown IDs are dropped.
 		if env.Kind == KindStream {
@@ -336,46 +343,6 @@ func Serve(ctx context.Context, rw io.ReadWriteCloser, h Handler) error {
 			defer inflight.Release()
 			_ = h.writeDispatch(ctx, fc, &handshook, env, conn, interactive)
 		}(env, interactiveReq)
-	}
-}
-
-// idleWatchdog closes rw when the connection has seen no frames for the
-// idle window while no interactive stream is running. It returns when ctx
-// or done fires.
-func (h *Handler) idleWatchdog(ctx context.Context, rw io.ReadWriteCloser, conn *connState, lastRead *atomic.Int64, done <-chan struct{}) {
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	var shut <-chan struct{}
-	if h.live != nil {
-		shut = h.live.shut
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			// Unblock Serve's ReadFrame; cancelling ctx alone left the
-			// connection parked until IdleTimeout.
-			_ = rw.Close()
-			return
-		case <-done:
-			return
-		case <-shut:
-			// Handler.Close. The host may still hold the client, so ctx
-			// stays active and the idle window has not elapsed.
-			_ = rw.Close()
-			return
-		case <-ticker.C:
-			if conn.liveInteractive.Load() > 0 {
-				continue
-			}
-			idle := h.idleTimeout()
-			if idle <= 0 {
-				continue
-			}
-			if time.Since(time.Unix(0, lastRead.Load())) > idle {
-				_ = rw.Close()
-				return
-			}
-		}
 	}
 }
 
