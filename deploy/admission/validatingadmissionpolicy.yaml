@@ -1,0 +1,153 @@
+# Cluster-side mirror of the darwin-node pod profile.
+#
+# The provider CreatePod check is authoritative. This policy only sees pods
+# that already name the darwin RuntimeClass, select kubernetes.io/os=darwin
+# (or beta.kubernetes.io/os), or require that OS in node affinity. A pod
+# that reaches the node without those fields is still checked by the provider.
+#
+# runtimeClassName is darwin-vm, the Helm chart default. A cluster that
+# renames the RuntimeClass has to edit the match condition to match.
+#
+# The node hostPath allowlist is not expressed here. hostPath remains a
+# supported volume type, and the node still applies --allowed-host-paths.
+# An empty allowlist denies every hostPath. The host root is never allowed.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: darwin-node-pod-profile
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: darwin-runtime-or-node
+      expression: |
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'darwin-vm')
+        || (has(object.spec.nodeSelector) && (
+          ('kubernetes.io/os' in object.spec.nodeSelector && object.spec.nodeSelector['kubernetes.io/os'] == 'darwin')
+          || ('beta.kubernetes.io/os' in object.spec.nodeSelector && object.spec.nodeSelector['beta.kubernetes.io/os'] == 'darwin')))
+        || (has(object.spec.affinity) && has(object.spec.affinity.nodeAffinity)
+          && has(object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution)
+          && object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms.exists(term,
+            (has(term.matchExpressions) && term.matchExpressions.exists(req, req.key in ['kubernetes.io/os', 'beta.kubernetes.io/os'] && req.operator == 'In' && has(req.values) && 'darwin' in req.values))
+            || (has(term.matchFields) && term.matchFields.exists(req, req.key in ['kubernetes.io/os', 'beta.kubernetes.io/os'] && req.operator == 'In' && has(req.values) && 'darwin' in req.values))))
+  variables:
+    - name: containers
+      expression: "has(object.spec.containers) ? object.spec.containers : []"
+    - name: initContainers
+      expression: "has(object.spec.initContainers) ? object.spec.initContainers : []"
+    - name: ephemeralContainers
+      expression: "has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : []"
+  validations:
+    - expression: |
+        !(has(object.spec.hostNetwork) && object.spec.hostNetwork)
+      message: "UnsupportedPodField: spec.hostNetwork must be false"
+      reason: Invalid
+    - expression: |
+        !(has(object.spec.hostPID) && object.spec.hostPID)
+      message: "UnsupportedPodField: spec.hostPID must be false"
+      reason: Invalid
+    - expression: |
+        !(has(object.spec.hostIPC) && object.spec.hostIPC)
+      message: "UnsupportedPodField: spec.hostIPC must be false"
+      reason: Invalid
+    - expression: |
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)
+        && variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)
+        && variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)
+      message: "UnsupportedPodField: securityContext.privileged must be false"
+      reason: Invalid
+    - expression: |
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+        && variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+        && variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+      message: "UnsupportedPodField: securityContext.capabilities.add is not supported"
+      reason: Invalid
+    - expression: |
+        (!has(object.spec.securityContext) || !has(object.spec.securityContext.seccompProfile) || object.spec.securityContext.seccompProfile.type == 'RuntimeDefault')
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault')
+        && variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault')
+        && variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault')
+      message: "UnsupportedPodField: seccompProfile must be unset or RuntimeDefault"
+      reason: Invalid
+    - expression: |
+        (!has(object.spec.securityContext) || !has(object.spec.securityContext.appArmorProfile))
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile))
+        && variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile))
+        && variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile))
+      message: "UnsupportedPodField: appArmorProfile is not supported"
+      reason: Invalid
+    - expression: |
+        (!has(object.spec.securityContext) || !has(object.spec.securityContext.seLinuxOptions))
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.seLinuxOptions))
+        && variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.seLinuxOptions))
+        && variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.seLinuxOptions))
+      message: "UnsupportedPodField: seLinuxOptions is not supported"
+      reason: Invalid
+    - expression: |
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount != 'Unmasked')
+        && variables.initContainers.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount != 'Unmasked')
+        && variables.ephemeralContainers.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount != 'Unmasked')
+      message: "UnsupportedPodField: securityContext.procMount must not be Unmasked"
+      reason: Invalid
+    - expression: |
+        variables.containers.all(c, !has(c.volumeDevices) || size(c.volumeDevices) == 0)
+        && variables.initContainers.all(c, !has(c.volumeDevices) || size(c.volumeDevices) == 0)
+        && variables.ephemeralContainers.all(c, !has(c.volumeDevices) || size(c.volumeDevices) == 0)
+      message: "UnsupportedVolume: volumeDevices is not supported"
+      reason: Invalid
+    - expression: |
+        !has(object.spec.volumes) || object.spec.volumes.all(v,
+          (has(v.hostPath) || has(v.emptyDir) || has(v.secret) || has(v.configMap) || has(v.projected) || has(v.downwardAPI))
+          && !has(v.gcePersistentDisk)
+          && !has(v.awsElasticBlockStore)
+          && !has(v.gitRepo)
+          && !has(v.nfs)
+          && !has(v.iscsi)
+          && !has(v.glusterfs)
+          && !has(v.persistentVolumeClaim)
+          && !has(v.rbd)
+          && !has(v.flexVolume)
+          && !has(v.cinder)
+          && !has(v.cephfs)
+          && !has(v.flocker)
+          && !has(v.fc)
+          && !has(v.azureFile)
+          && !has(v.vsphereVolume)
+          && !has(v.quobyte)
+          && !has(v.azureDisk)
+          && !has(v.photonPersistentDisk)
+          && !has(v.portworxVolume)
+          && !has(v.scaleIO)
+          && !has(v.storageos)
+          && !has(v.csi)
+          && !has(v.ephemeral)
+          && !has(v.image))
+      message: "UnsupportedVolume: volume source must be emptyDir, secret, configMap, projected, downwardAPI, or hostPath"
+      reason: Invalid
+    - expression: |
+        !has(object.spec.volumes) || object.spec.volumes.all(v,
+          has(v.projected) ? (
+            !has(v.projected.sources) || v.projected.sources.all(s,
+              (has(s.serviceAccountToken) || has(s.secret) || has(s.configMap) || has(s.downwardAPI))
+              && !has(s.clusterTrustBundle)
+              && !has(s.podCertificate))) : true)
+      message: "UnsupportedVolume: projected sources must be serviceAccountToken, secret, configMap, or downwardAPI"
+      reason: Invalid
+    - expression: |
+        !has(object.spec.restartPolicy) || object.spec.restartPolicy == 'Never' || object.spec.restartPolicy == 'OnFailure' || object.spec.restartPolicy == 'Always'
+      message: "UnsupportedPodField: spec.restartPolicy must be Never, OnFailure, or Always"
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: darwin-node-pod-profile
+spec:
+  policyName: darwin-node-pod-profile
+  validationActions:
+    - Deny
