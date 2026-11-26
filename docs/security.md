@@ -208,7 +208,11 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
 ## Sidecars
 
 Linux sidecars and init containers run in host Docker. The VM container
-is not subject to these checks.
+is not subject to these checks. CPU and memory requests of init
+containers and sidecars are charged to the one VM at admission. Those
+processes still start here. The VM boots at container 0's size, default
+2 vCPU and 4 GiB, which is not the admission sum. See
+[admission.md](admission.md).
 
 - Each pod gets its own bridge network (`darwin-node-<uid>`). Containers
   in that pod share it. The bridge is not `--internal`: the daemon's
@@ -318,6 +322,18 @@ is not subject to these checks.
   are not renamed onto the new key. The next start pulls again.
 - Uncompressed sha256 is verified before a VM is started from cache.
 - We do not run untrusted host code from the image; we boot it as a VM.
+- `CreatePod` decides that container 0 is a macOS disk by repository
+  name, before any pull. The last component must be `macos`, `macosvm`,
+  `macosvz`, or `darwin-node`, or start with `macos-`, `macosvm-`,
+  `macosvz-`, or `darwin-node-`. A custom name needs annotation
+  `darwin.node/disk-image: "true"`. That annotation accepts any
+  parseable registry reference, including a Docker Hub library image.
+  It does not bypass the OS checks. Admission does not pull.
+- The pull identifies the boot disk by media type
+  `application/vnd.darwin-node.disk.v1` (Agoda
+  `application/vnd.agoda.macosvz.disk.image.v1` is accepted on read) or
+  by the layer title `disk.img`. A pull that does not materialize
+  `disk.img` fails. The name check above is not that media-type check.
 
 ## Projected service account tokens
 
@@ -385,8 +401,12 @@ boundary for the slot. The full model is
 - The datagram descriptor from `AttachChannels` is handed to the agent
   and is not bridged to host NAT. A guest booted with the flag on has
   no host network until that bridge exists.
-- `pkg/engine` does not call the adapter's `Recover`. A restarted agent
-  leaves a live supervisor VM unadopted.
+- The adapter calls `supervisor.Adopt` on first attach and on `Recover`
+  (a fresh Connect, then the death watch). The slot is released once
+  on `supervisor lost`. `pkg/engine` does not call that `Recover`. A
+  restarted agent leaves a live supervisor VM unadopted. The machine
+  status is `Failed` / `supervisor lost`. The pod text is still
+  `macOS VM Failed unexpectedly`.
 
 ## What we will not do
 

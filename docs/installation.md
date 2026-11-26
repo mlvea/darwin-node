@@ -197,10 +197,16 @@ those slot logs should rotate.
 These are the operator-visible gaps. The feature write-up records the
 same list.
 
-- `pkg/engine` recovery does not call the adapter's `Recover`. A
-  restarted agent with the flag on leaves a live VM unadopted. The
-  adapter method and the lease check exist and are tested. Startup still
-  deletes unheld pod directories.
+- The supervised adapter adopts on first attach and on `Recover`
+  through `supervisor.Adopt` (a fresh Connect over `SCM_RIGHTS`).
+  `pkg/engine` still does not call that `Recover`, so a restarted
+  agent with the flag on leaves a live VM unadopted. Startup still
+  deletes unheld pod directories. Supervisor death is `SlotLost` /
+  `VMFailed` `supervisor lost` within about 2 seconds and does not wait
+  for the dead-man switch. The pod text stays the engine's
+  `macOS VM Failed unexpectedly`. `Connect` during `Start` on real
+  Virtualization.framework is hardware-pending. See
+  [vm-supervisor.md](vm-supervisor.md).
 - The guest agent still dials the host. `AttachChannels` dials the
   guest. Those meet when the guest listens.
 - The datagram descriptor is handed to the agent and is not bridged to
@@ -360,7 +366,7 @@ These are registered in `buildCommand` and are not read from the environment. `-
 | Flag | Default | Meaning |
 |---|---|---|
 | `--provider-id` | empty | Provider ID reported to the API server |
-| `--disable-taint` | `false` | Do not taint the node |
+| `--disable-taint` | `false` | Drop `virtual-kubelet.io/provider` and `darwin.node/macos`. `darwin.node/os=macos:NoSchedule` stays on the node |
 | `--log-level` | `info` | `debug`, `info`, `warn`, or `error`. The stock plist passes this flag |
 | `--standalone` | `false` | Run the engine without joining a cluster |
 | `--startup-timeout` | `0` | Passed to virtual-kubelet `Node.WaitReady`. `0` adds no deadline: the call waits until the node is Ready, the controller exits, or the process context ends |
@@ -388,10 +394,15 @@ The agent itself still runs on the Mac via launchd, not as a Linux pod.
 The chart does not start VMs.
 
 `runtimeClass.enabled` (default `false`) installs a RuntimeClass named
-`darwin-vm`. Its scheduling block carries the static tolerations and
-`kubernetes.io/os=darwin`. `admission.slotRequest` (default `false`,
+`darwin-vm`. Its scheduling block carries the static tolerations,
+including `darwin.node/os=macos:NoSchedule`, and
+`kubernetes.io/os=darwin`. The node publishes that taint on every
+spec, including with `--disable-taint`. A pod that does not use the
+RuntimeClass needs the same toleration or it will not schedule.
+`admission.slotRequest` (default `false`,
 Kubernetes 1.32+) adds `darwin.node/vm-slot: "1"` on container 0 when
-that runtime class is set. See [scheduling](scheduling.md).
+that runtime class is set. Image and budget rules are in
+[admission.md](admission.md). See [scheduling](scheduling.md).
 
 The default `rbac.identity` is `node`. Install the chart for the notes,
 and authenticate each Mac as `system:node:<nodename>` in group

@@ -92,7 +92,9 @@ flowchart TD
 - **Process boundary.** The VM is created in the agent process.
   `--vm-supervisor=on` (default `off`) moves it into the same binary
   started as `--role=supervisor --slot=N`, so an agent crash can leave
-  that VM running. The engine does not adopt it after a restart yet.
+  that VM running. The supervised adapter calls `supervisor.Adopt` on
+  first attach and on its own `Recover`. The engine does not call that
+  `Recover`, so a restarted agent still leaves the VM unadopted.
   See [docs/vm-supervisor.md](docs/vm-supervisor.md).
 - **Capacity.** Each VM takes one `darwin.node/vm-slot`. The node advertises
   that extended resource at the configured maximum (1 or 2) and fails closed
@@ -100,7 +102,11 @@ flowchart TD
   every slot is held and no warm VM can be reclaimed, the next pod is
   **rejected** with `VMCapacityExhausted`. It is not queued. The node does
   not publish `darwin.node/vm-full`; a stale taint is removed on the next
-  status update.
+  status update. The node label stays `kubernetes.io/os=darwin`. Every
+  node also publishes `darwin.node/os=macos:NoSchedule`, including with
+  `--disable-taint`. A pod needs that toleration. See
+  [docs/scheduling.md](docs/scheduling.md) and
+  [docs/admission.md](docs/admission.md).
 - **Guest agent.** `darwin-guest-agent` is baked into every image and runs
   under launchd. Exec (stdin, PTY, resize), logs, probes, metrics and shutdown
   all go to it over **vsock**. There is no TCP path to the agent. SSH is an
@@ -246,20 +252,23 @@ helm install darwin-node deploy/helm/darwin-node -n darwin-node --create-namespa
 |---|---|---|
 | `rbac.identity` | `node` | `node`: use a `system:node:<nodename>` credential, so the Node authorizer and NodeRestriction apply (preferred). `serviceaccount`: bind a ServiceAccount and list every allowed namespace in `rbac.namespaces`. |
 | `rbac.namespaces` | `[]` | Only used with `identity: serviceaccount` |
-| `runtimeClass.enabled` | `false` | Installs RuntimeClass `darwin-vm`, which carries the node's static tolerations and `kubernetes.io/os=darwin` |
+| `runtimeClass.enabled` | `false` | Installs RuntimeClass `darwin-vm`, which carries the node's static tolerations, including `darwin.node/os=macos:NoSchedule`, and `kubernetes.io/os=darwin` |
 | `admission.slotRequest` | `false` | MutatingAdmissionPolicy (Kubernetes 1.32+) that sets `darwin.node/vm-slot: "1"` on container 0 |
 
 The chart is version **0.3.0**.
 
 ## Scheduling a macOS pod
 
-The node publishes these taints. A pod must tolerate them, or you can turn them
-off with `--disable-taint` / `--allow-nat-workloads`:
+The node publishes these taints. A pod must tolerate the ones that are on.
+`--disable-taint` drops the provider and `darwin.node/macos` taints.
+`--allow-nat-workloads` drops the NAT taint. Neither drops
+`darwin.node/os`. The node label stays `kubernetes.io/os=darwin`.
 
 | Taint | When |
 |---|---|
-| `virtual-kubelet.io/provider=darwin-node:NoSchedule` | Always (unless `--disable-taint`) |
-| `darwin.node/macos=true:NoSchedule` | Always (unless `--disable-taint`) |
+| `darwin.node/os=macos:NoSchedule` | Always, including with `--disable-taint` |
+| `virtual-kubelet.io/provider=darwin-node:NoSchedule` | Unless `--disable-taint` |
+| `darwin.node/macos=true:NoSchedule` | Unless `--disable-taint` |
 | `darwin.node/nat-only=true:NoSchedule` | NAT mode without `--allow-nat-workloads` |
 
 `darwin.node/vm-full` is not published. Capacity is the extended resource
@@ -280,6 +289,7 @@ spec:
   nodeSelector:
     kubernetes.io/os: darwin
   tolerations:
+    - {key: darwin.node/os,             operator: Equal, value: macos,          effect: NoSchedule}
     - {key: darwin.node/macos,           operator: Equal, value: "true",        effect: NoSchedule}
     - {key: virtual-kubelet.io/provider, operator: Equal, value: darwin-node,   effect: NoSchedule}
     - {key: darwin.node/nat-only,        operator: Equal, value: "true",        effect: NoSchedule}
@@ -360,7 +370,7 @@ have no environment variable.
 | `--network-mode` | `DARWIN_NODE_NETWORK_MODE` | `nat` | `nat` or `bridged`. `disabled` passes validation and the VM still gets a NAT device unless the mode is `bridged` with an interface |
 | `--bridge-interface` | `DARWIN_NODE_BRIDGE_INTERFACE` (or `VZ_BRIDGE_INTERFACE` when the `DARWIN_NODE_` variable is empty) | empty | Host interface; required for bridged mode. Setting it while the mode is `nat` selects bridged |
 | `--allow-nat-workloads` | `DARWIN_NODE_ALLOW_NAT_WORKLOADS` | `false` | Don't apply the `nat-only` taint |
-| `--disable-taint` | – | `false` | Don't taint the node at all |
+| `--disable-taint` | – | `false` | Drop `virtual-kubelet.io/provider` and `darwin.node/macos`. `darwin.node/os=macos:NoSchedule` stays |
 | `--cache-dir` | `DARWIN_NODE_CACHE_DIR` | `~/Library/Caches/io.darwin-node.node` | Image and overlay cache |
 | `--cache-writers` | `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Namespaces or `namespace/serviceaccount` allowed to write named caches back after exit 0. The flag wins when both are set |
 | `--allowed-host-paths` | `DARWIN_NODE_ALLOWED_HOST_PATHS` | empty (deny all) | hostPath prefixes guests may use |
@@ -382,11 +392,13 @@ have no environment variable.
 | `--metrics-address` | `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus `/metrics`. `off`, `disabled`, `-`, or empty disables it. An unset variable keeps the default |
 
 Per-VM supervisor. Default `off` leaves today's in-process VMs in place.
-The control protocol, the gaps (no engine reattach yet, no host NAT
-bridge, no serial console on the supervised machine), and the
-hardware-pending launchd and Virtualization.framework behaviour are in
-[docs/vm-supervisor.md](docs/vm-supervisor.md). The socket path limit is
-in [docs/installation.md](docs/installation.md).
+The control protocol, `supervisor.Adopt`, and the gaps (the engine still
+does not call the adapter's `Recover`, no host NAT bridge, no serial
+console on the supervised machine) are in
+[docs/vm-supervisor.md](docs/vm-supervisor.md). Launchd and
+Virtualization.framework behaviour, including `Connect` during `Start`,
+are hardware-pending. The socket path limit is in
+[docs/installation.md](docs/installation.md).
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
@@ -507,7 +519,8 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
 - **Per-VM supervisor** is off by default. With `--vm-supervisor=on`, the
   run directory (mode `0700`) and a same-uid check on the Unix socket
   (`LOCAL_PEERCRED` on macOS, `SO_PEERCRED` on Linux) are the local trust
-  boundary. The supervisor does not parse the guest protocol. Kubelet
+  boundary. The supervisor does not parse the guest protocol. The adapter
+  calls `supervisor.Adopt` on first attach and on `Recover`. Kubelet
   TLS, the virtualization entitlement, and the guest handshake stay as
   they are with the flag off.
 
@@ -545,7 +558,8 @@ matter most:
   the listeners and every live splice. One side ending half-closes the
   other; both close after 5s. A dial to the guest gives up after 5s.
   The caps are 256 connections per pod and 512 per node. There is no flag.
-- **Per-VM supervisor is off, and turning it on does not yet preserve a pod across an agent restart.** The supervisor process can keep the VM. `pkg/engine` does not call the adapter's `Recover`, so the new agent leaves that VM unadopted. A guest booted with the flag on has no host network until the file-handle NIC is bridged. Real launchd and Virtualization.framework behaviour is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+- **Per-VM supervisor is off, and turning it on does not yet preserve a pod across an agent restart.** The supervisor process can keep the VM, and the adapter can re-adopt it through `supervisor.Adopt`. `pkg/engine` does not call the adapter's `Recover`, so the new agent leaves that VM unadopted. A lost supervisor shows up on the pod as `macOS VM Failed unexpectedly`. A guest booted with the flag on has no host network until the file-handle NIC is bridged. Real launchd and Virtualization.framework behaviour, including `Connect` during `Start`, is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+- **macOS pods only.** The node always publishes `darwin.node/os=macos:NoSchedule`. Container 0 has to use a conventional disk-image repository name, or the pod sets `darwin.node/disk-image: "true"`. Init and sidecar CPU and memory requests count against that one VM, and those processes still start on the host. The VM still boots at container 0's size (default 2 vCPU / 4 GiB). See [docs/admission.md](docs/admission.md).
 - **No real hardware run yet.** See the status table at the top.
 
 ## Hardware validation
@@ -628,6 +642,7 @@ Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md
 | [docs/simvz.md](docs/simvz.md) | Linux stand-in for the VM runtime. It is not selected by `--runtime` |
 | [docs/code-layout.md](docs/code-layout.md) | Where a new file goes, so `engine.go`, `fake.go`, `config.go`, and `main.go` stay the entry points |
 | [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
+| [docs/admission.md](docs/admission.md) | macOS-only taint, disk-image name check, one-VM CPU and memory budget |
 | [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle and adoption rules |
 | [docs/cache-volumes.md](docs/cache-volumes.md) | Cache annotations and snapshot store |
 | [docs/delta-images.md](docs/delta-images.md) | Delta format and apply algorithm |

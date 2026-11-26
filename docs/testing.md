@@ -22,6 +22,12 @@ make test-short
 - Per-VM supervisor control socket on Linux, with the fake runtime over
   real Unix sockets (see below). This does not boot launchd or
   Virtualization.framework
+- macOS-only admission and the always-on OS taint:
+  `pkg/provider/admission_test.go` and `pkg/node/taint_test.go`. The
+  rules are in [admission.md](admission.md)
+- Guest idle deadline in `pkg/guest`. Tests inject a clock (`idleClock`
+  in `pkg/guest/idle.go`). A nil clock is the wall clock. `IdleMS` on
+  the wire is unchanged, and no operator setting changed
 
 ## Per-VM supervisor
 
@@ -34,7 +40,22 @@ leaves the VM running, a lease mismatch and a deleting pod leading to
 `StopVM`, peer-uid rejection, `ENOTCONN` (the connection closes, and
 that is not an auth failure), the dead-man timer, and goleak plus
 fd-count checks. The adapter's `Recover` and the lease check are in
-that set. `pkg/engine` does not call `Recover`.
+that set. `pkg/engine` does not call the adapter's `Recover`.
+
+A node-agent restart re-adopts through `supervisor.Adopt`
+(`pkg/supervisor/session.go`). Adopt dials, fences the lease, and calls
+`AttachChannels`. The guest fd is a fresh Connect passed with
+`SCM_RIGHTS`. A saved fd is not reused. `pkg/runtime/supervised` calls
+Adopt on the first attach and on `Recover`. `Recover` does not spawn a
+supervisor. Supervisor death becomes `SlotLost` and `VMFailed` with
+message `supervisor lost` within about 2 seconds. The watch is
+edge-triggered epoll (`EPOLLET`) on Linux and kqueue (`EV_CLEAR`) on
+Darwin. It does not wait for the dead-man switch. The contract test
+sets that switch to 1 hour; `--vm-supervisor-deadman` still defaults to
+5 minutes. The slot is released once. `pkg/engine` does not call the
+adapter's `Recover`. Pod text for that loss is still the engine's
+`macOS VM Failed unexpectedly`. `Connect` during `Start` on
+Virtualization.framework is hardware-pending.
 
 These paths compile for `darwin/arm64` and have not been run on Apple
 hardware:
@@ -56,6 +77,44 @@ hardware:
 descriptors for the engine. `--runtime` does not select it. See
 [simvz.md](simvz.md). The supervisor feature write-up is
 [vm-supervisor.md](vm-supervisor.md).
+
+## FuzzNodeLifecycle
+
+`FuzzNodeLifecycle` (`pkg/provider/lifecycle_fuzz_test.go`) drives the
+virtual-kubelet provider on SimVZ. Each input is a sequence of pod
+create, delete, guest crash, start failure, process restart, and node
+drain. The engine probe and start-backoff clock is a virtual clock.
+Guest redial still uses the wall clock; the fuzzer shortens that delay
+and restores the production values when the input ends. The committed
+seeds are `pkg/provider/testdata/fuzz/FuzzNodeLifecycle`.
+
+After every step, after drain, and after shutdown, the test checks six
+invariants:
+
+1. Running VMs stay at or below 2. `darwin.node/vm-slot` capacity and
+   allocatable stay at 2. After drain, both slots are free and no VM is
+   running.
+2. When nothing is running, the process fd count is back within 8 of
+   the baseline taken before boot (the same slack the soak census uses).
+3. `go.uber.org/goleak` is clean once the node is idle, and again after
+   the step goroutine has exited.
+4. No per-pod directory remains for a pod that is gone, no SimVZ clone
+   directory sits outside the live set, no `.tmp` or `.old` snapshot is
+   left, and the process has no new child.
+5. A pod that has reached Succeeded or Failed does not return to
+   Running or Pending. A Never pod, or a pod that was already terminal,
+   stays down across a process restart.
+6. Boot, each step, and shutdown run under a 5 second watchdog. On
+   expiry it dumps every goroutine stack and fails the input.
+
+The fault-free subset, with no guest crash and no start failure, is
+`pkg/provider/testdata/fuzz/node_lifecycle_hardware.jsonl`. That list is
+the Mac Mini hardware gate. `TestNodeLifecycleHardwareReplay`
+(`pkg/provider/hardware_replay_darwin_test.go`, built with
+`darwin && arm64`) skips unless `DARWIN_NODE_VZ_HARDWARE=1`. With that
+variable set, the test still does not drive Virtualization.framework: it
+fails and names the list, so a Mac Mini run is not reported as a pass.
+Linux CI does not compile it. This replay is hardware-pending.
 
 ## Soak
 
@@ -84,7 +143,11 @@ make soak IMAGE=out/macos-15
 ```
 
 `make soak` with no `IMAGE`, and `go test` on Linux, stay green without
-that checklist. They do not mark it done.
+that checklist. They do not mark it done. The fault-free
+`FuzzNodeLifecycle` replay list is
+`pkg/provider/testdata/fuzz/node_lifecycle_hardware.jsonl`
+(`TestNodeLifecycleHardwareReplay`, `darwin && arm64`). That run is
+hardware-pending. See [FuzzNodeLifecycle](#fuzznodelifecycle).
 
 The virtio-fs read-only bit on a named cache is set in unit tests. A
 booted macOS guest has not been used to confirm the guest cannot write

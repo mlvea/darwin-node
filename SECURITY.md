@@ -77,8 +77,15 @@ tab and choose **Report a vulnerability**.
 - `--vm-supervisor` defaults to `off`. With it on, the run directory
   (mode `0700`) and a same-uid peer check on the slot socket are the
   local trust boundary. The supervisor does not parse the guest
-  protocol. Kubelet TLS and the guest handshake are unchanged. The
-  engine does not adopt a live supervisor VM after an agent restart
-  yet. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+  protocol. The adapter calls `supervisor.Adopt` on first attach and
+  on `Recover`. The engine does not call that `Recover`, so a restarted
+  agent leaves a live VM unadopted. Kubelet TLS and the guest handshake
+  are unchanged. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+- The node always publishes `darwin.node/os=macos:NoSchedule`, including
+  with `--disable-taint`. The label stays `kubernetes.io/os=darwin`.
+  Container 0 is admitted by repository name. A custom name needs
+  `darwin.node/disk-image: "true"`. The pull still requires a darwin-node
+  or Agoda disk layer, or a layer titled `disk.img`. See
+  [docs/admission.md](docs/admission.md).
 
 Operational notes: [docs/security.md](docs/security.md).

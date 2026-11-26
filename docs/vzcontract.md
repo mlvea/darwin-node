@@ -65,6 +65,32 @@ replay runs each op list against SimVZ and requires:
 
 The schema and the file list are in the directory README.
 
+## Supervisor restart
+
+Two cases use real `SCM_RIGHTS` on the unix control socket. Linux runs
+them against SimVZ.
+
+- Node-agent restart, supervisor still up. `supervisor.Adopt` dials,
+  fences the lease, and takes a new guest fd from `AttachChannels` (a
+  fresh Connect). The previous fd stays open and is not reused. Closing
+  that first session marks the slot closed, not lost.
+- Supervisor SIGKILL, node-agent still up. The edge-triggered watch
+  (epoll with `EPOLLET` on Linux, kqueue with `EV_CLEAR` on Darwin)
+  marks the slot `SlotLost`. Status is `VMFailed` with message
+  `supervisor lost`, within about 2 seconds. The suite sets the dead-man
+  switch to 1 hour, so the watch is not waiting for it. The operator
+  default remains 5 minutes.
+
+`pkg/runtime/supervised` is held to the same adopt on first attach and
+on `Recover` (`TestSupervisedAdoptContract`). The slot is released once
+on `supervisor lost`.
+
+Real Virtualization.framework execution of these cases is
+hardware-pending. A supervisor child re-exec'd from the `vzcontract`
+test binary exits with that pending error, and the parent skips.
+`Connect` during `Start` on the framework can stall when the guest is
+not listening yet.
+
 ## Mac Mini
 
 Execution against a real `VZVirtualMachine` is hardware-pending. The

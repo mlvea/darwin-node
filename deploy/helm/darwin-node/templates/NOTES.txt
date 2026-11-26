@@ -20,7 +20,9 @@ kubeconfig at a ServiceAccount token. Use the system:node credential above.
 {{ if .Values.runtimeClass.enabled }}
 
 RuntimeClass {{ .Values.runtimeClass.name }} is installed. Set
-spec.runtimeClassName to that name so the pod tolerates this node.
+spec.runtimeClassName to that name so the pod tolerates this node,
+including darwin.node/os=macos:NoSchedule. A pod that does not use the
+RuntimeClass needs that toleration itself.
 Request darwin.node/vm-slot: "1" on the macOS container, or set
 admission.slotRequest so the MutatingAdmissionPolicy adds it.
 {{ end }}
