@@ -3,6 +3,7 @@ package simvz
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -10,11 +11,19 @@ import (
 	"time"
 
 	"github.com/mlvea/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/vzcontract"
 
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
+	if vzcontract.ChildEnabled() {
+		if err := vzcontract.ServeChild(New(Options{Dir: os.Getenv("DARWIN_NODE_SUPERVISOR_RUN_DIR")})); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	goleak.VerifyTestMain(m)
 }
 
