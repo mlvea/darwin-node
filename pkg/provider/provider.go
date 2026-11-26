@@ -47,6 +47,10 @@ type Provider struct {
 	cpuMu      sync.Mutex
 	cpuAcc     map[string]cpuSample
 	metricsNow func() time.Time
+
+	// rejected pods failed admission. They are Failed, hold no slot, and
+	// never start a VM.
+	rejected *admissionLog
 }
 
 // nodeHealth is the node status probe. CreatePod rejects work while it
@@ -60,7 +64,7 @@ func New(cfg config.Config, eng *engine.Engine, inv node.Inventory, rec event.Re
 	if rec == nil {
 		rec = event.Nop{}
 	}
-	return &Provider{cfg: cfg, engine: eng, inv: inv, events: rec}
+	return &Provider{cfg: cfg, engine: eng, inv: inv, events: rec, rejected: newAdmissionLog()}
 }
 
 func (p *Provider) Engine() *engine.Engine { return p.engine }
@@ -120,6 +124,9 @@ func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 			return err
 		}
 	}
+	if err := p.admit(ctx, pod); err != nil {
+		return err
+	}
 	var creds engine.Credentials
 	if p.creds != nil {
 		c, err := p.creds.Resolve(ctx, pod)
@@ -135,22 +142,37 @@ func (p *Provider) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 	if p == nil || p.engine == nil {
 		return errdefs.InvalidInput("pod updates are not supported; delete and recreate")
 	}
+	if pod != nil && !p.engineHas(pod.Namespace, pod.Name) {
+		if err, ok := p.rejectedErr(pod.Namespace, pod.Name); ok {
+			return err
+		}
+	}
 	return p.engine.UpdateMetadata(pod)
 }
 
 func (p *Provider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
+	if pod != nil && p.rejected != nil {
+		p.rejected.forget(pod.Namespace, pod.Name)
+	}
 	return p.engine.Delete(ctx, pod.Namespace, pod.Name, deleteGrace(pod))
 }
 
 func (p *Provider) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+	if pod, ok := p.rejectedPod(namespace, name); ok && !p.engineHas(namespace, name) {
+		return pod, nil
+	}
 	return p.engine.Get(namespace, name)
 }
 
 func (p *Provider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
-	return p.engine.List(), nil
+	return p.withRejected(p.engine.List()), nil
 }
 
 func (p *Provider) GetPodStatus(ctx context.Context, namespace, name string) (*corev1.PodStatus, error) {
+	if pod, ok := p.rejectedPod(namespace, name); ok && !p.engineHas(namespace, name) {
+		st := pod.Status.DeepCopy()
+		return st, nil
+	}
 	pod, err := p.engine.Get(namespace, name)
 	if err != nil {
 		return nil, err

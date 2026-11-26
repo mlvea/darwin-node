@@ -187,7 +187,11 @@ func Labels(inv Inventory) map[string]string {
 
 // Taints that belong on the node spec.
 func Taints(inv Inventory) []corev1.Taint {
-	var out []corev1.Taint
+	// The OS taint is not optional. This process only boots macOS guests,
+	// so a pod has to tolerate darwin.node/os=macos even when DisableTaint
+	// drops the provider and darwin.node/macos taints. Slot exhaustion is
+	// not a taint; mergeTaints still drops a stale darwin.node/vm-full.
+	out := []corev1.Taint{staticOSTaint()}
 	if !inv.Cfg.DisableTaint {
 		out = append(out, corev1.Taint{
 			Key: types.TaintProviderKey, Value: types.TaintProviderVal, Effect: corev1.TaintEffectNoSchedule,
