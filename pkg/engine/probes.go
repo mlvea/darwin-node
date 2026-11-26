@@ -367,9 +367,9 @@ func stopProbeTimer(timer probeTimer) {
 func (e *Engine) noteVMDeath(ctx context.Context, rec *podRecord) (restarted, keep bool) {
 	rec.mu.Lock()
 	phase := rec.phase
-	var st types.VMState
+	var vm types.VMStatus
 	if rec.machine != nil {
-		st = rec.machine.Status().State
+		vm = rec.machine.Status()
 	}
 	var code int32
 	reported := rec.guestExit != nil
@@ -384,7 +384,13 @@ func (e *Engine) noteVMDeath(ctx context.Context, rec *podRecord) (restarted, ke
 	if phase != corev1.PodRunning {
 		return false, true
 	}
-	switch st {
+	// The supervisor process is gone. Restart policy must not boot a
+	// replacement, and the pod text is the adapter's own message.
+	if supervisorLost(vm) {
+		e.failWith(rec, supervisorLostReason, errors.New(supervisorLostReason))
+		return false, false
+	}
+	switch vm.State {
 	case types.VMStopped, types.VMFailed:
 	default:
 		return false, true
@@ -411,7 +417,7 @@ func (e *Engine) noteVMDeath(ctx context.Context, rec *podRecord) (restarted, ke
 		rec.mu.Unlock()
 		return true, true
 	default:
-		e.failWith(rec, "VM"+string(st), fmt.Errorf("macOS VM %s unexpectedly", st))
+		e.failWith(rec, "VM"+string(vm.State), fmt.Errorf("macOS VM %s unexpectedly", vm.State))
 		return false, false
 	}
 }

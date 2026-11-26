@@ -34,7 +34,7 @@ import (
 func (e *Engine) Close() error {
 	e.closeOnce.Do(func() {
 		e.draining.Store(true)
-		e.closeErr = errors.Join(e.shutdownWarmPool(), e.stopPodMachines())
+		e.closeErr = errors.Join(e.shutdownWarmPool(), e.stopAdoptedMachines(), e.stopPodMachines())
 	})
 	return e.closeErr
 }
