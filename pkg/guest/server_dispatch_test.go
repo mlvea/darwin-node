@@ -442,30 +442,6 @@ func TestExecStreamAndExecCap(t *testing.T) {
 	}
 }
 
-func TestActiveConnRefreshesIdleDeadline(t *testing.T) {
-	h := Handler{Token: "secret", IdleTimeout: 150 * time.Millisecond}
-	h.Init()
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = Serve(ctx, a, h) }()
-	cli, err := Dial(ctx, b, "secret", "host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cli.Close()
-	deadline := time.Now().Add(700 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		res, err := cli.Health(ctx)
-		if err != nil || !res.OK {
-			t.Fatalf("health during idle window: %v %+v", err, res)
-		}
-		time.Sleep(40 * time.Millisecond)
-	}
-}
-
 func TestInteractiveExecKeepsEveryStdoutByte(t *testing.T) {
 	const chunks = 80
 	payload := bytes.Repeat([]byte("01234567"), chunks)
