@@ -127,7 +127,7 @@ message starts with the field path, for example
 `spec.volumes[data].persistentVolumeClaim is not supported`.
 
 The same rejection is stored `Failed`, recorded as a Warning event, and
-returned before the engine runs.
+returned before the engine runs. No slot is taken.
 
 ### Admitted
 
@@ -158,7 +158,9 @@ still runs in the engine before a slot is taken: `allowPrivilegeEscalation`,
 `readOnlyRootFilesystem`, `runAsUser`, `runAsGroup`, and dropped
 capabilities stay admitted here. `supplementalGroups`, `fsGroup`, and
 `sysctls` are unchanged: this profile does not reject them, and the
-guest does not apply them.
+guest does not apply them. Legacy seccomp and AppArmor annotations are
+not read. The structured `seccompProfile` and `appArmorProfile` fields
+are what this check sees.
 
 `pkg/volume` materializes `emptyDir`, `secret`, `configMap`,
 `downwardAPI`, `hostPath`, and `projected` limited to the four sources
@@ -195,20 +197,30 @@ init container, and ephemeral container (security context, then
 ### Cluster policy
 
 `deploy/admission/validatingadmissionpolicy.yaml` is a
-`ValidatingAdmissionPolicy` and binding that mirror this profile for
-pods which:
+`ValidatingAdmissionPolicy` and binding that mirror this profile.
+`failurePolicy: Fail`. `validationActions` is `Deny`. The CEL `reason`
+is `Invalid` because that is the API's enum; the message starts with
+`UnsupportedPodField` or `UnsupportedVolume`. A policy that cannot be
+evaluated denies the pods it matches.
 
-- set `runtimeClassName: darwin-vm` (the Helm chart default; a renamed
-  class has to be edited into the match condition), or
+It matches pods which:
+
+- set `runtimeClassName` to the chart value `runtimeClass.name`
+  (default `darwin-vm`), or
 - set `nodeSelector` `kubernetes.io/os` or `beta.kubernetes.io/os` to
   `darwin`, or
 - require that OS with `In` in required node affinity
   (`matchExpressions` or `matchFields`).
 
-`validationActions` is `Deny`. The CEL `reason` is `Invalid` because
-that is the API's enum; the message starts with `UnsupportedPodField`
-or `UnsupportedVolume`. The Helm chart does not install this policy.
-Apply the manifest on the cluster. The policy leaves the hostPath
-allowlist to the node. A pod that reaches the node without the
-RuntimeClass, the node selector, or the required affinity is still
-checked by the provider.
+The standalone file hardcodes `darwin-vm` in that comparison and is
+valid to apply by itself. Helm substitutes `runtimeClass.name` when
+`admission.podProfilePolicy.enabled` is true (default `false`). The
+chart renders that same file. CI parses the manifest. It has not been applied to a live API server.
+
+The policy matches `CREATE` and `UPDATE`. `UpdatePod` does not run
+this check again. The engine rejects a spec change other than labels and annotations.
+A reorder of container `env` is the same spec.
+
+The policy leaves the hostPath allowlist to the node. A pod that
+reaches the node without the RuntimeClass, the node selector, or the
+required affinity is still checked by the provider on `CreatePod`.

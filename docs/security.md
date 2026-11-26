@@ -214,18 +214,43 @@ processes still start here. The VM boots at container 0's size, default
 2 vCPU and 4 GiB, which is not the admission sum. See
 [admission.md](admission.md).
 
+`CreatePod` runs the macOS VM pod profile before these checks. A
+rejection is stored `Failed`, recorded as a Warning event, and returned
+before a slot is taken. Reason `UnsupportedPodField` covers
+`spec.hostNetwork`, `spec.hostPID`, and `spec.hostIPC` set true,
+`securityContext.privileged`, a non-empty `capabilities.add`, a
+`seccompProfile` other than unset or `RuntimeDefault`,
+`appArmorProfile`, `seLinuxOptions`, and `procMount: Unmasked`, on the
+pod or on a container, init container, or ephemeral container where
+that field exists. Reason `UnsupportedVolume` covers `volumeDevices`
+and any volume source other than `emptyDir`, `secret`, `configMap`,
+`downwardAPI`, allowlisted `hostPath`, and `projected` limited to
+`serviceAccountToken`, `secret`, `configMap`, and `downwardAPI`.
+`restartPolicy` `Never`, `OnFailure`, and `Always` are admitted.
+`Always` restarts the guest process inside the same VM and still uses
+one slot. `UpdatePod` does not run the profile check again. The engine
+rejects a spec change other than labels and annotations. A reorder of
+container `env` is the same spec. Legacy seccomp and AppArmor
+annotations are not read. The table is [admission.md](admission.md).
+
+`deploy/admission/validatingadmissionpolicy.yaml` is a cluster-side CEL
+`ValidatingAdmissionPolicy` and binding with `failurePolicy: Fail`.
+Apply that file on its own, or set `admission.podProfilePolicy.enabled`
+(default `false`) so the Helm chart renders it. The rendered
+runtimeClassName comparison uses `runtimeClass.name`. CI parses the
+manifest. It has not been applied to a live API server.
+
 - Each pod gets its own bridge network (`darwin-node-<uid>`). Containers
   in that pod share it. The bridge is not `--internal`: the daemon's
   gateway can still reach the host network. A pod's network is removed
   with the pod, and a network labeled `darwin-node=pod` with that name
   prefix is removed if the process finds it still there at startup.
 - `runAsUser`, `runAsGroup`, `readOnlyRootFilesystem`, and capability
-  drops are applied. `no-new-privileges` is always set. `privileged`,
-  `allowPrivilegeEscalation: true`, added capabilities, `hostNetwork`,
-  `hostPID`, and `hostIPC` are rejected at admission, before a VM slot
-  is taken. `runAsNonRoot` requires an explicit non-zero `runAsUser`.
-  The image `USER` is not inspected. `supplementalGroups`, `fsGroup`,
-  seccomp, and AppArmor are not applied.
+  drops are applied. `no-new-privileges` is always set.
+  `allowPrivilegeEscalation: true` is rejected on this sidecar path,
+  before a VM slot is taken. `runAsNonRoot` requires an explicit
+  non-zero `runAsUser`. The image `USER` is not inspected.
+  `supplementalGroups` and `fsGroup` are not applied.
 - A mount of `docker.sock`, including a symlink that resolves to a file
   of that name, is rejected.
 - HTTP and TCP probes dial the container address from Docker inspect.

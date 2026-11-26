@@ -4,9 +4,13 @@
 # that already name the darwin RuntimeClass, select kubernetes.io/os=darwin
 # (or beta.kubernetes.io/os), or require that OS in node affinity. A pod
 # that reaches the node without those fields is still checked by the provider.
+# UpdatePod on the node does not run the profile check again.
 #
-# runtimeClassName is darwin-vm, the Helm chart default. A cluster that
-# renames the RuntimeClass has to edit the match condition to match.
+# This file is valid to apply by itself. The runtimeClassName comparison
+# below is darwin-vm. Helm renders this same file when
+# admission.podProfilePolicy.enabled is true (default false) and substitutes
+# runtimeClass.name into that comparison. failurePolicy is Fail. CI parses
+# the manifest. It has not been applied to a live API server.
 #
 # The node hostPath allowlist is not expressed here. hostPath remains a
 # supported volume type, and the node still applies --allowed-host-paths.
