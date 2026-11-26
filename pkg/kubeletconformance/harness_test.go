@@ -105,9 +105,16 @@ func (s *simWrap) last() runtime.Machine {
 }
 
 // tracked counts successful boots and refuses to sleep a stop grace.
+// stopMu serializes Stop. Cleanup waits out the accept loop, and the
+// engine watch can observe the session drop from inside that wait, see
+// the machine already Stopped, and reach restartVM. restartVM calls
+// Start only after its own Stop returns, so holding this lock until the
+// in-flight Stop returns keeps that Start from registering a new accept
+// loop that cleanup would then wait on forever.
 type tracked struct {
 	runtime.Machine
-	rt *simWrap
+	rt     *simWrap
+	stopMu sync.Mutex
 }
 
 func (m *tracked) Start(ctx context.Context) error {
@@ -119,6 +126,8 @@ func (m *tracked) Start(ctx context.Context) error {
 }
 
 func (m *tracked) Stop(ctx context.Context, _ time.Duration) error {
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
 	return m.Machine.Stop(ctx, 0)
 }
 

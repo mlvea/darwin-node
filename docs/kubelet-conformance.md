@@ -37,8 +37,19 @@ the probe clock:
 
 `restartVM` stops the machine with a 5s grace. That grace is shutdown
 time for the guest, not the CrashLoop delay. The suite's runtime wrapper
-forwards `Stop` with grace 0 so the 5s does not land in the test. Delete
-uses `terminationGracePeriodSeconds: 0` for the same reason.
+forwards `Stop` with grace 0 so the 5s does not land in the test, and it
+serializes those Stops. Delete uses `terminationGracePeriodSeconds: 0`
+for the same grace reason.
+
+The serialization is load-bearing. `Stop` marks the machine Stopped and
+then, still inside cleanup, closes the guest session. The watch can run
+on that close, see a Stopped machine, and enter `restartVM` before
+cleanup has finished waiting for the accept loop. `restartVM` calls
+`Start` only after its own `Stop` returns. Holding the wrapper lock
+across `Stop` keeps that `Start` from opening a new accept loop while
+cleanup is still waiting for the old one. SimVZ itself does not take
+this lock. A `Start` that overlaps cleanup in process can still leave
+`Stop` waiting, and that overlap is left for a follow-up.
 
 ## SimVZ and a real Mac
 
