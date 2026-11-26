@@ -51,6 +51,10 @@ cleanup is still waiting for the old one. SimVZ itself does not take
 this lock. A `Start` that overlaps cleanup in process can still leave
 `Stop` waiting, and that overlap is left for a follow-up.
 
+`Succeeded` and `Failed` are stored before teardown stops the machine
+and releases the slot. The suite waits for that release after it
+observes the terminal phase.
+
 ## SimVZ and a real Mac
 
 `HaltGuest` is a no-op off Darwin, so a workload that exits leaves the

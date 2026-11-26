@@ -187,9 +187,7 @@ func caseLivenessNever(t *testing.T) {
 	if h.starts() != 1 {
 		t.Fatalf("starts=%d, Never restarted the VM", h.starts())
 	}
-	if h.e.Slots().Used() != 0 || h.rt.Running() != 0 {
-		t.Fatalf("slots=%d running=%d, a failed Never pod kept its VM", h.e.Slots().Used(), h.rt.Running())
-	}
+	h.waitReleased()
 	if p.Status.Reason == "CrashLoopBackOff" {
 		t.Fatalf("Never stayed in CrashLoopBackOff: %s", statusLine(p))
 	}
@@ -497,9 +495,10 @@ func caseInitFailure(t *testing.T) {
 	if got := strings.Join(sc.Order(), ","); got != "setup,migrate" {
 		t.Fatalf("init order %s", got)
 	}
-	if h.starts() != 0 || h.rt.Running() != 0 || h.e.Slots().Used() != 0 {
-		t.Fatalf("starts=%d running=%d slots=%d, a failed init booted a VM", h.starts(), h.rt.Running(), h.e.Slots().Used())
+	if h.starts() != 0 {
+		t.Fatalf("starts=%d, a failed init booted a VM", h.starts())
 	}
+	h.waitReleased()
 	for _, ph := range h.phases("default", "init-fail") {
 		if ph == corev1.PodRunning {
 			t.Fatal("init failure passed through Running")
@@ -570,9 +569,7 @@ func caseWorkloadExit(t *testing.T) {
 			if h.starts() != before {
 				t.Fatalf("starts %d -> %d", before, h.starts())
 			}
-			if h.e.Slots().Used() != 0 {
-				t.Fatalf("slots=%d, a finished workload kept the VM", h.e.Slots().Used())
-			}
+			h.waitReleased()
 		})
 	}
 }
@@ -781,9 +778,7 @@ func caseSidecarNever(t *testing.T) {
 	if sc.Creates("helper") != 1 {
 		t.Fatalf("creates=%d, Never restarted the sidecar", sc.Creates("helper"))
 	}
-	if h.e.Slots().Used() != 0 || h.rt.Running() != 0 {
-		t.Fatalf("slots=%d running=%d", h.e.Slots().Used(), h.rt.Running())
-	}
+	h.waitReleased()
 	if !strings.Contains(p.Status.Message, "exited") {
 		t.Fatalf("message %q", p.Status.Message)
 	}

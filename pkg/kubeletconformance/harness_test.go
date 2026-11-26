@@ -320,6 +320,23 @@ func (h *harness) waitPhase(ns, name string, phase corev1.PodPhase) *corev1.Pod 
 	})
 }
 
+// waitReleased waits until teardown has returned the slot. Failed and
+// Succeeded are stored before teardown stops the machine, so a status
+// read can observe the terminal phase while the slot is still held.
+func (h *harness) waitReleased() {
+	h.t.Helper()
+	deadline := time.Now().Add(wallBudget)
+	for {
+		if h.e.Slots().Used() == 0 && h.rt.Running() == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("slot was not released: slots=%d running=%d", h.e.Slots().Used(), h.rt.Running())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 func (h *harness) waitExit(ns, name string) int32 {
 	h.t.Helper()
 	deadline := time.Now().Add(wallBudget)
