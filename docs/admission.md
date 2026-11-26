@@ -12,6 +12,10 @@ check and before credentials are resolved or the engine is asked to boot.
 A rejected pod is stored `Failed` with a reason and message, and a
 Warning event is recorded. No slot is taken and no VM is created.
 
+Checks run in this order: pod profile, macOS platform and disk image,
+then the one-VM budget. A pod the engine already has is left alone, so
+a repeated create stays idempotent.
+
 ## Taint
 
 Every node spec carries
@@ -113,3 +117,98 @@ An omitted request counts as zero, which is how kubelet schedules it.
 The VM is still created from container 0, and an empty container 0
 request still defaults to 2 vCPU and 4 GiB at boot. That default is not
 added back into the admission sum.
+
+## Pod profile
+
+Two reasons. `UnsupportedPodField` names a field the guest cannot honor.
+`UnsupportedVolume` names a volume this node does not materialize. The
+message starts with the field path, for example
+`spec.containers[macos].securityContext.privileged must be false` or
+`spec.volumes[data].persistentVolumeClaim is not supported`.
+
+The same rejection is stored `Failed`, recorded as a Warning event, and
+returned before the engine runs.
+
+### Admitted
+
+| Field | Admitted values |
+|---|---|
+| `spec.restartPolicy` | unset, `Never`, `OnFailure`, `Always` |
+| init container `restartPolicy` | unset, `Always` |
+| `spec.hostNetwork`, `spec.hostPID`, `spec.hostIPC` | unset or false |
+| `securityContext.privileged` on containers, init containers, and ephemeral containers | unset or false |
+| `securityContext.capabilities.add` | unset or empty. `capabilities.drop` is still admitted |
+| `seccompProfile` on the pod or on a container | unset, or `type: RuntimeDefault` |
+| `securityContext.procMount` | unset or `Default` |
+| volume sources | `emptyDir`, `secret`, `configMap`, `downwardAPI`, `hostPath`, `projected` |
+| `projected` sources | `serviceAccountToken`, `secret`, `configMap`, `downwardAPI` |
+
+`restartPolicy: Always` restarts the guest process inside the same VM.
+The pod still takes one `darwin.node/vm-slot`. `OnFailure` and `Never`
+stay on the existing workload-exit path.
+
+`hostPath` is a supported type. The node prefix allowlist still applies
+in the engine, before a slot is taken. An empty allowlist
+(`--allowed-host-paths` / `DARWIN_NODE_ALLOWED_HOST_PATHS` unset) denies
+every hostPath. `/` is never allowed. The allowlist is unchanged.
+
+These fields are left to the existing sidecar isolation check, which
+still runs in the engine before a slot is taken: `allowPrivilegeEscalation`,
+`runAsNonRoot` without an explicit uid, and `docker.sock` mounts.
+`readOnlyRootFilesystem`, `runAsUser`, `runAsGroup`, and dropped
+capabilities stay admitted here. `supplementalGroups`, `fsGroup`, and
+`sysctls` are unchanged: this profile does not reject them, and the
+guest does not apply them.
+
+`pkg/volume` materializes `emptyDir`, `secret`, `configMap`,
+`downwardAPI`, `hostPath`, and `projected` limited to the four sources
+above. Those stay admitted.
+
+### Rejected
+
+| Field | Reason |
+|---|---|
+| `spec.hostNetwork`, `spec.hostPID`, or `spec.hostIPC` true | `UnsupportedPodField` |
+| `securityContext.privileged: true` on a container, init container, or ephemeral container | `UnsupportedPodField` |
+| `securityContext.capabilities.add` non-empty, including on init and ephemeral containers | `UnsupportedPodField` |
+| `seccompProfile` at pod or container level set to anything other than `RuntimeDefault`, including `Unconfined`, `Localhost`, and an empty type | `UnsupportedPodField` |
+| `appArmorProfile` set at pod or container level, including `RuntimeDefault` | `UnsupportedPodField` |
+| `seLinuxOptions` set at pod or container level | `UnsupportedPodField` |
+| `securityContext.procMount: Unmasked` | `UnsupportedPodField` |
+| `volumeDevices` on a container, init container, or ephemeral container | `UnsupportedVolume` |
+| a volume whose source is `persistentVolumeClaim`, `csi`, `ephemeral`, `image`, or any other source outside the admitted set | `UnsupportedVolume` |
+| a volume with no source set | `UnsupportedVolume` |
+| a `projected` source of `clusterTrustBundle`, `podCertificate`, or an empty source | `UnsupportedVolume` |
+
+`persistentVolumeClaim`, inline `ephemeral` volumes, and CSI are not
+materialized (`pkg/volume` returns an unsupported-volume error, and the
+volume ADR leaves PVC and CSI for a later phase). `image` volumes are
+in the same default. `clusterTrustBundle` and `podCertificate` are not
+written by the projected-volume publisher; rejecting them keeps a pod
+from looking admitted while those files are skipped.
+
+When several fields are set, the first match is the one recorded:
+host namespaces, then the pod security context, then each container,
+init container, and ephemeral container (security context, then
+`volumeDevices`), then volumes in spec order.
+
+### Cluster policy
+
+`deploy/admission/validatingadmissionpolicy.yaml` is a
+`ValidatingAdmissionPolicy` and binding that mirror this profile for
+pods which:
+
+- set `runtimeClassName: darwin-vm` (the Helm chart default; a renamed
+  class has to be edited into the match condition), or
+- set `nodeSelector` `kubernetes.io/os` or `beta.kubernetes.io/os` to
+  `darwin`, or
+- require that OS with `In` in required node affinity
+  (`matchExpressions` or `matchFields`).
+
+`validationActions` is `Deny`. The CEL `reason` is `Invalid` because
+that is the API's enum; the message starts with `UnsupportedPodField`
+or `UnsupportedVolume`. The Helm chart does not install this policy.
+Apply the manifest on the cluster. The policy leaves the hostPath
+allowlist to the node. A pod that reaches the node without the
+RuntimeClass, the node selector, or the required affinity is still
+checked by the provider.

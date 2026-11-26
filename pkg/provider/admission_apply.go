@@ -6,11 +6,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// admit rejects a pod that is not a macOS guest or that does not fit in
-// one VM. A rejection is stored as Failed, an event is recorded, and the
-// error is returned. The engine is not called, so no slot is taken and
-// no VM is booted. A pod the engine already has is left alone so a
-// repeated create stays idempotent.
+// admit rejects a pod that is not a macOS guest, that asks for a pod
+// field or volume this node cannot run, or that does not fit in one VM.
+// A rejection is stored as Failed, an event is recorded, and the error
+// is returned. The engine is not called, so no slot is taken and no VM
+// is booted. A pod the engine already has is left alone so a repeated
+// create stays idempotent.
 func (p *Provider) admit(ctx context.Context, pod *corev1.Pod) error {
 	if p == nil {
 		return &admissionError{Reason: ReasonUnsupportedPlatform, Message: "nil provider"}
@@ -21,7 +22,10 @@ func (p *Provider) admit(ctx context.Context, pod *corev1.Pod) error {
 	if p.engineHas(pod.Namespace, pod.Name) {
 		return nil
 	}
-	err := decideAdmission(pod, p.oneVMBudget())
+	err := decidePodProfile(pod)
+	if err == nil {
+		err = decideAdmission(pod, p.oneVMBudget())
+	}
 	if err == nil {
 		if p.rejected != nil {
 			p.rejected.forget(pod.Namespace, pod.Name)
