@@ -147,6 +147,9 @@ func (m *machine) cleanup() {
 	if proc != nil {
 		proc.kill()
 	}
+	// After the listener is closed, before Wait. A Start that observed
+	// Stopped can run here. Unarmed barriers return immediately.
+	m.barrier(context.Background(), BarrierBeforeAcceptWait)
 	m.wg.Wait()
 	if host != nil {
 		_ = host.Close()
