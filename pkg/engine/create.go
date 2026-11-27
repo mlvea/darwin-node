@@ -38,6 +38,23 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		e.mu.Unlock()
 		return nil
 	}
+	// A supervisor that outlived the previous process is claimed before
+	// the node-restart settlement, which would otherwise mark the pod
+	// Failed and leave the VM running with no owner.
+	started, discard := e.claimRecoveredLocked(pod)
+	if discard != nil {
+		e.mu.Unlock()
+		e.stopSupervisorMachine(context.Background(), discard, true)
+		e.mu.Lock()
+		if _, exists := e.pods[key]; exists {
+			e.mu.Unlock()
+			return nil
+		}
+	}
+	if started != nil {
+		e.mu.Unlock()
+		return e.launchRecovered(started, creds)
+	}
 	if settled, why, msg := e.settleInterruptedLocked(pod); settled {
 		e.mu.Unlock()
 		if why != "" {

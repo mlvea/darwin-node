@@ -85,10 +85,14 @@ func (e *Engine) Recover() error {
 	// The pods are reconciled from that set when virtual-kubelet creates
 	// them again.
 	e.noteInterruptedPods()
+	// A live supervisor still owns the VM. Claim its slot before the
+	// sweep so the pod directory, the agent token, and the disk stay.
+	errSup := e.recoverSupervisors()
 	errImages := image.Recover(e.cfg.CacheDir)
 	errStores := recoverCacheStores(e.cfg.CacheDir)
-	// Negative maxAge: no grace period. The process that owned these
-	// directories is gone, and so are its VMs.
+	// Negative maxAge: no grace period. A slot claimed for a live
+	// supervisor is skipped. Every other directory is secrets and an
+	// overlay, not a machine this process can reach.
 	errPods := RecoverCache(e.cfg.CacheDir, e.slots, -1)
 	errWarm := e.sweepWarmOrphans()
 	errBoots := consumeAbandonedBoots(e.cfg.CacheDir, e.slots)
@@ -104,7 +108,10 @@ func (e *Engine) Recover() error {
 	if errWarm != nil {
 		return errWarm
 	}
-	return errBoots
+	if errBoots != nil {
+		return errBoots
+	}
+	return errSup
 }
 
 // sweepWarmOrphans removes cache/warm from a previous process. The pool

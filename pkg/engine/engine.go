@@ -100,6 +100,10 @@ type Engine struct {
 	// those pods is booted again.
 	interrupted   map[string]struct{}
 	restartCredit map[string]int32
+
+	// adopted is a supervisor VM reattached at startup and not yet handed
+	// to Create. Close stops whatever is still here.
+	adopted map[string]runtime.Machine
 }
 
 // defaultCloseTimeout bounds Close when Create, Start, Stop, or RemovePod
