@@ -32,14 +32,10 @@ func TestGuestIdentityUniqueness(t *testing.T) {
 	e, rt := contractEngine(t, simvz.Faults{})
 	defer finishContract(t, e, before, leaks)
 
-	seq := contractPod("seq-a", "uid-seq-a")
-	seq.Spec.Containers[0].Command = []string{"/bin/true"}
-	startPod(t, e, seq)
+	startPod(t, e, contractPod("seq-a", "uid-seq-a"))
 	waitContractPhase(t, e, "seq-a", corev1.PodRunning, 15*time.Second)
-	methods := rt.Methods("uid-seq-a")
-	if indexOfMethod(methods, guest.MethodAdopt) < 0 || indexOfMethod(methods, guest.MethodWorkload) < 0 ||
-		indexOfMethod(methods, guest.MethodAdopt) > indexOfMethod(methods, guest.MethodWorkload) {
-		t.Fatalf("seq-a methods %v", methods)
+	if !sawMethod(rt.Methods("uid-seq-a"), guest.MethodAdopt) {
+		t.Fatalf("seq-a methods %v", rt.Methods("uid-seq-a"))
 	}
 	deletePod(t, e, "seq-a")
 	waitContractSlots(t, e, rt, 0)
@@ -306,15 +302,6 @@ func allZero(b []byte) bool {
 		}
 	}
 	return true
-}
-
-func indexOfMethod(ss []string, want string) int {
-	for i, s := range ss {
-		if s == want {
-			return i
-		}
-	}
-	return -1
 }
 
 func contractFDBefore(t *testing.T) int {

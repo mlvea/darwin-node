@@ -121,9 +121,10 @@ func (m *machine) installAdopt(h *guest.Handler) {
 		return
 	}
 	uid := m.id.UID
-	h.WorkloadFn = func(context.Context, guest.WorkloadReq) error {
+	// Count the RPC and still launch the process. Replacing WorkloadFn
+	// would swallow the exit that kubelet conformance waits for.
+	h.OnWorkload = func(context.Context, guest.WorkloadReq) {
 		m.rt.trace.noteMethod(uid, guest.MethodWorkload)
-		return nil
 	}
 	h.AdoptFn = func(_ context.Context, req guest.AdoptReq) (guest.AdoptRes, error) {
 		m.rt.trace.noteMethod(uid, guest.MethodAdopt)

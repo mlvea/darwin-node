@@ -52,6 +52,10 @@ type Handler struct {
 	// WorkloadFn, when set, handles the Workload RPC instead of starting a
 	// process. The fake runtime and tests use it.
 	WorkloadFn func(ctx context.Context, req WorkloadReq) error
+	// OnWorkload observes a Workload RPC and then lets WorkloadFn or the
+	// real process start. Nil changes nothing. SimVZ counts calls here so
+	// a workload still exits and reports that exit.
+	OnWorkload func(ctx context.Context, req WorkloadReq)
 	// AdoptFn, when set, handles Adopt instead of AdoptPlatform. SimVZ
 	// uses it to inject a bad reseed. Nil uses AdoptPlatform, or the
 	// in-memory platform when that is also nil.
@@ -773,6 +777,9 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		req, err := DecodePayload[WorkloadReq](env)
 		if err != nil {
 			return reply(nil, &CallError{Code: "bad_request", Message: err.Error()}), nil
+		}
+		if h.OnWorkload != nil {
+			h.OnWorkload(ctx, req)
 		}
 		if h.WorkloadFn != nil {
 			if err := h.WorkloadFn(ctx, req); err != nil {
