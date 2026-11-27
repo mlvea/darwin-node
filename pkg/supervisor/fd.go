@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
@@ -52,28 +53,35 @@ func readFDs(conn *net.UnixConn, want int, oob []byte) ([]*os.File, error) {
 		oob = make([]byte, 1)
 	}
 	buf := make([]byte, 8)
+	// Darwin can install every SCM_RIGHTS descriptor and still set
+	// MSG_CTRUNC without putting those numbers in the truncated buffer.
+	// The snapshot is how those descriptors get closed.
+	before, snapErr := listFDs()
 	n, oobn, flags, _, err := conn.ReadMsgUnix(buf, oob)
 	// Parse before deciding the call failed. A truncated control message
 	// can still install descriptors, and those must be closed.
 	fds, perr := rightsFrom(oob[:oobn])
-	fail := func(e error) ([]*os.File, error) {
+	fail := func(e error, sweep bool) ([]*os.File, error) {
 		closeRaw(fds)
+		if sweep && snapErr == nil {
+			closeArrivals(before)
+		}
 		return nil, e
 	}
 	if err != nil {
-		return fail(err)
+		return fail(err, false)
 	}
 	if flags&unix.MSG_CTRUNC != 0 {
-		return fail(fmt.Errorf("fd control message truncated"))
+		return fail(fmt.Errorf("fd control message truncated"), true)
 	}
 	if perr != nil {
-		return fail(perr)
+		return fail(perr, true)
 	}
 	if n < 1 {
-		return fail(io.ErrUnexpectedEOF)
+		return fail(io.ErrUnexpectedEOF, false)
 	}
 	if len(fds) != want {
-		return fail(fmt.Errorf("received %d file descriptors, want %d", len(fds), want))
+		return fail(fmt.Errorf("received %d file descriptors, want %d", len(fds), want), false)
 	}
 	files := make([]*os.File, len(fds))
 	for i, fd := range fds {
@@ -124,8 +132,57 @@ func rightsFrom(oob []byte) ([]int, error) {
 func closeRaw(fds []int) {
 	for _, fd := range fds {
 		if fd >= 0 {
+			unix.CloseOnExec(fd)
 			_ = unix.Close(fd)
 		}
+	}
+}
+
+// listFDs is the process's open descriptors, excluding the directory
+// this call opens to read them.
+func listFDs() (map[int]struct{}, error) {
+	path := "/proc/self/fd"
+	if runtime.GOOS == "darwin" {
+		path = "/dev/fd"
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dir.Close() }()
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	self := int(dir.Fd())
+	out := make(map[int]struct{}, len(names))
+	for _, name := range names {
+		n, conv := strconv.Atoi(name)
+		if conv != nil || n == self {
+			continue
+		}
+		out[n] = struct{}{}
+	}
+	return out, nil
+}
+
+// closeArrivals closes descriptors that appeared after before. before
+// must be a successful listFDs result. A nil map means the snapshot
+// failed, and closing "new" descriptors would close the whole process.
+func closeArrivals(before map[int]struct{}) {
+	if before == nil {
+		return
+	}
+	after, err := listFDs()
+	if err != nil {
+		return
+	}
+	for fd := range after {
+		if _, ok := before[fd]; ok {
+			continue
+		}
+		unix.CloseOnExec(fd)
+		_ = unix.Close(fd)
 	}
 }
 

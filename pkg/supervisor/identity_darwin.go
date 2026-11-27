@@ -28,7 +28,10 @@ func ProcessStart(pid int) (int64, error) {
 	}
 	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
-		if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
+		// A pid that has already been reaped makes sysctl return a short
+		// buffer, which x/sys reports as EIO. ESRCH and ENOENT are the
+		// other names for the same absence.
+		if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EIO) {
 			return 0, ErrProcGone
 		}
 		return 0, err
