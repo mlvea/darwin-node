@@ -5,23 +5,62 @@ package vz
 import (
 	"encoding/base64"
 	"fmt"
+	"runtime"
 
 	"github.com/Code-Hex/vz/v3"
 	"github.com/mlvea/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/vmidentity"
 )
 
+// preparePlatform mints one vz.NewMacMachineIdentifier per cold boot
+// and passes it to planColdBoot. That helper clonefiles NVRAM and fails
+// closed when the minted value equals the image identifier. The VM is
+// configured with the minted object. Whether two guests report different
+// IOPlatformUUID values is hardware-pending.
+func preparePlatform(spec types.VMSpec) (types.VMSpec, vmidentity.Boot, *vz.MacMachineIdentifier, error) {
+	ident, err := vz.NewMacMachineIdentifier()
+	if err != nil {
+		return spec, vmidentity.Boot{}, nil, err
+	}
+	raw := append([]byte(nil), ident.DataRepresentation()...)
+	runtime.KeepAlive(ident)
+	if len(raw) == 0 {
+		return spec, vmidentity.Boot{}, nil, fmt.Errorf("Virtualization.framework returned an empty machine identifier")
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	next, boot, err := planColdBoot(spec, func() (string, error) {
+		return encoded, nil
+	})
+	if err != nil {
+		return spec, boot, nil, err
+	}
+	if boot.MachineID != encoded {
+		_ = boot.Release()
+		return spec, vmidentity.Boot{}, nil, fmt.Errorf("cold boot did not keep the fresh machine identifier")
+	}
+	return next, boot, ident, nil
+}
+
 // attachPlatformAndDisk wires hardware model, machine identifier, auxiliary
-// storage, and the boot disk. Derived from Agoda macOS-vz-kubelet
-// pkg/vm/config (Apache-2.0).
-func attachPlatformAndDisk(cfg *vz.VirtualMachineConfiguration, spec types.VMSpec) error {
+// storage, the entropy device, and the boot disk. Derived from Agoda
+// macOS-vz-kubelet pkg/vm/config (Apache-2.0). The machine identifier is
+// the one preparePlatform minted. WithCreatingMacAuxiliaryStorage is not
+// used: a blank aux drops the iBoot LocalPolicy and the guest will not boot.
+func attachPlatformAndDisk(cfg *vz.VirtualMachineConfiguration, spec types.VMSpec, boot vmidentity.Boot, ident *vz.MacMachineIdentifier) error {
 	if spec.DiskPath == "" {
 		return fmt.Errorf("vz runtime requires DiskPath (clonefile overlay of disk.img)")
 	}
 	if spec.HardwareModelData == "" {
 		return fmt.Errorf("vz runtime requires HardwareModelData from the image config")
 	}
-	if spec.AuxPath == "" {
-		return fmt.Errorf("vz runtime requires AuxPath (clonefile overlay of aux.img)")
+	if boot.AuxPath == "" {
+		return fmt.Errorf("vz runtime requires a cloned aux image")
+	}
+	if !boot.AttachEntropy {
+		return fmt.Errorf("cold boot requires a virtio entropy device")
+	}
+	if ident == nil || boot.MachineID == "" || (boot.DiscardedMachineID != "" && boot.MachineID == boot.DiscardedMachineID) {
+		return fmt.Errorf("refusing to boot with the image machine identifier")
 	}
 
 	hwRaw, err := base64.StdEncoding.DecodeString(spec.HardwareModelData)
@@ -33,25 +72,10 @@ func attachPlatformAndDisk(cfg *vz.VirtualMachineConfiguration, spec types.VMSpe
 		return fmt.Errorf("hardware model: %w", err)
 	}
 
-	var ident *vz.MacMachineIdentifier
-	if spec.MachineIdentifierData != "" {
-		idRaw, err := base64.StdEncoding.DecodeString(spec.MachineIdentifierData)
-		if err != nil {
-			return fmt.Errorf("machineIdData: %w", err)
-		}
-		ident, err = vz.NewMacMachineIdentifierWithData(idRaw)
-		if err != nil {
-			return fmt.Errorf("machine identifier: %w", err)
-		}
-	} else {
-		// Always mint a unique identity for concurrent VMs (Apple requirement).
-		ident, err = vz.NewMacMachineIdentifier()
-		if err != nil {
-			return fmt.Errorf("new machine identifier: %w", err)
-		}
-	}
-
-	aux, err := vz.NewMacAuxiliaryStorage(spec.AuxPath)
+	// ident is the vz.NewMacMachineIdentifier preparePlatform just minted.
+	// spec.MachineIdentifierData is cleared before this call and is not
+	// decoded. IOPlatformUUID differing across boots is hardware-pending.
+	aux, err := vz.NewMacAuxiliaryStorage(boot.AuxPath)
 	if err != nil {
 		return fmt.Errorf("auxiliary storage: %w", err)
 	}
@@ -64,6 +88,12 @@ func attachPlatformAndDisk(cfg *vz.VirtualMachineConfiguration, spec types.VMSpe
 		return fmt.Errorf("mac platform: %w", err)
 	}
 	cfg.SetPlatformVirtualMachineConfiguration(plat)
+
+	entropy, err := vz.NewVirtioEntropyDeviceConfiguration()
+	if err != nil {
+		return fmt.Errorf("entropy device: %w", err)
+	}
+	cfg.SetEntropyDevicesVirtualMachineConfiguration([]*vz.VirtioEntropyDeviceConfiguration{entropy})
 
 	disk, err := vz.NewDiskImageStorageDeviceAttachment(spec.DiskPath, false)
 	if err != nil {
