@@ -98,7 +98,20 @@ ServiceAccount. The username is `system:node:<nodename>` and the group is
 `system:nodes`. `<nodename>` is the `--nodename` flag. A client certificate
 uses that name as the subject CommonName and `system:nodes` as the
 Organization. The API server's Node authorizer and NodeRestriction
-admission plugin are on by default. Together they allow this process to:
+admission plugin are on by default.
+
+`--rotate-client-certificates` issues that client certificate, and the
+flag is off unless it is set. With the flag on, the process is
+`system:node:<nodename>` in `system:nodes`, so NodeRestriction and the
+Node authorizer can apply. The ServiceAccount kubeconfig remains the
+default: with the rotation flags off, startup still loads `--kubeconfig`
+once. darwin-node does not approve CertificateSigningRequests. An
+approver outside this process has to sign the client CSR and the
+serving CSR. `deploy/csr/` does not grant `create` on signer
+`kubernetes.io/kubelet-serving`. See
+[node-certificates.md](node-certificates.md).
+
+Together the Node authorizer and NodeRestriction allow this process to:
 
 - create its Node and patch that Node's status
 - list and watch pods with `spec.nodeName` equal to this node
@@ -300,13 +313,18 @@ manifest. It has not been applied to a live API server.
   the guest cannot write through virtio-fs while backing files are removed.
 - Crash recovery (`Engine.Recover`, run from `engine.New`) deletes
   `cache/pods/<uid>` directories that are not in the slot table, including
-  ones only a minute old. A crash kills the VMs, so those directories are
-  secrets and overlays, not live machines, and they are not rebuilt into
-  the slot table. The pods are not started again from the deleted disks:
-  `Never` is marked `Failed` (`NodeRestarted`); `Always` and `OnFailure`
-  follow restart semantics. Drain the node before each upgrade. `cache/warm` leftovers from the previous process are
+  ones only a minute old. With `--vm-supervisor` left off, a crash kills
+  the VMs, so those directories are secrets and overlays, not live
+  machines, and they are not rebuilt into the slot table. The pods are
+  not started again from the deleted disks: `Never` is marked `Failed`
+  (`NodeRestarted`); `Always` and `OnFailure` follow restart semantics.
+  Drain the node before each upgrade on that path. With the flag on,
+  startup calls the supervised runtime's `Recover` first and holds the
+  slot of a live supervisor, so that pod directory, its disk, and
+  `control/agent-token` stay and the guest is redialed. A dead
+  supervisor keeps the settlement above. `cache/warm` leftovers from the previous process are
   removed at the same time. A directory whose uid already holds a slot is
-  left alone. The committed cache store is not rewritten from the orphan.
+  left alone. See [vm-supervisor-recovery.md](vm-supervisor-recovery.md). The committed cache store is not rewritten from the orphan.
   An arbitrary pod cannot replace a named cache: the share is read-only
   unless `cache-write.darwin.node/<name>` is `true` and `--cache-writers`
   names that namespace or ServiceAccount, and the commit runs only after
@@ -428,10 +446,19 @@ boundary for the slot. The full model is
   no host network until that bridge exists.
 - The adapter calls `supervisor.Adopt` on first attach and on `Recover`
   (a fresh Connect, then the death watch). The slot is released once
-  on `supervisor lost`. `pkg/engine` does not call that `Recover`. A
-  restarted agent leaves a live supervisor VM unadopted. The machine
-  status is `Failed` / `supervisor lost`. The pod text is still
-  `macOS VM Failed unexpectedly`.
+  on `supervisor lost`. With `--vm-supervisor` on, engine startup calls
+  that `Recover`. A live supervisor matching `cache/pods/<uid>` is
+  reattached as `Running`: the slot stays held, the disk and
+  `control/agent-token` stay, the guest is redialed through the adopted
+  fd, and no new VM is booted. Init and the workload are not applied
+  again. Sidecars are created again. A dead supervisor keeps the
+  node-restart settlement. An orphan supervisor is stopped and its slot
+  is released. A supervisor lost while the pod is `Running` is reason
+  and message `supervisor lost`, with no replacement boot. Any other
+  unexpected stop is still `macOS VM Failed unexpectedly`. The flag
+  stays default off. `Connect` during `Start` on real
+  Virtualization.framework is hardware-pending. See
+  [vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
 ## What we will not do
 

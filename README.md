@@ -34,7 +34,8 @@ like any other workload.
 | Kubelet authn/authz (client CA, TokenReview, SubjectAccessReview) | ✅ Verified against a real API server | `make test-kubelet-auth` (envtest, kube-apiserver + etcd 1.35) |
 | Real VM boot, exec, logs, metrics, delete | ⏳ Hardware pending | `make test-hardware IMAGE=...` on a Mac, not run yet |
 | 24 h adopt/delete soak on Virtualization.framework | ⏳ Hardware pending | `make soak IMAGE=...`, not run yet |
-| Per-VM supervisor (`--vm-supervisor`, default off) | ⏳ Protocol covered on Linux sockets; launchd and Virtualization.framework behaviour hardware-pending | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
+| Per-VM supervisor (`--vm-supervisor`, default off) | ⏳ Linux tests cover the control socket and engine re-adopt of a live supervisor. Launchd and Virtualization.framework behaviour, including `Connect` during `Start`, are hardware-pending | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
+| Node certificates (opt-in, default off) | ⏳ Fake-clientset CSR suite. Mac Mini approval is still manual | [docs/node-certificates.md](docs/node-certificates.md) |
 | Bridged/routed pod networking | ⏳ Design chosen, not built | See [Roadmap](#roadmap) |
 
 ---
@@ -92,10 +93,11 @@ flowchart TD
 - **Process boundary.** The VM is created in the agent process.
   `--vm-supervisor=on` (default `off`) moves it into the same binary
   started as `--role=supervisor --slot=N`, so an agent crash can leave
-  that VM running. The supervised adapter calls `supervisor.Adopt` on
-  first attach and on its own `Recover`. The engine does not call that
-  `Recover`, so a restarted agent still leaves the VM unadopted.
-  See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+  that VM running. With the flag on, engine startup calls the adapter's
+  `Recover` and reattaches a live supervisor as `Running` (no new VM).
+  The flag stays off unless it is set. See
+  [docs/vm-supervisor.md](docs/vm-supervisor.md) and
+  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md).
 - **Capacity.** Each VM takes one `darwin.node/vm-slot`. The node advertises
   that extended resource at the configured maximum (1 or 2) and fails closed
   there (Apple's macOS EULA and the XNU `hv_apple_isa_vm_quota` limit). If
@@ -326,6 +328,7 @@ See [docs/scheduling.md](docs/scheduling.md).
 | Delta image updates | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
 | Debug snapshot without a cluster | `darwin-node debug-dump -o debug-snapshot.json` | [docs/testing.md](docs/testing.md) |
 | Per-VM supervisor (default off) | `--vm-supervisor=on`, `--role=supervisor --slot=N` | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
+| Node certificate bootstrap and rotation (default off) | `--rotate-server-certificates`, `--rotate-client-certificates`, `--bootstrap-kubeconfig`, `--cert-dir` | [docs/node-certificates.md](docs/node-certificates.md) |
 
 Warm-pool adoption needs a matching image and a matching vCPU and memory
 size. The pool boots 2 vCPU and 4 GiB, which is the default request, so a
@@ -376,7 +379,11 @@ have no environment variable.
 | `--cache-writers` | `DARWIN_NODE_CACHE_WRITERS` | empty (nobody) | Namespaces or `namespace/serviceaccount` allowed to write named caches back after exit 0. The flag wins when both are set |
 | `--allowed-host-paths` | `DARWIN_NODE_ALLOWED_HOST_PATHS` | empty (deny all) | hostPath prefixes guests may use |
 | `--log-level` | – | `info` | `debug`, `info`, `warn` or `error` |
-| `--kubeconfig` | `KUBECONFIG` | `~/.kube/config` | Kubeconfig path |
+| `--kubeconfig` | `KUBECONFIG` | `~/.kube/config` | Kubeconfig path. Loaded once when certificate rotation is off. A ServiceAccount kubeconfig remains that default |
+| `--rotate-server-certificates` | `DARWIN_NODE_ROTATE_SERVER_CERTIFICATES` | `false` | Opt-in. Request kubelet serving certificates (signer `kubernetes.io/kubelet-serving`). darwin-node does not approve the CSR |
+| `--rotate-client-certificates` | `DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES` | `false` | Opt-in. Bootstrap and rotate the node client certificate as `system:node:<nodename>` in `system:nodes`. Requires `--bootstrap-kubeconfig` |
+| `--bootstrap-kubeconfig` | `DARWIN_NODE_BOOTSTRAP_KUBECONFIG` | empty | Kubeconfig used to create the first node client CSR |
+| `--cert-dir` | `DARWIN_NODE_CERT_DIR` | `~/Library/Application Support/io.darwin-node.node/pki` | Directory for rotated certificates. Created only when a rotation flag is on |
 | `--listen-address` | `DARWIN_NODE_LISTEN_ADDRESS` | `127.0.0.1` | Kubelet HTTPS bind address (port `10250`, `KUBELET_PORT` to change). The flag wins when both are set |
 | `--startup-timeout` | – | `0` (not set in `Default()`) | Passed to virtual-kubelet `Node.WaitReady`. A value of `0` adds no deadline: the call waits until the node is Ready, the controller exits, or the process context ends |
 | `--init-timeout` | – | `2m` | Maximum wait for each init container |
@@ -393,13 +400,26 @@ have no environment variable.
 | `--metrics-address` | `DARWIN_NODE_METRICS_ADDRESS` | `127.0.0.1:9102` | Prometheus `/metrics`. `off`, `disabled`, `-`, or empty disables it. An unset variable keeps the default |
 
 Per-VM supervisor. Default `off` leaves today's in-process VMs in place.
-The control protocol, `supervisor.Adopt`, and the gaps (the engine still
-does not call the adapter's `Recover`, no host NAT bridge, no serial
-console on the supervised machine) are in
-[docs/vm-supervisor.md](docs/vm-supervisor.md). Launchd and
+With the flag on, engine startup calls the adapter's `Recover` and
+reattaches a live supervisor. The control protocol, that reattach, and
+the gaps that remain (no host NAT bridge, no serial console on the
+supervised machine) are in
+[docs/vm-supervisor.md](docs/vm-supervisor.md) and
+[docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md). Launchd and
 Virtualization.framework behaviour, including `Connect` during `Start`,
 are hardware-pending. The socket path limit is in
 [docs/installation.md](docs/installation.md).
+
+Node certificates are opt-in and off by default. The four flags are
+`--rotate-server-certificates`
+(`DARWIN_NODE_ROTATE_SERVER_CERTIFICATES`),
+`--rotate-client-certificates`
+(`DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES`),
+`--bootstrap-kubeconfig` (`DARWIN_NODE_BOOTSTRAP_KUBECONFIG`), and
+`--cert-dir` (`DARWIN_NODE_CERT_DIR`). With them off, the kubeconfig is
+still loaded once and a new client certificate is still a new kubeconfig
+and a restart. darwin-node does not approve CSRs. See
+[docs/node-certificates.md](docs/node-certificates.md).
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
@@ -532,9 +552,10 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
   run directory (mode `0700`) and a same-uid check on the Unix socket
   (`LOCAL_PEERCRED` on macOS, `SO_PEERCRED` on Linux) are the local trust
   boundary. The supervisor does not parse the guest protocol. The adapter
-  calls `supervisor.Adopt` on first attach and on `Recover`. Kubelet
-  TLS, the virtualization entitlement, and the guest handshake stay as
-  they are with the flag off.
+  calls `supervisor.Adopt` on first attach and on `Recover`. With the
+  flag on, engine startup calls that `Recover` and reattaches a live
+  supervisor. Kubelet TLS, the virtualization entitlement, and the guest
+  handshake stay as they are with the flag off.
 
 **Reporting a vulnerability:** do **not** open a public issue. GitHub
 private vulnerability reporting is the only channel: open the
@@ -570,7 +591,8 @@ matter most:
   the listeners and every live splice. One side ending half-closes the
   other; both close after 5s. A dial to the guest gives up after 5s.
   The caps are 256 connections per pod and 512 per node. There is no flag.
-- **Per-VM supervisor is off, and turning it on does not yet preserve a pod across an agent restart.** The supervisor process can keep the VM, and the adapter can re-adopt it through `supervisor.Adopt`. `pkg/engine` does not call the adapter's `Recover`, so the new agent leaves that VM unadopted. A lost supervisor shows up on the pod as `macOS VM Failed unexpectedly`. A guest booted with the flag on has no host network until the file-handle NIC is bridged. Real launchd and Virtualization.framework behaviour, including `Connect` during `Start`, is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+- **Per-VM supervisor is off by default.** With `--vm-supervisor=on`, a supervisor that is still alive is reattached as `Running` after an agent restart: the slot stays held, the disk and agent token stay, the guest is redialed, and no new VM is booted. A dead supervisor keeps the node-restart settlement. A supervisor that disappears while the pod is running is reason and message `supervisor lost`, and restart policy does not boot a replacement. A guest booted with the flag on has no host network until the file-handle NIC is bridged. Real launchd and Virtualization.framework behaviour, including `Connect` during `Start`, is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md) and [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md).
+- **Node certificate rotation is off by default.** `--rotate-client-certificates` makes the process `system:node:<nodename>` in `system:nodes`. The ServiceAccount kubeconfig remains the default. darwin-node does not approve CSRs, and join waits until the client certificate is signed. See [docs/node-certificates.md](docs/node-certificates.md).
 - **macOS pods only.** The node always publishes `darwin.node/os=macos:NoSchedule`. Container 0 has to use a conventional disk-image repository name, or the pod sets `darwin.node/disk-image: "true"`. Init and sidecar CPU and memory requests count against that one VM, and those processes still start on the host. The VM still boots at container 0's size (default 2 vCPU / 4 GiB). See [docs/admission.md](docs/admission.md).
 - **No real hardware run yet.** See the status table at the top.
 
@@ -653,6 +675,9 @@ Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md
 | [docs/installation.md](docs/installation.md) | Build, sign, launchd, upgrades, Helm |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit together |
 | [docs/vm-supervisor.md](docs/vm-supervisor.md) | Per-VM supervisor (`--vm-supervisor`, default off), control socket, launchd slots |
+| [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md) | Engine re-adopt of a live supervisor when `--vm-supervisor` is on |
+| [docs/node-certificates.md](docs/node-certificates.md) | Opt-in node client and kubelet serving certificate rotation |
+| [docs/kubeconfig-rotation.md](docs/kubeconfig-rotation.md) | Default one-shot kubeconfig load and serving-file reload |
 | [docs/simvz.md](docs/simvz.md) | Linux stand-in for the VM runtime. It is not selected by `--runtime` |
 | [docs/code-layout.md](docs/code-layout.md) | Where a new file goes, so `engine.go`, `fake.go`, `config.go`, and `main.go` stay the entry points |
 | [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
