@@ -94,6 +94,9 @@ func newHandler(token string, insecure bool, stop guest.Stopper) *guest.Handler 
 		AgentVersion:         config.Version,
 		LogBuffer:            guest.NewLogBuffer(1024),
 		ShutdownFn:           guest.ShutdownFunc(stop),
+		// Darwin writes /dev/random and renames the guest. Other GOOS values
+		// get the in-memory platform so this binary can be tested on Linux.
+		AdoptPlatform: guest.NewHostPlatform(),
 	}
 }
 

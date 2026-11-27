@@ -10,8 +10,10 @@
 //     guest listens and the host dials, because the agent test mode is a
 //     listener. The bytes after connect are the same pkg/guest frames.
 //   - A SOCK_DGRAM socketpair stands in for VZFileHandleNetworkDeviceAttachment.
-//   - When Options.GuestBinary is set, Start execs that darwin-guest-agent.
-//     Otherwise the protocol server runs in-process on the same socket.
+//   - When Options.GuestBinary is set, Start execs that darwin-guest-agent
+//     with DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1 so the child does not
+//     reseed or rename the Mac running the test. Otherwise the protocol
+//     server runs in-process on the same socket.
 //
 // What is not real: there is no VZVirtualMachine, no hv_apple_isa_vm_quota
 // check inside XNU, and no virtio device. The 2-VM cap and the state machine

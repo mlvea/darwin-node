@@ -51,7 +51,12 @@ type Handler struct {
 	MaterializeFn func(req MaterializeReq) MaterializeRes
 	// WorkloadFn, when set, handles the Workload RPC instead of starting a
 	// process. The fake runtime and tests use it.
-	WorkloadFn       func(ctx context.Context, req WorkloadReq) error
+	WorkloadFn func(ctx context.Context, req WorkloadReq) error
+	// AdoptFn, when set, handles Adopt instead of AdoptPlatform. SimVZ
+	// uses it to inject a bad reseed. Nil uses AdoptPlatform, or the
+	// in-memory platform when that is also nil.
+	AdoptFn          func(ctx context.Context, req AdoptReq) (AdoptRes, error)
+	AdoptPlatform    AdoptPlatform
 	ShutdownFn       func(ctx context.Context, req ShutdownReq) error
 	SelftestFn       func(req SelftestReq) SelftestRes
 	MetalAvailableFn func() bool
@@ -749,6 +754,20 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodExec, Payload: b})
 		}()
 		return Envelope{}, ch
+
+	case MethodAdopt:
+		if err := ctx.Err(); err != nil {
+			return reply(nil, &CallError{Code: "adopt", Message: err.Error()}), nil
+		}
+		req, err := DecodePayload[AdoptReq](env)
+		if err != nil {
+			return reply(nil, &CallError{Code: "bad_request", Message: err.Error()}), nil
+		}
+		res, aerr := h.adopt(ctx, req)
+		if aerr != nil {
+			return reply(nil, &CallError{Code: "adopt", Message: aerr.Error()}), nil
+		}
+		return reply(res, nil), nil
 
 	case MethodWorkload:
 		req, err := DecodePayload[WorkloadReq](env)
