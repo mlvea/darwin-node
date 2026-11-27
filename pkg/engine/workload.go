@@ -71,9 +71,10 @@ func containerWorkload(c corev1.Container) (*guest.WorkloadReq, error) {
 	return &guest.WorkloadReq{Argv: argv, Env: env, Dir: c.WorkingDir}, nil
 }
 
-// applyContainerWorkload sends the VM container command once the agent is
-// up. Pods with no command, args, or env do not call the RPC, so an older
-// agent keeps running the image entrypoint.
+// applyContainerWorkload installs the per-job keychain and then sends the
+// VM container command. Pods with no command, args, or env still install
+// the keychain. They do not call the Workload RPC, so an older agent that
+// is allowed to skip the keychain keeps running the image entrypoint.
 func (e *Engine) applyContainerWorkload(ctx context.Context, cli *guest.Client, pod *corev1.Pod) error {
 	if cli == nil || pod == nil || len(pod.Spec.Containers) == 0 {
 		return nil
@@ -81,6 +82,9 @@ func (e *Engine) applyContainerWorkload(ctx context.Context, cli *guest.Client, 
 	c := pod.Spec.Containers[0]
 	req, err := containerWorkload(c)
 	if err != nil {
+		return err
+	}
+	if err := e.prepareEphemeralKeychain(ctx, cli, pod); err != nil {
 		return err
 	}
 	if req == nil {

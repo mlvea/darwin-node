@@ -2,6 +2,7 @@ package guest
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -188,6 +189,9 @@ type handlerLive struct {
 	// its idle watchdog, returns. Close is once so a second Stop is safe.
 	shut     chan struct{}
 	shutOnce sync.Once
+	// keys is the job keychain for every Serve of this agent. The password
+	// is not stored. Nil until the first EphemeralKeychain call.
+	keys atomic.Pointer[keychainState]
 }
 
 func newHandlerLive(token string, lim *Limiter) *handlerLive {

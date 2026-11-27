@@ -98,6 +98,11 @@ const (
 	// unknown_method. The host rejects that pod unless an operator opt-in
 	// says otherwise. See docs/guest-adopt.md.
 	MethodAdopt = "Adopt"
+	// MethodEphemeralKeychain installs the per-job keychain before the
+	// workload. It is additive on protocol 1. An older agent omits the
+	// capability and replies unknown_method. The host rejects that pod
+	// unless an operator opt-in says otherwise. See docs/guest-keychain.md.
+	MethodEphemeralKeychain = "EphemeralKeychain"
 	// MethodExit is the guest→host exit notice. See ExitReport.
 	MethodExit = "Exit"
 )

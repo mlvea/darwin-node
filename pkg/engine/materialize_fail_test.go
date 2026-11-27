@@ -249,6 +249,8 @@ func serveMaterializeRPCError(rw io.ReadWriteCloser) {
 				OK: true, AgentVersion: "test", Protocol: guest.ProtocolVersion,
 				Capabilities: guest.GuestCapabilities(),
 			})
+		case guest.MethodEphemeralKeychain:
+			werr = writeEphemeralKeychain(rw, env)
 		case guest.MethodAdopt:
 			req, derr := guest.DecodePayload[guest.AdoptReq](env)
 			if derr != nil {

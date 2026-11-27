@@ -97,6 +97,10 @@ func newHandler(token string, insecure bool, stop guest.Stopper) *guest.Handler 
 		// Darwin writes /dev/random and renames the guest. Other GOOS values
 		// get the in-memory platform so this binary can be tested on Linux.
 		AdoptPlatform: guest.NewHostPlatform(),
+		// Darwin creates the job keychain with Security.framework. Other
+		// GOOS values, and a darwin process with the software-platform
+		// variable set, get the in-memory image keychain.
+		KeychainPlatform: guest.NewHostKeychainPlatform(),
 	}
 }
 
