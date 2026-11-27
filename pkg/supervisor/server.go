@@ -96,6 +96,9 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) prepare(ctx context.Context) error {
+	if err := RaiseNOFILE(); err != nil {
+		slog.Warn("supervisor nofile limit", "err", err)
+	}
 	if s.RT == nil {
 		return fmt.Errorf("supervisor runtime is nil")
 	}

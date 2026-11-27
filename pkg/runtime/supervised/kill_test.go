@@ -38,13 +38,17 @@ func TestEnforceStopKillsAndWaits(t *testing.T) {
 	if time.Since(started) > 500*time.Millisecond {
 		t.Fatalf("stop budget was not enforced, took %s", time.Since(started))
 	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("killed supervisor was not reaped")
+	}
 	if processAlive(cmd.Process.Pid) {
 		t.Fatal("supervisor was still alive when the slot would be released")
 	}
 	if err == nil {
 		t.Fatal("kill path returned a nil error")
 	}
-	<-done
 }
 
 func TestEnforceStopDoesNotKillReusedPID(t *testing.T) {

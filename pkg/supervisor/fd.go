@@ -19,7 +19,9 @@ func sendFDs(conn *net.UnixConn, files []*os.File) error {
 		if f == nil {
 			return fmt.Errorf("nil file descriptor")
 		}
-		fds[i] = int(f.Fd())
+		fd := int(f.Fd())
+		unix.CloseOnExec(fd)
+		fds[i] = fd
 	}
 	oob := unix.UnixRights(fds...)
 	n, _, err := conn.WriteMsgUnix([]byte{1}, oob, nil)
@@ -46,22 +48,66 @@ func readFDs(conn *net.UnixConn, want int, oob []byte) ([]*os.File, error) {
 	if want < 1 {
 		return nil, fmt.Errorf("fd count %d", want)
 	}
+	if len(oob) == 0 {
+		oob = make([]byte, 1)
+	}
 	buf := make([]byte, 8)
 	n, oobn, flags, _, err := conn.ReadMsgUnix(buf, oob)
-	if err != nil {
-		return nil, err
+	// Parse before deciding the call failed. A truncated control message
+	// can still install descriptors, and those must be closed.
+	fds, perr := rightsFrom(oob[:oobn])
+	fail := func(e error) ([]*os.File, error) {
+		closeRaw(fds)
+		return nil, e
 	}
-	if n < 1 {
-		return nil, io.ErrUnexpectedEOF
+	if err != nil {
+		return fail(err)
 	}
 	if flags&unix.MSG_CTRUNC != 0 {
-		return nil, fmt.Errorf("fd control message truncated")
+		return fail(fmt.Errorf("fd control message truncated"))
 	}
-	scms, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if perr != nil {
+		return fail(perr)
+	}
+	if n < 1 {
+		return fail(io.ErrUnexpectedEOF)
+	}
+	if len(fds) != want {
+		return fail(fmt.Errorf("received %d file descriptors, want %d", len(fds), want))
+	}
+	files := make([]*os.File, len(fds))
+	for i, fd := range fds {
+		// NewFile only attaches the poller when the descriptor is
+		// already non-blocking. The agent reads these files.
+		if e := unix.SetNonblock(fd, true); e != nil {
+			closeRaw(fds[i:])
+			closeFiles(files[:i])
+			return nil, e
+		}
+		f := os.NewFile(uintptr(fd), "supervisor-fd")
+		if f == nil {
+			_ = unix.Close(fd)
+			closeRaw(fds[i+1:])
+			closeFiles(files[:i])
+			return nil, fmt.Errorf("supervisor fd")
+		}
+		files[i] = f
+	}
+	return files, nil
+}
+
+// rightsFrom parses SCM_RIGHTS and marks every received descriptor
+// close-on-exec before anything else can see it. Go's Linux recv path
+// also sets the flag. Darwin does not, so this call is required there.
+func rightsFrom(oob []byte) ([]int, error) {
+	if len(oob) == 0 {
+		return nil, nil
+	}
+	scms, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
 		return nil, err
 	}
-	var files []*os.File
+	var fds []int
 	for _, scm := range scms {
 		got, perr := unix.ParseUnixRights(&scm)
 		if perr != nil {
@@ -69,21 +115,26 @@ func readFDs(conn *net.UnixConn, want int, oob []byte) ([]*os.File, error) {
 		}
 		for _, fd := range got {
 			unix.CloseOnExec(fd)
-			// NewFile only attaches the poller when the descriptor is
-			// already non-blocking. The agent reads these files.
-			if e := unix.SetNonblock(fd, true); e != nil {
-				_ = unix.Close(fd)
-				closeFiles(files)
-				return nil, e
-			}
-			files = append(files, os.NewFile(uintptr(fd), "supervisor-fd"))
+			fds = append(fds, fd)
 		}
 	}
-	if len(files) != want {
-		closeFiles(files)
-		return nil, fmt.Errorf("received %d file descriptors, want %d", len(files), want)
+	return fds, nil
+}
+
+func closeRaw(fds []int) {
+	for _, fd := range fds {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
 	}
-	return files, nil
+}
+
+func setCloexec(f *os.File) {
+	if f == nil {
+		return
+	}
+	unix.CloseOnExec(int(f.Fd()))
+	runtime.KeepAlive(f)
 }
 
 func closeFiles(files []*os.File) {

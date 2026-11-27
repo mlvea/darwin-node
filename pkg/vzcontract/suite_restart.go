@@ -45,7 +45,7 @@ func testAgentRestart(t *testing.T, factory Factory) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	insp := bootVM(t, ctx, dir)
-	lease := leaseFrom(insp)
+	lease := leaseFrom(t, insp)
 	if err := supervisor.WriteLease(dir, 0, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func testSupervisorKilled(t *testing.T, factory Factory) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	insp := bootVM(t, ctx, dir)
-	lease := leaseFrom(insp)
+	lease := leaseFrom(t, insp)
 	if err := supervisor.WriteLease(dir, 0, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +219,9 @@ func adoptReq(dir string, lease supervisor.Lease, insp supervisor.Inspect, versi
 	}
 }
 
-func leaseFrom(insp supervisor.Inspect) supervisor.Lease {
-	return supervisor.Lease{
+func leaseFrom(t *testing.T, insp supervisor.Inspect) supervisor.Lease {
+	t.Helper()
+	lease := supervisor.Lease{
 		PodUID:                insp.PodUID,
 		PodName:               insp.PodName,
 		Namespace:             insp.Namespace,
@@ -230,6 +231,10 @@ func leaseFrom(insp supervisor.Inspect) supervisor.Lease {
 		SupervisorStartTimeNS: insp.StartTimeNS,
 		HMACToken:             insp.HMACToken,
 	}
+	if err := supervisor.AnnotateProcess(&lease); err != nil {
+		t.Fatal(err)
+	}
+	return lease
 }
 
 func shortRunDir(t *testing.T) string {

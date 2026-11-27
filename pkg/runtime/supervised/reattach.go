@@ -57,6 +57,9 @@ func (r *Runtime) adoptExisting(ctx context.Context, slot int, pods []supervisor
 			},
 			ImageRef: lease.ImageDigest,
 		},
+		supPID:    lease.SupervisorPID,
+		procStart: lease.SupervisorProcStart,
+		hostBoot:  lease.HostBootID,
 	}
 	if err := m.adoptLive(ctx, lease, presenceFor(pods, lease)); err != nil {
 		return nil, err

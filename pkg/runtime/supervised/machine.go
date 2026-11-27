@@ -30,6 +30,10 @@ type machine struct {
 	releaseOnce sync.Once
 	hbCancel    context.CancelFunc
 	status      types.VMStatus
+
+	supPID    int
+	procStart int64
+	hostBoot  string
 }
 
 func (m *machine) ID() types.MachineID { return m.id }
@@ -63,6 +67,16 @@ func (m *machine) Start(ctx context.Context) error {
 		SupervisorStartTimeNS: insp.StartTimeNS,
 		HMACToken:             insp.HMACToken,
 	}
+	if err := supervisor.AnnotateProcess(&lease); err != nil {
+		_ = m.client.StopVM(context.Background(), 0)
+		_ = m.client.Close()
+		return err
+	}
+	m.mu.Lock()
+	m.supPID = lease.SupervisorPID
+	m.procStart = lease.SupervisorProcStart
+	m.hostBoot = lease.HostBootID
+	m.mu.Unlock()
 	if err := supervisor.WriteLease(m.rt.RunDir, m.slot, lease); err != nil {
 		_ = m.client.StopVM(context.Background(), 0)
 		_ = m.client.Close()
@@ -104,6 +118,7 @@ func (m *machine) Stop(ctx context.Context, grace time.Duration) error {
 	netFD := m.netFD
 	client := m.client
 	sess := m.sess
+	ident := supervisor.ProcessIdentity{PID: m.supPID, Start: m.procStart, BootID: m.hostBoot}
 	m.netFD = nil
 	m.mu.Unlock()
 	if cancel != nil {
@@ -118,7 +133,9 @@ func (m *machine) Stop(ctx context.Context, grace time.Duration) error {
 	// connection Adopt opened.
 	sessionClient := sess != nil && client == sess.Client()
 	if client != nil {
-		err = client.StopVM(ctx, grace)
+		err = enforceStop(ctx, agentStopBudget(grace, 0), ident, func(ctx context.Context) error {
+			return client.StopVM(ctx, grace)
+		})
 	}
 	if sess != nil {
 		if cerr := sess.Close(); err == nil {

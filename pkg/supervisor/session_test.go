@@ -48,6 +48,9 @@ func TestAdoptGuestDataDoesNotSpin(t *testing.T) {
 		SupervisorStartTimeNS: insp.StartTimeNS,
 		HMACToken:             insp.HMACToken,
 	}
+	if err := AnnotateProcess(&lease); err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteLease(h.dir, 0, lease); err != nil {
 		t.Fatal(err)
 	}
