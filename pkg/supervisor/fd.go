@@ -138,8 +138,11 @@ func closeRaw(fds []int) {
 	}
 }
 
-// listFDs is the process's open descriptors, excluding the directory
-// this call opens to read them.
+// listFDs is the process's open descriptors. The directory used to read
+// them is closed before the result is returned. Darwin's fdopendir dups
+// that directory, and recvmsg will reuse the dup's number for a
+// descriptor that just arrived. Numbers that are already closed are
+// left out so the sweep does not treat a reused number as old.
 func listFDs() (map[int]struct{}, error) {
 	path := "/proc/self/fd"
 	if runtime.GOOS == "darwin" {
@@ -149,21 +152,28 @@ func listFDs() (map[int]struct{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = dir.Close() }()
-	names, err := dir.Readdirnames(-1)
-	if err != nil {
-		return nil, err
+	names, rdErr := dir.Readdirnames(-1)
+	closeErr := dir.Close()
+	if rdErr != nil {
+		return nil, rdErr
 	}
-	self := int(dir.Fd())
+	if closeErr != nil {
+		return nil, closeErr
+	}
 	out := make(map[int]struct{}, len(names))
 	for _, name := range names {
 		n, conv := strconv.Atoi(name)
-		if conv != nil || n == self {
+		if conv != nil || !fdLive(n) {
 			continue
 		}
 		out[n] = struct{}{}
 	}
 	return out, nil
+}
+
+func fdLive(fd int) bool {
+	_, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	return err == nil
 }
 
 // closeArrivals closes descriptors that appeared after before. before
