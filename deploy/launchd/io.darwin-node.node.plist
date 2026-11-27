@@ -39,6 +39,17 @@
 	<key>KeepAlive</key>
 	<true/>
 	<!--
+		AbandonProcessGroup leaves supervisor sessions alone when launchd
+		restarts this job. Setsid gives each supervisor its own process
+		group; without this key, kickstart -k still signals that group.
+		ProcessType Interactive disables App Nap so the agent heartbeat
+		is not deferred into the dead-man window.
+	-->
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<!--
 		ExitTimeOut is how long launchd waits after SIGTERM before SIGKILL.
 		It must stay above the shutdown grace period (default 60s, flag
 		shutdown-grace-period, or DARWIN_NODE_SHUTDOWN_GRACE) plus the

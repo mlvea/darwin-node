@@ -9,6 +9,17 @@ func TestCheckPassesWhenClean(t *testing.T) {
 	Check(t)
 }
 
+func TestCheckIgnoresGoroutineAliveAtSnapshot(t *testing.T) {
+	stop := make(chan struct{})
+	go func() {
+		<-stop
+	}()
+	// Registered first so it runs after Check. The goroutine is still
+	// blocked while Check compares ids.
+	t.Cleanup(func() { close(stop) })
+	Check(t)
+}
+
 func TestCheckDetectsLeakedModuleGoroutine(t *testing.T) {
 	Check(t)
 	done := make(chan struct{})

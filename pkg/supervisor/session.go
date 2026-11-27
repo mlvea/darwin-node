@@ -55,18 +55,22 @@ type Session struct {
 	// doneOnce closes done on loss and on Close. Waiters must leave
 	// either way, or a voluntary close leaks the wait goroutine.
 	doneOnce sync.Once
-	wg       sync.WaitGroup
 
-	ctrlFD  int
-	guestFD int
-	wakeR   int
-	wakeW   int
+	pid       int
+	stopWatch func()
+	ctrlFD    int
+	guestFD   int
 }
 
 // Adopt dials the supervisor, checks the boot lease, and attaches a new
 // guest connection. The returned guest fd is the one AttachChannels just
 // received. It is never a descriptor Adopt was given.
 func Adopt(ctx context.Context, req AdoptRequest) (*Session, error) {
+	// Reject a reused pid before dialing. An empty host boot id fails
+	// here, so a stale lease cannot be trusted and is not signalled.
+	if err := CheckProcessLease(req.Lease); err != nil {
+		return nil, err
+	}
 	c, err := Dial(ctx, req.Socket, req.BinaryVersion, req.Slot)
 	if err != nil {
 		return nil, err
@@ -105,10 +109,9 @@ func Adopt(ctx context.Context, req AdoptRequest) (*Session, error) {
 		state:   SlotRunning,
 		lost:    make(chan struct{}),
 		done:    make(chan struct{}),
+		pid:     req.Lease.SupervisorPID,
 		ctrlFD:  -1,
 		guestFD: -1,
-		wakeR:   -1,
-		wakeW:   -1,
 	}
 	if err := s.startWatch(); err != nil {
 		_ = s.Close()
@@ -228,10 +231,15 @@ func (s *Session) Close() error {
 	if s.state == SlotRunning {
 		s.state = SlotClosed
 	}
+	stop := s.stopWatch
+	s.stopWatch = nil
 	s.mu.Unlock()
 	s.signalDone()
-	s.wake()
-	s.wg.Wait()
+	// Stop the watch before closing the descriptors it waits on, and
+	// before markLost can run again. markLost does not call Close.
+	if stop != nil {
+		stop()
+	}
 	return s.closeFDs()
 }
 
@@ -254,36 +262,18 @@ func (s *Session) startWatch() error {
 		_ = unix.Close(ctrl)
 		return err
 	}
-	var pipe [2]int
-	if err := unix.Pipe(pipe[:]); err != nil {
+	stop, err := watchLoss(s.pid, ctrl, guest, s.markLost)
+	if err != nil {
 		_ = unix.Close(ctrl)
 		_ = unix.Close(guest)
 		return err
 	}
-	r, w := pipe[0], pipe[1]
-	unix.CloseOnExec(r)
-	unix.CloseOnExec(w)
-	if err := unix.SetNonblock(w, true); err != nil {
-		_ = unix.Close(ctrl)
-		_ = unix.Close(guest)
-		_ = unix.Close(r)
-		_ = unix.Close(w)
-		return err
-	}
+	s.mu.Lock()
 	s.ctrlFD = ctrl
 	s.guestFD = guest
-	s.wakeR = r
-	s.wakeW = w
-	s.wg.Add(1)
-	go s.watch(r, ctrl, guest)
+	s.stopWatch = stop
+	s.mu.Unlock()
 	return nil
-}
-
-func (s *Session) watch(wakeR, ctrlFD, guestFD int) {
-	defer s.wg.Done()
-	if err := watchFDs(wakeR, ctrlFD, guestFD); err != nil {
-		s.markLost()
-	}
 }
 
 func (s *Session) markLost() {
@@ -306,13 +296,6 @@ func (s *Session) signalDone() {
 	})
 }
 
-func (s *Session) wake() {
-	if s.wakeW < 0 {
-		return
-	}
-	_, _ = unix.Write(s.wakeW, []byte{1})
-}
-
 func (s *Session) closeFDs() error {
 	s.mu.Lock()
 	guest := s.guest
@@ -321,8 +304,8 @@ func (s *Session) closeFDs() error {
 	s.guest = nil
 	s.nic = nil
 	s.client = nil
-	fds := []int{s.ctrlFD, s.guestFD, s.wakeR, s.wakeW}
-	s.ctrlFD, s.guestFD, s.wakeR, s.wakeW = -1, -1, -1, -1
+	fds := []int{s.ctrlFD, s.guestFD}
+	s.ctrlFD, s.guestFD = -1, -1
 	s.mu.Unlock()
 
 	var err error

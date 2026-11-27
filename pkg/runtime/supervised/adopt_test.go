@@ -26,6 +26,8 @@ const (
 	envSupervisedChild  = "DARWIN_NODE_SUPERVISED_CHILD"
 	envSupervisedRunDir = "DARWIN_NODE_SUPERVISED_RUN_DIR"
 	envSupervisedSlot   = "DARWIN_NODE_SUPERVISED_SLOT"
+	envStdioProbe       = "DARWIN_NODE_STDIO_PROBE"
+	envStdioProbeOut    = "DARWIN_NODE_STDIO_PROBE_OUT"
 )
 
 // TestNodeAgentRestartReadoptsFreshConnect is the runtime path for a
