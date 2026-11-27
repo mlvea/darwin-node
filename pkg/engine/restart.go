@@ -86,6 +86,12 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	if err != nil {
 		return err
 	}
+	// A restarted VM is a new boot. Reseed it before the workload or a
+	// copy-mode rematerialize. The caller stops the VM if this fails.
+	if err := e.reseedGuest(ctx, cli, pod); err != nil {
+		_ = cli.Close()
+		return err
+	}
 	if err := e.applyContainerWorkload(ctx, cli, pod); err != nil {
 		_ = cli.Close()
 		return err

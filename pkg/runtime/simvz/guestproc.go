@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/mlvea/darwin-node/pkg/guest"
 )
 
 // guestProc is one darwin-guest-agent child. kill is safe to call after
@@ -60,6 +62,10 @@ func (p *guestProc) kill() {
 	<-p.done
 }
 
+func guestAgentEnv() []string {
+	return append(os.Environ(), guest.EnvGuestSoftwarePlatform+"=1")
+}
+
 func (m *machine) spawnGuest(startCtx context.Context) error {
 	path, err := shortSock("simvz")
 	if err != nil {
@@ -75,6 +81,10 @@ func (m *machine) spawnGuest(startCtx context.Context) error {
 		args = append(args, "--idle-timeout", m.rt.idle.String())
 	}
 	cmd := exec.Command(m.rt.guestBin, args...)
+	// The child is this Mac, not a guest. Without this it would write
+	// /dev/random, set the clock, rename the machine, and delete SSH host
+	// keys on the runner. The image's launchd job does not set the variable.
+	cmd.Env = guestAgentEnv()
 	setDeathSignal(cmd)
 	out := &safeBuf{}
 	cmd.Stdout = out

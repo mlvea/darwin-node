@@ -13,18 +13,21 @@ const (
 	CapExit        = "exit"
 	CapMetrics     = "metrics"
 	CapStdinWindow = "stdin-window"
+	// CapAdopt is the reseed barrier. An older agent omits it. The host
+	// treats a missing name as "this guest cannot reseed".
+	CapAdopt = "adopt"
 )
 
 // HostCapabilities is what this host can use. GuestCapabilities is what
 // this agent implements. The session's set is the intersection.
 func HostCapabilities() []string {
-	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow}
+	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow, CapAdopt}
 }
 
 // GuestCapabilities is the list this agent reports. It is not the
 // intersection; the host computes that per session.
 func GuestCapabilities() []string {
-	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow}
+	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow, CapAdopt}
 }
 
 // IntersectCapabilities returns the names present on both sides, sorted

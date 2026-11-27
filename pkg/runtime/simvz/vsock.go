@@ -88,6 +88,7 @@ func (m *machine) inProcessHandler() guest.Handler {
 			}, nil
 		},
 	}
+	m.installAdopt(&h)
 	h.Init()
 	return h
 }

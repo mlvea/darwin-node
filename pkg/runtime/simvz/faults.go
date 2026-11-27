@@ -49,6 +49,12 @@ type Faults struct {
 	// DatagramENOBUFS is how many host datagram writes return ENOBUFS
 	// before a write is attempted. The payload is not queued.
 	DatagramENOBUFS int
+	// Adopt injects the in-process guest's Adopt result.
+	// "" runs the software reseed. "error" returns an error. "zero"
+	// returns an all-zero sample with a valid proof. "duplicate" returns
+	// one fixed sample for every pod, so the host rejects the second.
+	// FaultsFromSeed leaves this empty: a random plan must still boot.
+	Adopt string
 }
 
 // FaultsFromSeed is a deterministic plan. The same seed always returns

@@ -245,7 +245,24 @@ func serveMaterializeRPCError(rw io.ReadWriteCloser) {
 		var werr error
 		switch env.Method {
 		case guest.MethodHandshake:
-			werr = writeGuestResult(rw, env, guest.HandshakeRes{OK: true, AgentVersion: "test", Protocol: guest.ProtocolVersion})
+			werr = writeGuestResult(rw, env, guest.HandshakeRes{
+				OK: true, AgentVersion: "test", Protocol: guest.ProtocolVersion,
+				Capabilities: guest.GuestCapabilities(),
+			})
+		case guest.MethodAdopt:
+			req, derr := guest.DecodePayload[guest.AdoptReq](env)
+			if derr != nil {
+				return
+			}
+			res, aerr := guest.PerformAdopt(req, guest.NewSoftwarePlatform())
+			if aerr != nil {
+				werr = guest.WriteFrame(rw, guest.Envelope{
+					V: guest.ProtocolVersion, ID: env.ID, Kind: guest.KindError, Method: env.Method,
+					Error: &guest.CallError{Code: "adopt", Message: aerr.Error()},
+				})
+				break
+			}
+			werr = writeGuestResult(rw, env, res)
 		case guest.MethodReady:
 			werr = writeGuestResult(rw, env, guest.ReadyRes{Ready: true})
 		case guest.MethodMaterialize:

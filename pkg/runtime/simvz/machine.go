@@ -46,6 +46,10 @@ type Runtime struct {
 	rngMu     sync.Mutex
 	gateMu    sync.Mutex
 	gates     map[string]*gate
+
+	// trace records in-process Adopt and Workload calls. The guest-binary
+	// path does not fill it.
+	trace adoptTrace
 }
 
 // New builds a simulator. A nil clock is the wall clock. See Options.

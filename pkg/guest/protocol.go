@@ -93,6 +93,11 @@ const (
 	// replies unknown_method; the host then rejects the pod instead of
 	// leaving the command unused.
 	MethodWorkload = "Workload"
+	// MethodAdopt is the fail-closed reseed barrier. It is additive on
+	// protocol 1. An older agent omits the adopt capability and replies
+	// unknown_method. The host rejects that pod unless an operator opt-in
+	// says otherwise. See docs/guest-adopt.md.
+	MethodAdopt = "Adopt"
 	// MethodExit is the guest→host exit notice. See ExitReport.
 	MethodExit = "Exit"
 )

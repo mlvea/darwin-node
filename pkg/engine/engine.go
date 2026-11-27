@@ -104,6 +104,9 @@ type Engine struct {
 	// adopted is a supervisor VM reattached at startup and not yet handed
 	// to Create. Close stops whatever is still here.
 	adopted map[string]runtime.Machine
+
+	// guestSamples remembers Adopt RNG samples accepted on this node.
+	guestSamples *adoptSamples
 }
 
 // defaultCloseTimeout bounds Close when Create, Start, Stop, or RemovePod
@@ -200,6 +203,7 @@ func New(cfg config.Config, slots *capacity.Slots, rt runtime.Runtime, sc sideca
 		hostports:      hostport.New(),
 		sidecarBackOff: flowcontrol.NewBackOff(sidecarRestartBackoff, sidecarRestartBackoffMax),
 		pods:           map[string]*podRecord{},
+		guestSamples:   newAdoptSamples(adoptSampleLimit),
 	}
 	_ = e.Recover()
 	if cfg.WarmSlots > 0 {

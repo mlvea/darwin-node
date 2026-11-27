@@ -31,6 +31,15 @@ func (e *Engine) runConnected(ctx context.Context, rec *podRecord, pod *corev1.P
 		}
 		return
 	}
+	// Reseed before any volume placement or workload. A guest that cannot
+	// prove it is refused here, and the VM is stopped with the pod.
+	if err := e.reseedGuest(ctx, cli, pod); err != nil {
+		_ = cli.Close()
+		if ctx.Err() == nil {
+			e.fail(rec, err)
+		}
+		return
+	}
 	if len(places) > 0 {
 		var vp []guest.VolumePlace
 		for _, p := range places {
