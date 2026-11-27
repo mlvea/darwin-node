@@ -18,6 +18,12 @@ const (
 	BarrierBeforeKVOSaving         = "before_kvo_saving"
 	BarrierBeforeKVOResuming       = "before_kvo_resuming"
 	BarrierBeforeKVORestoring      = "before_kvo_restoring"
+	// BarrierBeforeAcceptWait parks Stop on the caller, after the stopped
+	// generation's listener is closed and before cleanup waits for that
+	// generation's accept loops. It is not an Apple KVO point. Unarmed,
+	// it returns immediately. The contract uses it to overlap Start with
+	// an in-flight Stop deterministically.
+	BarrierBeforeAcceptWait = "before_accept_wait"
 )
 
 func allBarriers() []string {
@@ -37,5 +43,6 @@ func allBarriers() []string {
 		BarrierBeforeKVOSaving,
 		BarrierBeforeKVOResuming,
 		BarrierBeforeKVORestoring,
+		BarrierBeforeAcceptWait,
 	}
 }

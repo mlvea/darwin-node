@@ -91,6 +91,7 @@ func (m *machine) spawnGuest(startCtx context.Context) error {
 	m.mu.Lock()
 	m.sock = path
 	m.proc = proc
+	m.bindGenLocked()
 	m.mu.Unlock()
 	if err := waitListen(startCtx, path, proc.done, proc.out); err != nil {
 		proc.kill()
@@ -98,6 +99,7 @@ func (m *machine) spawnGuest(startCtx context.Context) error {
 	}
 	m.mu.Lock()
 	m.agentReady = true
+	m.bindGenLocked()
 	m.mu.Unlock()
 	return nil
 }

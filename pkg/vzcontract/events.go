@@ -29,6 +29,12 @@ const (
 	BarrierBeforeKVOSaving         = "before_kvo_saving"
 	BarrierBeforeKVOResuming       = "before_kvo_resuming"
 	BarrierBeforeKVORestoring      = "before_kvo_restoring"
+	// BarrierBeforeAcceptWait is not an Apple KVO point. SimVZ parks the
+	// Stop caller after it has closed the stopped generation's listener
+	// and before it waits for that generation's accept loops. Real
+	// Virtualization.framework has no equivalent pause; a hardware run
+	// of the overlap case is hardware-pending.
+	BarrierBeforeAcceptWait = "before_accept_wait"
 )
 
 // Domain and framework error names. Code 6 is the VM limit. Code 9 is

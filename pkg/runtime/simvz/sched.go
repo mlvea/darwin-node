@@ -60,8 +60,10 @@ func (r *Runtime) OrderSeed() int64 {
 	return r.orderSeed
 }
 
-// ArmBarrier makes the next Barrier of this name block the actor until
-// ReleaseBarrier. Arm it before the operation that hits the name.
+// ArmBarrier makes the next barrier of this name block until
+// ReleaseBarrier. Most barriers run on the per-VM actor.
+// before_accept_wait runs on the Stop caller, after Stopped is published.
+// Arm it before the operation that hits the name.
 func (r *Runtime) ArmBarrier(name string) {
 	if r == nil || name == "" {
 		return

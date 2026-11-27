@@ -50,18 +50,26 @@ func (m *machine) serveInProcess(ctx context.Context) error {
 	}
 	h := m.inProcessHandler()
 	m.mu.Lock()
+	g := m.gen
 	if m.ln != nil || m.agentReady {
 		m.mu.Unlock()
 		_ = ln.Close()
 		_ = os.Remove(path)
 		return nil
 	}
+	if g == nil {
+		m.mu.Unlock()
+		_ = ln.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("simvz: serve: machine has no boot generation")
+	}
 	m.sock = path
 	m.ln = ln
 	m.agentReady = true
+	m.bindGenLocked()
+	g.wg.Add(1)
 	m.mu.Unlock()
-	m.wg.Add(1)
-	go m.acceptLoop(ctx, ln, h)
+	go m.acceptLoop(ctx, ln, h, g)
 	return nil
 }
 
@@ -84,8 +92,8 @@ func (m *machine) inProcessHandler() guest.Handler {
 	return h
 }
 
-func (m *machine) acceptLoop(ctx context.Context, ln net.Listener, h guest.Handler) {
-	defer m.wg.Done()
+func (m *machine) acceptLoop(ctx context.Context, ln net.Listener, h guest.Handler, g *generation) {
+	defer g.wg.Done()
 	var serves sync.WaitGroup
 	defer serves.Wait()
 	for {
@@ -117,16 +125,43 @@ func (m *machine) wrap(life, dial context.Context, conn net.Conn) net.Conn {
 }
 
 func (m *machine) crashGuest() {
+	m.crashGen(nil)
+}
+
+// crashGen kills only. nil means the generation that is current when the
+// lock is taken. A delayed crash whose generation Stop has already
+// replaced does nothing: closing the new boot's listener would undo a
+// Start that overlapped that Stop.
+func (m *machine) crashGen(only *generation) {
 	m.mu.Lock()
+	if only != nil && m.gen != only {
+		m.mu.Unlock()
+		return
+	}
 	ln := m.ln
-	m.ln = nil
 	proc := m.proc
+	m.ln = nil
 	m.proc = nil
 	m.agentOK = false
 	m.agentReady = false
+	cancel := m.lifeCancel
+	m.lifeCancel = nil
+	oldFlow := m.flow
+	ng := newFlowGroup()
+	m.flow = ng
+	if m.gen != nil {
+		m.gen.ln = nil
+		m.gen.proc = nil
+		m.gen.cancel = nil
+		m.gen.flow = ng
+	}
 	m.mu.Unlock()
-	m.cancelLife()
-	m.dropFlows()
+	if cancel != nil {
+		cancel()
+	}
+	if oldFlow != nil {
+		oldFlow.close()
+	}
 	if ln != nil {
 		_ = ln.Close()
 	}
@@ -139,12 +174,20 @@ func (m *machine) armCrash(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.wg.Add(1)
+	m.mu.Lock()
+	g := m.gen
+	if g != nil {
+		g.wg.Add(1)
+	}
+	m.mu.Unlock()
+	if g == nil {
+		return
+	}
 	go func() {
-		defer m.wg.Done()
+		defer g.wg.Done()
 		if err := m.clock.Sleep(ctx, m.faults.CrashAfter); err != nil {
 			return
 		}
-		m.crashGuest()
+		m.crashGen(g)
 	}()
 }

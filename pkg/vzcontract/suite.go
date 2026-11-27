@@ -26,6 +26,7 @@ func Run(t *testing.T, factory Factory) {
 	t.Run("dgram", func(t *testing.T) { testDgram(t, factory) })
 	t.Run("time", func(t *testing.T) { testTime(t, factory) })
 	t.Run("restart", func(t *testing.T) { testRestart(t, factory) })
+	t.Run("stopstart", func(t *testing.T) { testStopStart(t, factory) })
 }
 
 func prepare(t *testing.T) {

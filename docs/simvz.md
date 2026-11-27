@@ -66,9 +66,30 @@ order selected by `Options.Order`:
 - `jitter`: a permutation of those three. `OrderSeed` reproduces it. Seed
   0 draws one from the wall clock; a failing test prints it.
 
+`Start` is legal only from `Stopped` or `Error`, which is `canStart`.
+`Start` while the state is still `Stopping` returns
+`VZErrorInvalidVirtualMachineState` (code 3) and does not wait. Once
+`Stopped` is published, `Start` is legal even if that `Stop` call has
+not returned. Each `Start` or `Restore` installs a boot generation.
+`Stop` captures the generation that was current when it entered
+`Stopping` and waits only for that generation's accept loops. It closes
+only that generation's listener, guest process, NIC, and clone directory.
+A `Start` in the window after `Stopped` installs a different generation,
+which this cleanup does not join and does not tear down. That is the
+window the engine's guest watch uses: the session drop is observed from
+inside cleanup, the machine is already `Stopped`, and `restartVM` calls
+`Start` before `Stop` returns.
+
+`before_accept_wait` parks the `Stop` caller after that generation's
+listener is closed and before the wait. It is not an Apple KVO point.
+Unarmed, it returns immediately. The shared contract case that overlaps
+`Start` with this wait is hardware-pending on Virtualization.framework;
+SimVZ runs it in `pkg/vzcontract`.
+
 `ArmBarrier`, `WaitBarrier`, and `ReleaseBarrier` park the transition at
-the named hook (`before_kvo_stopped`, `before_stop_completion`, and the
-other `before_*` names in `barriers.go`). Per-VM callbacks run on one
+the named hook (`before_kvo_stopped`, `before_stop_completion`,
+`before_accept_wait`, and the other `before_*` names in `barriers.go`).
+Per-VM callbacks run on one
 actor goroutine. A synchronous call back onto that actor panics with
 `synchronous re-entry`.
 
