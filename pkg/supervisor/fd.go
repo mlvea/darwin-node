@@ -37,11 +37,16 @@ func sendFDs(conn *net.UnixConn, files []*os.File) error {
 // The caller owns the files. A short or truncated control message closes
 // whatever arrived and returns an error.
 func recvFDs(conn *net.UnixConn, want int) ([]*os.File, error) {
+	return readFDs(conn, want, make([]byte, unix.CmsgSpace(want*8+64)))
+}
+
+// readFDs is recvFDs with an explicit control buffer. Tests pass a short
+// buffer to force MSG_CTRUNC.
+func readFDs(conn *net.UnixConn, want int, oob []byte) ([]*os.File, error) {
 	if want < 1 {
 		return nil, fmt.Errorf("fd count %d", want)
 	}
 	buf := make([]byte, 8)
-	oob := make([]byte, unix.CmsgSpace(want*8+64))
 	n, oobn, flags, _, err := conn.ReadMsgUnix(buf, oob)
 	if err != nil {
 		return nil, err

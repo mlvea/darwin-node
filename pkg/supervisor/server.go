@@ -31,6 +31,11 @@ type Server struct {
 	AllowUIDSet    bool
 	AdvertiseMajor int
 	AdvertiseMinor int
+	// StopDeadline caps a hung VM stop after the caller's grace period.
+	// Zero means 10s. Tests set a shorter cap.
+	StopDeadline time.Duration
+	// Exit replaces os.Exit when that cap is exceeded. Nil means os.Exit.
+	Exit func(int)
 
 	mu      sync.Mutex
 	conns   int

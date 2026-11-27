@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,13 @@ import (
 func TestMain(m *testing.M) {
 	if os.Getenv(envSupervisedChild) == "1" {
 		if err := runSupervisedChild(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if os.Getenv(envStdioProbe) == "1" {
+		if err := reportStdioProbe(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -289,7 +297,7 @@ func TestSpawnSetsid(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("session id is read from /proc")
 	}
-	p, err := spawnProcess("/bin/sleep", []string{"30"})
+	p, err := spawnProcess("/bin/sleep", []string{"30"}, filepath.Join(t.TempDir(), "sleep.log"))
 	if err != nil {
 		t.Fatal(err)
 	}

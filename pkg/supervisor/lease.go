@@ -24,6 +24,13 @@ type Lease struct {
 	SupervisorPID         int    `json:"supervisor_pid"`
 	SupervisorStartTimeNS int64  `json:"supervisor_start_time_ns"`
 	HMACToken             string `json:"hmac_token"`
+	// HostBootID is the host boot session (kern.bootsessionuuid, or
+	// Linux boot_id). It is not the VM boot UUID in BootID.
+	HostBootID string `json:"host_boot_id,omitempty"`
+	// SupervisorProcStart is the OS process start time of SupervisorPID.
+	// Linux stores /proc/<pid>/stat starttime ticks. Darwin stores
+	// kinfo_proc start time in nanoseconds.
+	SupervisorProcStart int64 `json:"supervisor_proc_start,omitempty"`
 }
 
 // PodPresence is what the agent knows about the pod from the API server.

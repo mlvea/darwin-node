@@ -1,7 +1,9 @@
 package supervised
 
 import (
+	"fmt"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 )
 
@@ -23,14 +25,18 @@ func (p *Proc) Kill() {
 }
 
 func (r *Runtime) spawnSlot(slot int) (*Proc, error) {
-	return spawnProcess(r.binary(), r.supervisorArgs(slot))
+	return spawnProcess(r.binary(), r.supervisorArgs(slot), supervisorLog(r.RunDir, slot))
+}
+
+func supervisorLog(runDir string, slot int) string {
+	return filepath.Join(runDir, fmt.Sprintf("slot-%d.supervisor.log", slot))
 }
 
 // spawnProcess starts binary in a new session. Setsid plus abandoning the
 // process group is the dev stand-in for a launchd LaunchAgent. There is
 // no Pdeathsig: a dead agent must not take the VM with it. The Wait
 // goroutine reaps the child when this process outlives it.
-func spawnProcess(binary string, args []string) (*Proc, error) {
+func spawnProcess(binary string, args []string, logPath string) (*Proc, error) {
 	cmd := exec.Command(binary, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
