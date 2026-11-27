@@ -26,6 +26,19 @@ tab and choose **Report a vulnerability**.
   `system:nodes` so the Node authorizer and NodeRestriction apply.
   The chart default does not grant cluster-wide Secret, ConfigMap, or
   pod delete. See [docs/security.md](docs/security.md).
+- `--rotate-client-certificates` (default off, with
+  `DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES`) is the opt-in that makes
+  the process `system:node:<nodename>` in `system:nodes`, so
+  NodeRestriction and the Node authorizer can apply. The ServiceAccount
+  kubeconfig remains the default: with the rotation flags off, the
+  process still loads `--kubeconfig` once.
+  `--rotate-server-certificates`, `--bootstrap-kubeconfig`, and
+  `--cert-dir` are the other opt-in knobs
+  (`DARWIN_NODE_ROTATE_SERVER_CERTIFICATES`,
+  `DARWIN_NODE_BOOTSTRAP_KUBECONFIG`, `DARWIN_NODE_CERT_DIR`).
+  darwin-node does not approve CertificateSigningRequests. An approver
+  outside the process has to sign them. See
+  [docs/node-certificates.md](docs/node-certificates.md).
 - The guest agent is reached only over vsock. The plaintext TCP
   fallback is gone: `--agent-tcp-fallback`, `--listen`, and
   `DARWIN_NODE_AGENT_TCP_FALLBACK` do nothing. The pod token is not
@@ -95,9 +108,14 @@ tab and choose **Report a vulnerability**.
   (mode `0700`) and a same-uid peer check on the slot socket are the
   local trust boundary. The supervisor does not parse the guest
   protocol. The adapter calls `supervisor.Adopt` on first attach and
-  on `Recover`. The engine does not call that `Recover`, so a restarted
-  agent leaves a live VM unadopted. Kubelet TLS and the guest handshake
-  are unchanged. See [docs/vm-supervisor.md](docs/vm-supervisor.md).
+  on `Recover`. Engine startup calls that `Recover`: a live supervisor
+  matching `cache/pods/<uid>` is reattached as `Running` (slot held,
+  disk and agent token kept, guest redialed, no new VM). A dead
+  supervisor keeps the node-restart settlement. A supervisor lost at
+  runtime is reason and message `supervisor lost`, with no replacement
+  boot. Kubelet TLS and the guest handshake are unchanged while the
+  flag is off. See [docs/vm-supervisor.md](docs/vm-supervisor.md) and
+  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md).
 - The node always publishes `darwin.node/os=macos:NoSchedule`, including
   with `--disable-taint`. The label stays `kubernetes.io/os=darwin`.
   Container 0 is admitted by repository name. A custom name needs

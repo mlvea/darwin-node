@@ -25,7 +25,7 @@ make test-short
 - macOS-only admission and the always-on OS taint:
   `pkg/provider/admission_test.go` and `pkg/node/taint_test.go`. The
   rules are in [admission.md](admission.md)
-- SimVZ kubelet conformance (`pkg/kubeletconformance`, 25 cases) runs on every `go test`, including `-short` and `-race`. See [kubelet-conformance.md](kubelet-conformance.md).
+- SimVZ kubelet conformance (`pkg/kubeletconformance`, 25 cases) runs on every `go test`, including `-short` and `-race`. The harness forwards `Stop` with grace 0 and does not take a lock around `Stop`. Cleanup waits only for the boot generation captured when the machine entered `Stopping`. See [kubelet-conformance.md](kubelet-conformance.md) and [simvz.md](simvz.md).
 - Guest idle deadline in `pkg/guest`. Tests inject a clock (`idleClock`
   in `pkg/guest/idle.go`). A nil clock is the wall clock. `IdleMS` on
   the wire is unchanged, and no operator setting changed
@@ -41,7 +41,11 @@ leaves the VM running, a lease mismatch and a deleting pod leading to
 `StopVM`, peer-uid rejection, `ENOTCONN` (the connection closes, and
 that is not an auth failure), the dead-man timer, and goleak plus
 fd-count checks. The adapter's `Recover` and the lease check are in
-that set. `pkg/engine` does not call the adapter's `Recover`.
+that set. With `--vm-supervisor` on, `pkg/engine` startup calls that
+`Recover` before it deletes unheld pod directories. The metrics wrapper
+forwards the call. With the flag off, the wrapper returns no machines
+and the node-restart settlement is unchanged. See
+[vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
 A node-agent restart re-adopts through `supervisor.Adopt`
 (`pkg/supervisor/session.go`). Adopt dials, fences the lease, and calls
@@ -53,10 +57,12 @@ message `supervisor lost` within about 2 seconds. The watch is
 edge-triggered epoll (`EPOLLET`) on Linux and kqueue (`EV_CLEAR`) on
 Darwin. It does not wait for the dead-man switch. The contract test
 sets that switch to 1 hour; `--vm-supervisor-deadman` still defaults to
-5 minutes. The slot is released once. `pkg/engine` does not call the
-adapter's `Recover`. Pod text for that loss is still the engine's
-`macOS VM Failed unexpectedly`. `Connect` during `Start` on
-Virtualization.framework is hardware-pending.
+5 minutes. The slot is released once. A supervisor that disappears
+while the pod is `Running` is reason and message `supervisor lost`.
+Restart policy does not boot a replacement. Any other unexpected stop
+is still reason `VMFailed` and message `macOS VM Failed unexpectedly`.
+`Connect` during `Start` on Virtualization.framework is
+hardware-pending.
 
 These paths compile for `darwin/arm64` and have not been run on Apple
 hardware:
@@ -75,9 +81,32 @@ hardware:
   launchd and the entitlement are not exercised.
 
 `pkg/runtime/simvz` is a separate Linux stand-in that opens real
-descriptors for the engine. `--runtime` does not select it. See
-[simvz.md](simvz.md). The supervisor feature write-up is
-[vm-supervisor.md](vm-supervisor.md).
+descriptors for the engine. `--runtime` does not select it. No
+operator default changed. Each `Start` or `Restore` installs a boot
+generation. `Stop` waits only for
+the generation it captured on entry to `Stopping`, so a `Start` after
+`Stopped` is published is not joined by that cleanup. The rule is in
+[simvz.md](simvz.md). The conformance harness that relies on it is in
+[kubelet-conformance.md](kubelet-conformance.md). The supervisor
+feature write-up is [vm-supervisor.md](vm-supervisor.md).
+
+## Node certificates
+
+`--rotate-server-certificates` and `--rotate-client-certificates`
+default to off. With both off, startup still loads the kubeconfig once
+and the kubelet serving files still reload on mtime and size. The CSR
+suite in `pkg/nodecert` uses a fake clientset
+(`k8s.io/client-go/kubernetes/fake`) and `testing/synctest` as the
+certificate manager's clock. It covers serving and client issuance,
+renewal in the 70–90% window, a denied CSR, an apiserver outage through
+expiry, cert-directory modes, and a symlink that must stay inside the
+directory. `TestClientRotationDoesNotDropInflightPodStatus` keeps an
+in-flight pod status request on the certificate that started it.
+`cmd/darwin-node/certs_test.go` covers startup wiring, including the
+flag-off path. Approving a CSR on the Mac Mini, for
+`kubernetes.io/kube-apiserver-client-kubelet` and for
+`kubernetes.io/kubelet-serving`, is still manual. See
+[node-certificates.md](node-certificates.md).
 
 ## FuzzNodeLifecycle
 

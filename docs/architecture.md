@@ -184,8 +184,9 @@ returns and the normal path releases it. A second signal cancels the
 rest of that drain and still runs `Close` before exiting 130. A crash
 still skips the stop; the next process reclaims leftover pod directories.
 That reclaim is the in-process runtime (`--vm-supervisor` left off). With
-the flag on, the supervisor can keep the VM and the engine still leaves
-it unadopted. See [Per-VM supervisor](#per-vm-supervisor).
+the flag on, a supervisor that is still alive is reattached and a dead
+supervisor stays on the node-restart settlement. See
+[Per-VM supervisor](#per-vm-supervisor).
 
 ## Per-VM supervisor
 
@@ -211,24 +212,68 @@ The supervised adapter calls `supervisor.Adopt` on first attach and on
 saved fd. Supervisor death is `SlotLost` / `VMFailed` with message
 `supervisor lost` within about 2 seconds. The watch is edge-triggered
 epoll on Linux and kqueue on Darwin, and it does not wait for the
-dead-man switch. The engine does not call the adapter's `Recover`, so a
-restarted agent leaves a live supervisor VM unadopted. The pod status
-for that loss is still the engine's `macOS VM Failed unexpectedly`.
+dead-man switch. With `--vm-supervisor` on, `Engine.Recover` calls that
+adapter `Recover` before it deletes unheld pod directories. The metrics
+wrapper forwards the call. A live supervisor whose lease matches
+`cache/pods/<uid>` is reattached as `Running`: the slot stays held, the
+disk and `control/agent-token` stay, the guest is redialed through the
+adopted fd, and no new VM is booted. The restart count already on the
+pod is kept, and so is `status.startTime` when it is set. Init and the
+workload are not applied again. Sidecars are created again. A dead
+supervisor keeps the node-restart settlement (`Never` stays `Failed` /
+`NodeRestarted`, slot free, disk removed; `Always`, `OnFailure`, and an
+empty policy receive one restart credit and boot again). A supervisor with no
+matching pod directory is stopped and its slot is released. A
+supervisor lost while the pod is `Running` is reason and message
+`supervisor lost` on the pod. Restart policy does not boot a
+replacement, and the slot is released once. Any other unexpected stop
+is still the engine's `macOS VM Failed unexpectedly`. The flag stays
+default off. With it off, `Recover` returns no machines.
 `Connect` during `Start` on real Virtualization.framework is
 hardware-pending. The guest agent still dials the host, while
 `AttachChannels` dials the guest, and those meet
 when the guest listens. The datagram descriptor is handed to the agent
 and is not bridged, so a guest booted with the flag on has no host
-network. A recovered machine has an empty guest-agent token because the
-lease does not store it. `PauseAndSaveVM` returns the framework error
-on macOS 13; the save API is macOS 14, and the minimum stays macOS 13.
-LaunchAgents, `launchctl`, and these Virtualization.framework calls are
-hardware-pending. The plist text is what CI checks.
+network. The lease does not store the guest-agent token. On reattach
+the engine reads `cache/pods/<uid>/control/agent-token`. `PauseAndSaveVM`
+returns the framework error on macOS 13; the save API is macOS 14, and
+the minimum stays macOS 13. LaunchAgents, `launchctl`, and these
+Virtualization.framework calls are hardware-pending. The plist text is
+what CI checks. The engine half is
+[vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
 The operator notes, the 103-byte macOS socket-path limit, and the
 install steps are in [vm-supervisor.md](vm-supervisor.md) and
 [installation.md](installation.md). The decision is
 [ADR 0010](adr/0010-per-vm-supervisor.md).
+
+## Cluster startup
+
+A process that joins a cluster calls `clusterClient` in
+`cmd/darwin-node/run.go` before virtual-kubelet registers the node.
+With `--rotate-server-certificates` and `--rotate-client-certificates`
+both off, that loads `--kubeconfig` once through
+`nodeutil.ClientsetFromEnv` and does not create `--cert-dir`. The
+kubelet serving files still reload when their mtime or size changes.
+That is the previous code. The ServiceAccount kubeconfig remains the
+default.
+
+With `--rotate-client-certificates`, a `certificate.Manager` in
+`pkg/nodecert` requests signer
+`kubernetes.io/kube-apiserver-client-kubelet` using
+`--bootstrap-kubeconfig`. The manager sits in this cluster-startup
+path. Startup waits until the certificate exists, then API calls run
+as `system:node:<nodename>` in `system:nodes`, so NodeRestriction and
+the Node authorizer can apply. Later rotations build a new HTTP
+transport for requests that start after the swap. A request already
+inside `RoundTrip`, including a pod status write, stays on the
+transport that started it and is not dropped. darwin-node does not
+approve the CSR.
+
+`--rotate-server-certificates` starts a second manager for signer
+`kubernetes.io/kubelet-serving`. Startup does not wait for that
+certificate. See [node-certificates.md](node-certificates.md) and
+[kubeconfig-rotation.md](kubeconfig-rotation.md).
 
 ## Linux stand-in
 
@@ -260,6 +305,7 @@ that flag.
 | `pkg/event` | Kubernetes events |
 | `pkg/observability` | slog, Prometheus, OpenTelemetry |
 | `pkg/config` | Flags, env, file |
+| `pkg/nodecert` | Opt-in CSR bootstrap and rotation for the node client and the kubelet serving certificate. See [node-certificates.md](node-certificates.md) |
 
 ## Extension points (CRDs later)
 

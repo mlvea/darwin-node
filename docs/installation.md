@@ -71,7 +71,64 @@ export APISERVER_CA_CERT_LOCATION="$HOME/.kube/ca.crt"
 ```
 
 Without a cluster, `--runtime=fake --standalone` still prints capacity
-(`pods=2`, `vm=2`) and needs no certs.
+(`pods=2`, `vm=2`) and needs no certs. Certificate rotation cannot be
+combined with `--standalone`.
+
+## Node certificates (opt-in)
+
+`--rotate-server-certificates` and `--rotate-client-certificates`
+default to off. With both off, darwin-node loads `--kubeconfig` once
+and the kubelet serving files still reload when their mtime or size
+changes. That path is [kubeconfig-rotation.md](kubeconfig-rotation.md).
+
+To bootstrap the node client certificate and request a kubelet serving
+certificate, apply the CSR bindings and point the flags at files on
+the Mac:
+
+```bash
+kubectl apply -f deploy/csr/clusterrolebindings.yaml
+# or: helm upgrade --install darwin-node-csr deploy/csr/chart
+
+./bin/darwin-node \
+  --nodename="$(hostname | tr '[:upper:]' '[:lower:]')" \
+  --listen-address="$(ipconfig getifaddr en0)" \
+  --rotate-client-certificates \
+  --rotate-server-certificates \
+  --bootstrap-kubeconfig="$HOME/.kube/bootstrap-kubeconfig" \
+  --cert-dir="$HOME/Library/Application Support/io.darwin-node.node/pki"
+```
+
+`--bootstrap-kubeconfig` (`DARWIN_NODE_BOOTSTRAP_KUBECONFIG`) is the
+kubeconfig used to create the first client CSR. It should be a
+short-lived bootstrap identity in `system:bootstrappers`, not a
+cluster-admin kubeconfig. `--cert-dir` (`DARWIN_NODE_CERT_DIR`)
+defaults to that Application Support `pki` path and is created only
+when a rotation flag is on. The directory is mode `0700`. Private keys
+are mode `0600`.
+
+darwin-node does not approve CertificateSigningRequests. An approver
+outside this process has to approve the first client CSR (signer
+`kubernetes.io/kube-apiserver-client-kubelet`) and the serving CSR
+(signer `kubernetes.io/kubelet-serving`). Join waits until the client
+certificate is signed, so a missing approver hangs startup instead of
+registering the bootstrap identity. Startup does not wait for the
+serving certificate. Handshakes fail until it exists.
+
+`deploy/csr/clusterrolebindings.yaml` binds
+`system:certificates.k8s.io:certificatesigningrequests:nodeclient` to
+`system:bootstrappers` and `selfnodeclient` to `system:nodes`.
+`deploy/csr/chart` is the same bindings. Neither grants an approve
+verb, and neither grants `create` on signer
+`kubernetes.io/kubelet-serving`. The node identity needs that create
+permission from somewhere else, or the serving CSR is never submitted.
+After the node object exists, kube-controller-manager can approve a
+renewal whose user is `system:node:<nodename>`.
+
+Client rotation requires `--bootstrap-kubeconfig`. Either rotation flag
+requires a cert directory. Either flag with `--standalone` is rejected.
+The static serving files are not required while
+`--rotate-server-certificates` is on. The client CA is still required.
+See [node-certificates.md](node-certificates.md).
 
 You should then see:
 
@@ -194,19 +251,35 @@ those slot logs should rotate.
 
 ### Current limits of the flag
 
-These are the operator-visible gaps. The feature write-up records the
-same list.
+The first bullet is what startup does with the flag on. The lease does
+not store the guest-agent token; the engine reads the kept
+`control/agent-token` before the redial. The other bullets are still
+open. [vm-supervisor.md](vm-supervisor.md) records the same open items.
 
 - The supervised adapter adopts on first attach and on `Recover`
   through `supervisor.Adopt` (a fresh Connect over `SCM_RIGHTS`).
-  `pkg/engine` still does not call that `Recover`, so a restarted
-  agent with the flag on leaves a live VM unadopted. Startup still
-  deletes unheld pod directories. Supervisor death is `SlotLost` /
-  `VMFailed` `supervisor lost` within about 2 seconds and does not wait
-  for the dead-man switch. The pod text stays the engine's
-  `macOS VM Failed unexpectedly`. `Connect` during `Start` on real
+  With `--vm-supervisor` on, engine startup calls that `Recover`
+  before it deletes unheld pod directories. A live supervisor whose
+  lease matches `cache/pods/<uid>` is reattached as `Running`: the
+  slot stays held, the disk and `control/agent-token` stay, the guest
+  is redialed through the adopted fd, and no new VM is booted. The
+  restart count and `status.startTime` (when set) are kept. Init and
+  the workload are not applied again. Sidecars are created again. A
+  dead supervisor keeps the node-restart settlement (`Never` stays
+  `Failed` / `NodeRestarted`, slot free, disk removed; `Always`,
+  `OnFailure`, and an empty policy receive one restart credit). A
+  supervisor with no matching pod directory is stopped and its slot is
+  released. Startup
+  still deletes pod directories whose slots are not held. Supervisor
+  death while the pod is `Running` is reason and message
+  `supervisor lost` within about 2 seconds, with no replacement boot,
+  and the slot is released once. The watch does not wait for the
+  dead-man switch. Any other unexpected stop is still
+  `macOS VM Failed unexpectedly`. The flag stays default off. With it
+  off, `Recover` returns no machines. `Connect` during `Start` on real
   Virtualization.framework is hardware-pending. See
-  [vm-supervisor.md](vm-supervisor.md).
+  [vm-supervisor.md](vm-supervisor.md) and
+  [vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 - The guest agent still dials the host. `AttachChannels` dials the
   guest. Those meet when the guest listens.
 - The datagram descriptor is handed to the agent and is not bridged to
@@ -214,9 +287,6 @@ same list.
   that bridge exists.
 - The supervised machine does not expose the serial console.
   `--serial-console` on the in-process runtime is unchanged.
-- A recovered machine does not carry the guest-agent token. The lease
-  does not store it. The engine has to supply the token from the pod
-  before `DialAgent` on a reattached VM.
 - macOS 13 cannot save a paused VM. The save API is macOS 14. The
   minimum stays macOS 13, so `PauseAndSaveVM` returns the framework
   error there.
@@ -246,16 +316,17 @@ A second signal cancels the rest of the drain and still force-stops
 every remaining pod VM (`Engine.Close`: slot release; a cache write-back
 only if that workload already exited 0) before exiting 130. It does not
 wait out `--shutdown-grace-period`.
-A crash skips that stop. The next process reclaims leftover pod
-directories at startup. That is the in-process runtime. With
-`--vm-supervisor=on` the supervisor can keep the VM, and the engine
-does not adopt it. Drain the node before each upgrade so that
-restart is not how a running pod is stopped. See [Upgrades](#upgrades).
+A crash skips that stop. With `--vm-supervisor` left off, the next
+process deletes leftover pod directories and does not boot them as
+live machines. With the flag on, a supervisor that is still alive is
+reattached and a dead supervisor follows the node-restart settlement.
+See [Upgrades](#upgrades) and
+[vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
 ## Upgrades
 
-Drain the node before each upgrade. With `--vm-supervisor` left off
-(the default), a process restart, a crash, or a host reboot stops every
+With `--vm-supervisor` left off (the default), drain the node before
+each upgrade. A process restart, a crash, or a host reboot stops every
 pod VM. The next process deletes the leftover pod disks and does not
 resume those disks as live machines:
 
@@ -266,9 +337,13 @@ resume those disks as live machines:
 - A pod that had already `Succeeded` or `Failed` keeps that phase and
   is not started again.
 
-With `--vm-supervisor=on`, the slot supervisor can keep the VM across an
-agent restart, and the engine does not adopt it. Drain before the
-upgrade in that case too. See [Per-VM supervisor](#per-vm-supervisor).
+With `--vm-supervisor=on`, a supervisor that is still alive and whose
+lease matches `cache/pods/<uid>` is reattached as `Running`. The slot
+stays held, the disk and `control/agent-token` stay, and no new VM is
+booted. A dead supervisor keeps the settlement above: `Never` stays
+`Failed` / `NodeRestarted` with the slot free and the disk removed, and
+`Always`, `OnFailure`, and an empty policy still boot again. See
+[vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
 Draining first lets the pods shut down through the normal path, so a
 Job is not failed by the upgrade and an Always pod is not killed mid-run.
@@ -300,7 +375,7 @@ period, or launchd kills the process before that commit runs.
 
 `config.Config` and `config.Supervisor` are separate values. Precedence for both is defaults, then environment variables, then explicit flags. `buildCommand` in `cmd/darwin-node/main.go` calls `Config.MergeEnv` (`pkg/config/env.go`) and `(*Supervisor).MergeEnv` (`pkg/config/supervisor.go`) before the flags are registered, so an omitted flag keeps the environment value and a flag on the command line replaces it. `--help` prints those flag defaults after the environment has been applied. Node defaults come from `config.Default()` in `pkg/config/config.go`. Supervisor defaults come from `config.DefaultSupervisor()`.
 
-A value that `Config.MergeEnv` or `(*Supervisor).MergeEnv` cannot parse is an error before flags are parsed, including before `--help`. For the node config that is a bad integer, duration, Kubernetes quantity, or graphics string, and `DARWIN_NODE_IMAGE_GC` set to anything other than `true`, `1`, `false`, or `0`. For the supervisor config it is a non-integer `DARWIN_NODE_SLOT` or a `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` that is not a Go duration. A value that parses and then fails `Validate` (`pkg/config/validate.go` for the node, `(*Supervisor).Validate` for the supervisor) is an error when the command runs. The flag is already applied, so it can stand in for an environment value that would not validate. Node `Validate` rejects max VMs outside 1 or 2, warm slots outside 0–2, an unknown runtime or network mode, bridged mode with no interface, a negative duration, image GC thresholds out of range, a metrics address that is not `host:port` while metrics are on, a cache-writer entry that is not a namespace or `namespace/serviceaccount`, and any non-empty `DARWIN_NODE_SSH_PASSWORD` or `VZ_SSH_PASSWORD`. Supervisor `Validate` is described with the supervisor table below.
+A value that `Config.MergeEnv` or `(*Supervisor).MergeEnv` cannot parse is an error before flags are parsed, including before `--help`. For the node config that is a bad integer, duration, Kubernetes quantity, or graphics string, and `DARWIN_NODE_IMAGE_GC`, `DARWIN_NODE_ROTATE_SERVER_CERTIFICATES`, or `DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES` set to anything other than `true`, `1`, `false`, or `0`. For the supervisor config it is a non-integer `DARWIN_NODE_SLOT` or a `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` that is not a Go duration. A value that parses and then fails `Validate` (`pkg/config/validate.go` for the node, `(*Supervisor).Validate` for the supervisor) is an error when the command runs. The flag is already applied, so it can stand in for an environment value that would not validate. Node `Validate` rejects max VMs outside 1 or 2, warm slots outside 0–2, an unknown runtime or network mode, bridged mode with no interface, a negative duration, image GC thresholds out of range, a metrics address that is not `host:port` while metrics are on, a cache-writer entry that is not a namespace or `namespace/serviceaccount`, any non-empty `DARWIN_NODE_SSH_PASSWORD` or `VZ_SSH_PASSWORD`, client certificate rotation without `--bootstrap-kubeconfig`, and either rotation flag with an empty cert directory. Combining a rotation flag with `--standalone` is rejected in `cmd/darwin-node` before the process joins. Supervisor `Validate` is described with the supervisor table below.
 
 The first table is every variable `Config.MergeEnv` reads. The flag column is the matching `buildCommand` flag. Where that column is empty, there is no flag.
 
@@ -327,6 +402,10 @@ Host keep-away is subtracted from Allocatable. The defaults are 2 CPUs, 4Gi of m
 | `DARWIN_NODE_GRAPHICS` | `1920x1200@80` |  | `WxH@PPI`. `none` disables Metal |
 | `DARWIN_NODE_LISTEN_ADDRESS` | `127.0.0.1` | `--listen-address` | Kubelet HTTP bind address. The flag wins. An empty address binds every interface |
 | `KUBELET_PORT` | `10250` |  | Kubelet HTTP port. There is no flag |
+| `DARWIN_NODE_ROTATE_SERVER_CERTIFICATES` | `false` | `--rotate-server-certificates` | Opt-in. Request kubelet serving certificates (signer `kubernetes.io/kubelet-serving`). Only `true`, `1`, `false`, and `0` parse. An explicit flag wins. darwin-node does not approve the CSR. The cert directory is created only when this or client rotation is on. See [node-certificates.md](node-certificates.md) |
+| `DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES` | `false` | `--rotate-client-certificates` | Opt-in. Bootstrap and rotate the node client certificate as `system:node:<nodename>` in `system:nodes`. Requires `--bootstrap-kubeconfig`. Same boolean parse as the server flag. Join waits until the certificate is signed |
+| `DARWIN_NODE_BOOTSTRAP_KUBECONFIG` | empty | `--bootstrap-kubeconfig` | Kubeconfig used to create the first node client CSR. Required when client rotation is on |
+| `DARWIN_NODE_CERT_DIR` | `~/Library/Application Support/io.darwin-node.node/pki` | `--cert-dir` | Directory for rotated `kubelet-*-current.pem` files. Mode `0700`. Required when either rotation flag is on. Created only then |
 | `DARWIN_NODE_SHUTDOWN_GRACE` | `60s` | `--shutdown-grace-period` | Total drain budget on SIGTERM. launchd `ExitTimeOut` must be larger; see Shutdown behavior |
 | `DARWIN_NODE_AGENT_READY_TIMEOUT` | `2m` | `--agent-ready-timeout` | Budget for each guest-agent dial and ready check |
 | `DARWIN_NODE_SERIAL_CONSOLE` | `false` | `--serial-console` | `true` or `1` attaches break-glass serial ports |
