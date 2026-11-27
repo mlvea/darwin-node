@@ -30,6 +30,9 @@ func (m *machine) adoptLive(ctx context.Context, lease supervisor.Lease, pod sup
 	m.mu.Lock()
 	m.sess = sess
 	m.mu.Unlock()
+	if sess.Client() != nil {
+		m.noteHandshake(sess.Client().Handshake())
+	}
 	m.armLost()
 	return nil
 }

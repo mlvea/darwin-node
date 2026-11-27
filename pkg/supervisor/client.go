@@ -24,6 +24,7 @@ type Client struct {
 	peerMinor int
 	peerBin   string
 	slot      int
+	hs        Handshake
 }
 
 // StartRequest is StartVM. BootID and HMACToken are the fence the agent
@@ -82,6 +83,7 @@ func dialMajor(ctx context.Context, path, binaryVersion string, expectSlot, majo
 		_ = c.Close()
 		return nil, fmt.Errorf("supervisor slot %d, want %d", hello.Slot, expectSlot)
 	}
+	agentWire := WireMajor
 	ours := message{
 		Op:            opHello,
 		ProtocolMajor: major,
@@ -89,6 +91,10 @@ func dialMajor(ctx context.Context, path, binaryVersion string, expectSlot, majo
 		BinaryVersion: binaryVersion,
 		Role:          "agent",
 		Slot:          hello.Slot,
+		WireMajor:     &agentWire,
+		WireMinor:     WireMinor,
+		BuildSHA:      binaryVersion,
+		Capabilities:  defaultCapabilities(),
 	}
 	if err := writeMsg(c, ours); err != nil {
 		_ = c.Close()
@@ -110,7 +116,17 @@ func dialMajor(ctx context.Context, path, binaryVersion string, expectSlot, majo
 		peerMinor: hello.ProtocolMinor,
 		peerBin:   hello.BinaryVersion,
 		slot:      hello.Slot,
+		hs:        handshakeFromMessage(hello),
 	}, nil
+}
+
+// Handshake is the supervisor's version-skew report from this dial.
+// A supervisor that did not send version fields is wire major 0.
+func (c *Client) Handshake() Handshake {
+	if c == nil {
+		return Handshake{Legacy: true}
+	}
+	return c.hs.clone()
 }
 
 // PeerVersion is the supervisor hello. Minor and binary may differ from
@@ -147,8 +163,29 @@ func (c *Client) InspectVM(ctx context.Context) (Inspect, error) {
 }
 
 // PauseAndSaveVM asks the supervisor to pause the VM and write path.
+// Pause is optional: a peer that does not advertise it is refused here,
+// before the RPC. Re-adopt of an equal wire major does not require it.
 func (c *Client) PauseAndSaveVM(ctx context.Context, path string) error {
+	if c == nil || !c.hs.Allows(CapPause) {
+		return fmt.Errorf("supervisor does not advertise %s", CapPause)
+	}
 	_, err := c.call(ctx, message{Op: opPause, SavePath: path})
+	return err
+}
+
+// NoteWorkload records that the guest workload has started or exited.
+// The next handshake reports it. A later agent must not call Workload
+// again when the handshake says the workload already started.
+func (c *Client) NoteWorkload(ctx context.Context, note WorkloadNote) error {
+	if c == nil {
+		return fmt.Errorf("supervisor connection is closed")
+	}
+	_, err := c.call(ctx, message{
+		Op:              opNoteWorkload,
+		WorkloadStarted: note.Started,
+		WorkloadExited:  note.Exited,
+		ExitCode:        note.ExitCode,
+	})
 	return err
 }
 

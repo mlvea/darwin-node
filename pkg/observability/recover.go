@@ -60,3 +60,55 @@ func (m *meteredMachine) SetAgentToken(token string) {
 	}
 	setter.SetAgentToken(token)
 }
+
+type skewControlSetter interface {
+	SetSkewControl(supervisor.SkewControl)
+}
+
+// SetSkewControl forwards the version-skew hold hook. The engine installs
+// it on the runtime it was given, which is this wrapper in production.
+func (r *meteredRuntime) SetSkewControl(c supervisor.SkewControl) {
+	if r == nil {
+		return
+	}
+	inner, ok := r.inner.(skewControlSetter)
+	if !ok || inner == nil {
+		return
+	}
+	inner.SetSkewControl(c)
+}
+
+func (m *meteredMachine) WorkloadStarted() bool {
+	if m == nil || m.inner == nil {
+		return false
+	}
+	w, ok := m.inner.(interface{ WorkloadStarted() bool })
+	if !ok {
+		return false
+	}
+	return w.WorkloadStarted()
+}
+
+func (m *meteredMachine) WorkloadExit() (int32, bool) {
+	if m == nil || m.inner == nil {
+		return 0, false
+	}
+	w, ok := m.inner.(interface{ WorkloadExit() (int32, bool) })
+	if !ok {
+		return 0, false
+	}
+	return w.WorkloadExit()
+}
+
+func (m *meteredMachine) NoteWorkload(ctx context.Context, started, exited bool, code *int32) error {
+	if m == nil || m.inner == nil {
+		return nil
+	}
+	w, ok := m.inner.(interface {
+		NoteWorkload(context.Context, bool, bool, *int32) error
+	})
+	if !ok {
+		return nil
+	}
+	return w.NoteWorkload(ctx, started, exited, code)
+}

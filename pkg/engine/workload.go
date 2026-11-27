@@ -90,8 +90,12 @@ func (e *Engine) applyContainerWorkload(ctx context.Context, cli *guest.Client, 
 	if req == nil {
 		return nil
 	}
+	if e.podWorkloadStarted(pod) {
+		return nil
+	}
 	if err := cli.StartWorkload(ctx, *req); err != nil {
 		return fmt.Errorf("container %q: command was not applied: %w", c.Name, err)
 	}
+	e.noteSupervisorWorkloadPod(pod, true, false, nil)
 	return nil
 }

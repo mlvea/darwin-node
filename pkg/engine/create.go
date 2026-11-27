@@ -38,6 +38,17 @@ func (e *Engine) Create(ctx context.Context, pod *corev1.Pod, creds Credentials)
 		e.mu.Unlock()
 		return nil
 	}
+	e.mu.Unlock()
+	// A mismatched supervisor already occupies this pod's VM. Do not
+	// claim it, settle it, or boot another one.
+	if handled, err := e.keepVersionSkew(ctx, pod); handled || err != nil {
+		return err
+	}
+	e.mu.Lock()
+	if _, exists := e.pods[key]; exists {
+		e.mu.Unlock()
+		return nil
+	}
 	// A supervisor that outlived the previous process is claimed before
 	// the node-restart settlement, which would otherwise mark the pod
 	// Failed and leave the VM running with no owner.

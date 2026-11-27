@@ -107,6 +107,9 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 		if err := p.ConfigureNode(ctx, n); err != nil {
 			return err
 		}
+		if skew := eng.SupervisorSkew(); skew != nil {
+			skew.Apply(n)
+		}
 		podsQ := n.Status.Capacity[corev1.ResourcePods]
 		vmQ := n.Status.Capacity[corev1.ResourceName(types.ResourceVM)]
 		cpuQ := n.Status.Capacity[corev1.ResourceCPU]
@@ -125,7 +128,7 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 	if err != nil {
 		return err
 	}
-	if err := runVK(ctx, cfg, k8s, p, serving); err != nil {
+	if err := runVK(ctx, cfg, k8s, p, serving, eng.SupervisorSkew()); err != nil {
 		gate.Graceful(cfg.ShutdownGrace)
 		return err
 	}
@@ -161,7 +164,7 @@ func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
 	}
 }
 
-func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p *provider.Provider, serving dnconfig.CertificateProvider) error {
+func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p *provider.Provider, serving dnconfig.CertificateProvider, skew *node.SkewCordon) error {
 	if err := dnconfig.RequireKubeletClientCA(false, cfg.ClientCA); err != nil {
 		return err
 	}
@@ -189,12 +192,18 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 			p.SetCredentialResolver(provider.KubeResolver{Client: k8s})
 			np := node.NewStatusProvider(p.Inventory())
 			configureNodeHealth(np, cfg)
+			if skew != nil {
+				np.SetSkewCordon(skew)
+			}
 			// Ping before the first status is published. A failure stays
 			// inside the conditions; Ping itself returns nil so the node
 			// controller keeps patching them and renewing the lease.
 			p.InstallHealth(ctx, np)
 			if err := p.ConfigureNode(ctx, pc.Node); err != nil {
 				return nil, nil, err
+			}
+			if skew != nil {
+				skew.Apply(pc.Node)
 			}
 			return p, np, nil
 		},

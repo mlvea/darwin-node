@@ -25,6 +25,9 @@ type StatusProvider struct {
 	// a blank Node every period; without this, every publish looks like a
 	// transition.
 	conds []corev1.NodeCondition
+	// skew cordons the node while a supervisor wire major does not match.
+	// Nil leaves spec.unschedulable alone.
+	skew *SkewCordon
 }
 
 // NotReady is nil when the last probe succeeded. Pod creates use it to
@@ -155,8 +158,19 @@ func (p *StatusProvider) NotifyNodeStatus(ctx context.Context, cb func(*corev1.N
 	}()
 }
 
+func (p *StatusProvider) SetSkewCordon(s *SkewCordon) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.skew = s
+	p.mu.Unlock()
+}
+
 // nodeSnapshot builds the node we would publish. The previous conditions
-// are seeded first so LastTransitionTime survives a blank Node.
+// are seeded first so LastTransitionTime survives a blank Node. The skew
+// cordon is applied after Apply, which rebuilds conditions from the
+// inventory and would otherwise drop it.
 func (p *StatusProvider) nodeSnapshot() *corev1.Node {
 	if p == nil {
 		return nil
@@ -164,6 +178,7 @@ func (p *StatusProvider) nodeSnapshot() *corev1.Node {
 	p.mu.Lock()
 	inv := p.inv
 	prev := append([]corev1.NodeCondition(nil), p.conds...)
+	skew := p.skew
 	p.mu.Unlock()
 	n := &corev1.Node{}
 	if len(prev) > 0 {
@@ -171,6 +186,9 @@ func (p *StatusProvider) nodeSnapshot() *corev1.Node {
 	}
 	if err := Apply(context.Background(), n, inv); err != nil {
 		return nil
+	}
+	if skew != nil {
+		skew.Apply(n)
 	}
 	p.mu.Lock()
 	p.conds = append([]corev1.NodeCondition(nil), n.Status.Conditions...)
