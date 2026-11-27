@@ -1,0 +1,16 @@
+{{- if .Values.admission.podProfilePolicy.enabled }}
+{{- $raw := .Files.Get "files/validatingadmissionpolicy.yaml" }}
+{{- if not $raw }}
+{{- fail "files/validatingadmissionpolicy.yaml is empty; it shares deploy/admission/validatingadmissionpolicy.yaml" }}
+{{- end }}
+{{- $needle := "object.spec.runtimeClassName == 'darwin-vm'" }}
+{{- if not (contains $needle $raw) }}
+{{- fail "pod profile policy is missing the darwin-vm runtimeClass match" }}
+{{- end }}
+{{- $class := .Values.runtimeClass.name | toString }}
+{{- if or (contains "'" $class) (contains "\n" $class) }}
+{{- fail "runtimeClass.name cannot contain a single quote or a newline" }}
+{{- end }}
+{{- $repl := printf "object.spec.runtimeClassName == '%s'" $class }}
+{{ replace $needle $repl $raw }}
+{{- end }}

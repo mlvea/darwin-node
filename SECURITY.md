@@ -48,8 +48,25 @@ tab and choose **Report a vulnerability**.
 - Sidecar probes dial the container's own address. An empty host is not
   the node's loopback, and probe events do not include response bodies.
 - Sidecars run on a per-pod Docker network with `no-new-privileges`.
-  `privileged`, `hostNetwork`, `hostPID`, `hostIPC`, `docker.sock`, and
-  added capabilities are rejected before a VM slot is taken.
+  `allowPrivilegeEscalation: true`, `runAsNonRoot` without an explicit
+  non-zero `runAsUser`, and `docker.sock` are rejected on that path
+  before a VM slot is taken. `CreatePod` rejects `privileged`, added
+  capabilities, `hostNetwork`, `hostPID`, `hostIPC`, a `seccompProfile`
+  other than unset or `RuntimeDefault`, `appArmorProfile`,
+  `seLinuxOptions`, and `procMount: Unmasked` as `Failed` with reason
+  `UnsupportedPodField` and a Warning event, before a slot is taken.
+  `volumeDevices` and volume sources other than `emptyDir`, `secret`,
+  `configMap`, `downwardAPI`, allowlisted `hostPath`, and `projected`
+  (`serviceAccountToken`, `secret`, `configMap`, `downwardAPI`) are
+  `UnsupportedVolume`. `restartPolicy` `Never`, `OnFailure`, and
+  `Always` are admitted. `Always` restarts the guest process inside the
+  same VM and still uses one slot. `UpdatePod` does not run the check
+  again. Legacy seccomp and AppArmor annotations are not read. See
+  [docs/admission.md](docs/admission.md). The optional cluster policy
+  is `deploy/admission/validatingadmissionpolicy.yaml`
+  (`failurePolicy: Fail`), applied on its own or by Helm when
+  `admission.podProfilePolicy.enabled` is true. It has not been applied
+  to a live API server.
 - Image cache directories are `0700`.
 - Explicit flags win over `DARWIN_NODE_*` environment variables. The
   stock launchd plist sets `--listen-address`. That flag is the kubelet

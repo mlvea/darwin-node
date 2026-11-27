@@ -7,12 +7,12 @@ serviceAccount:
 clusterRole:
   name: darwin-node
 
-# Optional RuntimeClass for macOS pods. Default off: the chart stays
-# RBAC-only unless this is turned on. runtimeClassName darwin-vm then
-# carries the node's static tolerations, including
+# Optional RuntimeClass for macOS pods. Default off. runtimeClassName
+# darwin-vm then carries the node's static tolerations, including
 # darwin.node/os=macos:NoSchedule, and nodeSelector
 # kubernetes.io/os=darwin. It does not add darwin.node/vm-slot;
-# admission.slotRequest does that.
+# admission.slotRequest does that. admission.podProfilePolicy is a
+# separate opt-in and does not install this RuntimeClass.
 runtimeClass:
   enabled: false
   name: darwin-vm
@@ -21,8 +21,13 @@ runtimeClass:
 # MutatingAdmissionPolicy (Kubernetes 1.32+) that sets
 # darwin.node/vm-slot: "1" on container 0 when runtimeClassName matches
 # runtimeClass.name. Default off.
+# podProfilePolicy renders deploy/admission/validatingadmissionpolicy.yaml
+# (ValidatingAdmissionPolicy and binding). failurePolicy is Fail.
+# The runtimeClassName comparison uses runtimeClass.name. Default off.
 admission:
   slotRequest: false
+  podProfilePolicy:
+    enabled: false
 
 rbac:
   # node: authenticate as system:node:<nodename> in group system:nodes.

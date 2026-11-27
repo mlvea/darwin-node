@@ -254,6 +254,7 @@ helm install darwin-node deploy/helm/darwin-node -n darwin-node --create-namespa
 | `rbac.namespaces` | `[]` | Only used with `identity: serviceaccount` |
 | `runtimeClass.enabled` | `false` | Installs RuntimeClass `darwin-vm`, which carries the node's static tolerations, including `darwin.node/os=macos:NoSchedule`, and `kubernetes.io/os=darwin` |
 | `admission.slotRequest` | `false` | MutatingAdmissionPolicy (Kubernetes 1.32+) that sets `darwin.node/vm-slot: "1"` on container 0 |
+| `admission.podProfilePolicy.enabled` | `false` | ValidatingAdmissionPolicy that mirrors the macOS VM pod profile. `failurePolicy` is `Fail`. The runtimeClassName match uses `runtimeClass.name`. See [docs/admission.md](docs/admission.md) |
 
 The chart is version **0.3.0**.
 
@@ -495,26 +496,37 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
   printable characters. Guest CPU/memory numbers are untrusted telemetry for
   `kubectl top` and are never used for scheduling.
 - **Volumes and images.** `hostPath` is denied unless `--allowed-host-paths` is
-  set, and `/` is never shared. Content volumes are bound read-only and symlinks
-  are not followed on rewrite. Image digests are always verified. Image cache
-  paths are separated by tenant, credentials are sent only to their own
-  registry, and cache directories are `0700`.
+  set, and `/` is never shared. `CreatePod` admits `emptyDir`, `secret`,
+  `configMap`, `downwardAPI`, allowlisted `hostPath`, and `projected`
+  (`serviceAccountToken`, `secret`, `configMap`, `downwardAPI`).
+  `volumeDevices` and any other volume source are `Failed` with reason
+  `UnsupportedVolume` and a Warning event, before a slot is taken. See
+  [docs/admission.md](docs/admission.md). Content volumes are bound read-only
+  and symlinks are not followed on rewrite. Image digests are always verified.
+  Image cache paths are separated by tenant, credentials are sent only to
+  their own registry, and cache directories are `0700`.
 - **Host sidecars.** Each pod's sidecars share one Docker bridge
   (`darwin-node-<uid>`, label `darwin-node=pod`) with `no-new-privileges`.
   `runAsUser`, `runAsGroup`, `readOnlyRootFilesystem`, and capability drops
-  are applied. `privileged`, `allowPrivilegeEscalation`, added capabilities,
-  `hostNetwork`, `hostPID`, `hostIPC`, and `docker.sock` mounts are rejected
-  before a VM slot is taken. `runAsNonRoot` needs an explicit non-zero
-  `runAsUser`; the image `USER` is not inspected. HTTP and TCP probes dial
-  the container address from Docker inspect. An empty host, `localhost`, or
-  a loopback address means that address, and any other host is refused
-  without a dial. Loopback, unspecified, link-local, and multicast inspect
-  results are refused. A named port is resolved from that container; an
-  unknown name fails before the dial. hostPath binds are resolved and
-  checked against the allowlist twice, and Docker receives the resolved
-  path. Still open: the bridge is not `--internal` (the daemon gateway can
-  reach the host network, and sidecars in one pod can reach each other),
-  and seccomp, AppArmor, `fsGroup`, and `supplementalGroups` are not applied.
+  are applied. `allowPrivilegeEscalation: true`, `runAsNonRoot` without an
+  explicit non-zero `runAsUser`, and `docker.sock` mounts are rejected on
+  this path before a VM slot is taken. The image `USER` is not inspected.
+  `CreatePod` rejects `privileged`, added capabilities, `hostNetwork`,
+  `hostPID`, `hostIPC`, a `seccompProfile` other than unset or
+  `RuntimeDefault`, `appArmorProfile`, `seLinuxOptions`, and
+  `procMount: Unmasked` as `Failed` with reason `UnsupportedPodField` and
+  a Warning event, before a slot is taken. Legacy seccomp and AppArmor
+  annotations are not read. See [docs/admission.md](docs/admission.md).
+  HTTP and TCP probes dial the container address from Docker inspect. An
+  empty host, `localhost`, or a loopback address means that address, and
+  any other host is refused without a dial. Loopback, unspecified,
+  link-local, and multicast inspect results are refused. A named port is
+  resolved from that container; an unknown name fails before the dial.
+  hostPath binds are resolved and checked against the allowlist twice, and
+  Docker receives the resolved path. Still open: the bridge is not
+  `--internal` (the daemon gateway can reach the host network, and sidecars
+  in one pod can reach each other), and `fsGroup` and `supplementalGroups`
+  are not applied.
 - **SSH fallback** is off by default, key-only, and never uses passwords.
 - **Per-VM supervisor** is off by default. With `--vm-supervisor=on`, the
   run directory (mode `0700`) and a same-uid check on the Unix socket
@@ -588,9 +600,11 @@ to beta.
 1. **Hardware gate + 24 h soak** on a bare-metal Mac Mini, run as a pull-based
    gate. This blocks any "beta" label.
 2. **Finish the hardening pass.** Sidecar isolation is on main: a per-pod
-   bridge, `no-new-privileges`, admission rejects for privileged and host
-   namespaces, and container-address probes. Still open on that path: an
-   `--internal` bridge, plus seccomp, AppArmor, `fsGroup`, and
+   bridge, `no-new-privileges`, and container-address probes. The pod
+   profile rejects privileged containers, added capabilities, host
+   namespaces, non-default seccomp, AppArmor, and SELinux before a slot
+   is taken. See [docs/admission.md](docs/admission.md). Still open on
+   the sidecar path: an `--internal` bridge, plus `fsGroup` and
    `supplementalGroups`. hostPort connection lifecycle is in place:
    splices half-close, and pod delete or failure closes the listeners
    and the live connections. `darwin.node/vm-slot` scheduling,
@@ -642,7 +656,7 @@ Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md
 | [docs/simvz.md](docs/simvz.md) | Linux stand-in for the VM runtime. It is not selected by `--runtime` |
 | [docs/code-layout.md](docs/code-layout.md) | Where a new file goes, so `engine.go`, `fake.go`, `config.go`, and `main.go` stay the entry points |
 | [docs/scheduling.md](docs/scheduling.md) | `darwin.node/vm-slot`, taints, RuntimeClass, LimitRange |
-| [docs/admission.md](docs/admission.md) | macOS-only taint, disk-image name check, one-VM CPU and memory budget |
+| [docs/admission.md](docs/admission.md) | macOS-only taint, disk-image name check, one-VM CPU and memory budget, pod profile |
 | [docs/warm-pool.md](docs/warm-pool.md) | Warm VM lifecycle and adoption rules |
 | [docs/cache-volumes.md](docs/cache-volumes.md) | Cache annotations and snapshot store |
 | [docs/delta-images.md](docs/delta-images.md) | Delta format and apply algorithm |
@@ -651,6 +665,7 @@ Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md
 | [docs/security.md](docs/security.md) | Threat model, fail-closed defaults |
 | [docs/limitations.md](docs/limitations.md) | What this is not |
 | [docs/testing.md](docs/testing.md) | Unit, fake runtime, hardware e2e |
+| [docs/kubelet-conformance.md](docs/kubelet-conformance.md) | SimVZ kubelet pod-lifecycle cases (`pkg/kubeletconformance`) |
 | [docs/stability.md](docs/stability.md) | What is proven, and the path to beta |
 | [docs/HARDWARE_VALIDATION.md](docs/HARDWARE_VALIDATION.md) | Real-Mac checklist |
 | [docs/adr/](docs/adr/0000-index.md) | Architecture decision records |

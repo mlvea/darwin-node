@@ -25,6 +25,7 @@ make test-short
 - macOS-only admission and the always-on OS taint:
   `pkg/provider/admission_test.go` and `pkg/node/taint_test.go`. The
   rules are in [admission.md](admission.md)
+- SimVZ kubelet conformance (`pkg/kubeletconformance`, 25 cases) runs on every `go test`, including `-short` and `-race`. See [kubelet-conformance.md](kubelet-conformance.md).
 - Guest idle deadline in `pkg/guest`. Tests inject a clock (`idleClock`
   in `pkg/guest/idle.go`). A nil clock is the wall clock. `IdleMS` on
   the wire is unchanged, and no operator setting changed

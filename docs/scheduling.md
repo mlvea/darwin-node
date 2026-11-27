@@ -85,6 +85,12 @@ class, the policy JSON-patches container 0 so
 `darwin.node/vm-slot` is `"1"`. A request that is already set is left
 alone. Missing `resources` or `requests` maps are created.
 
+`admission.podProfilePolicy.enabled` (default `false`) installs the
+pod-profile `ValidatingAdmissionPolicy` from
+`deploy/admission/validatingadmissionpolicy.yaml`. The runtimeClassName
+comparison uses `runtimeClass.name`, the same name the slot mutator
+matches. `failurePolicy` is `Fail`. See [admission.md](admission.md).
+
 ## LimitRange
 
 A namespace LimitRange can default the request without admission-policy

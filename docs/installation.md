@@ -401,8 +401,12 @@ spec, including with `--disable-taint`. A pod that does not use the
 RuntimeClass needs the same toleration or it will not schedule.
 `admission.slotRequest` (default `false`,
 Kubernetes 1.32+) adds `darwin.node/vm-slot: "1"` on container 0 when
-that runtime class is set. Image and budget rules are in
-[admission.md](admission.md). See [scheduling](scheduling.md).
+that runtime class is set. `admission.podProfilePolicy.enabled`
+(default `false`) renders
+`deploy/admission/validatingadmissionpolicy.yaml`. The runtimeClassName
+comparison uses `runtimeClass.name`. `failurePolicy` is `Fail`. Image,
+budget, and pod-profile rules are in [admission.md](admission.md). See
+[scheduling](scheduling.md).
 
 The default `rbac.identity` is `node`. Install the chart for the notes,
 and authenticate each Mac as `system:node:<nodename>` in group
