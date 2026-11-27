@@ -89,6 +89,7 @@ func (m *machine) inProcessHandler() guest.Handler {
 		},
 	}
 	m.installAdopt(&h)
+	m.installKeychain(&h)
 	h.Init()
 	return h
 }

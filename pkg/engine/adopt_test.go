@@ -252,6 +252,8 @@ func (s *adoptScript) serve(rw io.ReadWriteCloser) {
 			werr = writeGuestResult(rw, env, guest.HealthRes{OK: true})
 		case guest.MethodAdopt:
 			werr = s.serveAdopt(rw, env)
+		case guest.MethodEphemeralKeychain:
+			werr = writeEphemeralKeychain(rw, env)
 		case guest.MethodMaterialize:
 			werr = writeGuestResult(rw, env, guest.MaterializeRes{OK: true, Placed: []string{"ed"}})
 		case guest.MethodNetInfo:

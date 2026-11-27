@@ -55,6 +55,11 @@ type Faults struct {
 	// one fixed sample for every pod, so the host rejects the second.
 	// FaultsFromSeed leaves this empty: a random plan must still boot.
 	Adopt string
+	// Keychain injects an in-process ephemeral-keychain step failure.
+	// "" runs the in-memory install. "home", "create", "unlock",
+	// "default", "search", and "hide" fail that step before it changes
+	// the keychain directory. FaultsFromSeed leaves this empty.
+	Keychain string
 }
 
 // FaultsFromSeed is a deterministic plan. The same seed always returns

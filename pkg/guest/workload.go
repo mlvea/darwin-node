@@ -171,6 +171,10 @@ func ReportProcessExit(ctx context.Context, h *Handler, waitErr error, timeout t
 	code, reason := ExitFromProcess(waitErr)
 	reason = NormalizeExitReason(reason)
 	if h != nil {
+		// The workload has stopped using the job keychain. Delete it
+		// before the Exit notify and before halt. Shutdown deletes it
+		// again if this did not run; a second delete is success.
+		_ = h.releaseJobKeychain()
 		h.Init()
 		done := h.live.publishExitWait(ExitReport{ExitCode: &code, Reason: reason})
 		waitExitDelivered(ctx, done, timeout, h.live.closeExitConns)

@@ -140,10 +140,12 @@ type VMSpec struct {
 	IgnoreCache  bool
 
 	// Image-backed disk (required for the vz runtime).
-	DiskPath              string
-	AuxPath               string
-	HardwareModelData     string // base64
-	MachineIdentifierData string // base64; generated per pod if empty
+	DiskPath          string
+	AuxPath           string
+	HardwareModelData string // base64
+	// MachineIdentifierData is the image's baked machine id (base64).
+	// Cold boot always mints a fresh identifier and ignores a baked value (#72).
+	MachineIdentifierData string
 }
 
 // Share is a virtio-fs shared directory.

@@ -31,6 +31,7 @@ type adoptTrace struct {
 	events    []AdoptRecord
 	methods   map[string][]string
 	workloads map[string]int
+	keychains map[string]*guest.MemoryKeychain
 }
 
 func (t *adoptTrace) noteMethod(uid, method string) {

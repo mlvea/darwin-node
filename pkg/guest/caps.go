@@ -16,18 +16,22 @@ const (
 	// CapAdopt is the reseed barrier. An older agent omits it. The host
 	// treats a missing name as "this guest cannot reseed".
 	CapAdopt = "adopt"
+	// CapEphemeralKeychain is the per-job keychain. An older agent omits
+	// it. The host treats a missing name as "this guest cannot give the
+	// workload a fresh keychain".
+	CapEphemeralKeychain = "ephemeral-keychain"
 )
 
 // HostCapabilities is what this host can use. GuestCapabilities is what
 // this agent implements. The session's set is the intersection.
 func HostCapabilities() []string {
-	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow, CapAdopt}
+	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow, CapAdopt, CapEphemeralKeychain}
 }
 
 // GuestCapabilities is the list this agent reports. It is not the
 // intersection; the host computes that per session.
 func GuestCapabilities() []string {
-	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow, CapAdopt}
+	return []string{CapWorkload, CapExit, CapMetrics, CapStdinWindow, CapAdopt, CapEphemeralKeychain}
 }
 
 // IntersectCapabilities returns the names present on both sides, sorted

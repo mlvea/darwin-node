@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,6 +57,15 @@ type Handler struct {
 	// real process start. Nil changes nothing. SimVZ counts calls here so
 	// a workload still exits and reports that exit.
 	OnWorkload func(ctx context.Context, req WorkloadReq)
+	// OnKeychain observes an EphemeralKeychain RPC and then lets the
+	// platform install the job keychain. Nil changes nothing. SimVZ counts
+	// calls here.
+	OnKeychain func(ctx context.Context, req EphemeralKeychainReq)
+	// KeychainPlatform is the OS the job keychain touches. Nil uses an
+	// in-memory image keychain. Linux, SimVZ, and the fake runtime leave
+	// it nil or set that in-memory platform. The darwin guest agent sets
+	// the real one.
+	KeychainPlatform KeychainPlatform
 	// AdoptFn, when set, handles Adopt instead of AdoptPlatform. SimVZ
 	// uses it to inject a bad reseed. Nil uses AdoptPlatform, or the
 	// in-memory platform when that is also nil.
@@ -648,10 +658,15 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 		if err != nil {
 			return reply(nil, &CallError{Code: "bad_request", Message: err.Error()}), nil
 		}
+		// Delete the job keychain before sync and halt. A failure still
+		// halts: the pod is already stopping.
+		kerr := h.releaseJobKeychain()
+		var serr error
 		if h.ShutdownFn != nil {
-			if err := h.ShutdownFn(ctx, req); err != nil {
-				return reply(nil, &CallError{Code: "shutdown", Message: err.Error()}), nil
-			}
+			serr = h.ShutdownFn(ctx, req)
+		}
+		if err := errors.Join(kerr, serr); err != nil {
+			return reply(nil, &CallError{Code: "shutdown", Message: err.Error()}), nil
 		}
 		return reply(map[string]bool{"ok": true}, nil), nil
 
@@ -758,6 +773,23 @@ func (h *Handler) dispatch(ctx context.Context, handshook *atomic.Bool, env Enve
 			sendFrame(ctx, ch, Envelope{V: ProtocolVersion, ID: env.ID, Kind: KindResponse, Method: MethodExec, Payload: b})
 		}()
 		return Envelope{}, ch
+
+	case MethodEphemeralKeychain:
+		if err := ctx.Err(); err != nil {
+			return reply(nil, &CallError{Code: "keychain", Message: err.Error()}), nil
+		}
+		req, err := DecodePayload[EphemeralKeychainReq](env)
+		if err != nil {
+			return reply(nil, &CallError{Code: "bad_request", Message: err.Error()}), nil
+		}
+		if h.OnKeychain != nil {
+			h.OnKeychain(ctx, req)
+		}
+		res, kerr := h.ephemeralKeychain(ctx, req)
+		if kerr != nil {
+			return reply(nil, &CallError{Code: "keychain", Message: kerr.Error()}), nil
+		}
+		return reply(res, nil), nil
 
 	case MethodAdopt:
 		if err := ctx.Err(); err != nil {
