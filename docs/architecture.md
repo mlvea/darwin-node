@@ -100,6 +100,58 @@ boot entirely. Invariants:
 - Rejection still happens once no warm entry and no in-flight warm boot
   remain and every slot is held.
 
+## VM identity
+
+A cold boot leaves the image config's `machineIdData` unused. That field
+is a template baked at image build time. `preparePlatform` mints one
+`vz.NewMacMachineIdentifier` and `vmidentity.ColdBoot` keeps the image
+value only so a minter that returns those same bytes fails the boot. The
+platform is configured with the minted object. The image bytes are not
+decoded into it.
+
+`ColdBoot` clonefiles the golden aux to
+`<pod dir>/ephemeral/slot-<0|1>/<pod-uid>/aux.img`. `Machine.Stop` removes
+that file. The golden image stays. A missing path, an empty file, or a
+symlink is refused before the copy, so a failed boot does not leave an
+aux behind. There is no flag. `VMSpec` has no slot index. The vz runtime
+asks for slot 0, and the pod UID keeps the two concurrent clones apart.
+A warm adoption does not cold-boot again, so the pod keeps the identifier
+that VM's cold boot already minted.
+
+Virtualization.framework publishes no vmgenid. This tree does not restore
+a saved VM. A per-job ephemeral keychain is not implemented. Detail:
+[vm-identity.md](vm-identity.md).
+
+## Guest Adopt
+
+`Adopt` is a guest-agent method on protocol 1. It is separate from
+`supervisor.Adopt`, which reattaches the node-agent to a slot socket.
+
+`runConnected` dials the agent and then calls `Engine.reseedGuest` before
+`Materialize` and before `Workload`. A warm-pool handoff uses that same
+path. `restartVM` calls it again after the new dial, before the workload,
+and before a copy-mode rematerialize: a VM restart is a new boot.
+`recoverAgent` redials a dropped session and does not call `Adopt` again.
+Reattaching a live supervisor (`runRecovered`) redials the guest that is
+already running and does not call `Adopt`, `Materialize`, or `Workload`.
+
+The guest stays untrusted. The host checks `reseed_ok`, a 32-byte sample
+that is not all zeros, a constant-time proof
+`SHA256(host_entropy_64b || sample)`, a guest clock within 500ms of the
+host, and a UUID-shaped `io_platform_uuid`. A sample this engine has
+already accepted is rejected. The engine keeps 1024 samples and then
+drops the oldest. Entropy and samples stay out of pod status text.
+`Adopt` reports `io_platform_uuid` and does not rotate the ECID.
+
+A guest that omits capability `adopt`, or that answers `unknown_method`,
+fails the pod. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true` skips only
+that case and logs a warning. Default off. The variable is read in the
+engine. It is not a field on the node config. A bad proof still fails
+the pod. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1` or `true` forces the
+in-memory platform in `darwin-guest-agent`. SimVZ sets it when it execs
+the test child. The launchd job inside a VM image does not set it.
+Detail: [guest-adopt.md](guest-adopt.md).
+
 ## Cache volumes
 
 Pod annotations `cache.darwin.node/<name>: <absolute-guest-path>`
@@ -242,6 +294,35 @@ Virtualization.framework calls are hardware-pending. The plist text is
 what CI checks. The engine half is
 [vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
+`--vm-supervisor` stays default off until a Mac Mini passes the
+file-descriptor, App Nap, and `kickstart -k` checks in
+[vm-supervisor-hardening.md](vm-supervisor-hardening.md). Lease JSON
+includes `host_boot_id` (the host boot session, separate from the VM
+`boot_id`) and `supervisor_proc_start` (the OS start time of the
+supervisor pid). `supervisor.Adopt` rejects a lease that omits either
+field before it dials, and that pid is not signalled. `Recover` then
+asks a supervisor that is still listening to `StopVM` and deletes the
+lease, so the VM is not reattached. The hello/ready handshake and
+`ProtocolMajor` 1 are unchanged.
+
+`Machine.Stop` may spend the pod's termination grace in a clean guest
+shutdown and then hang inside `VZVirtualMachine.Stop`. The hang cap is
+added to that grace. The supervisor waits grace plus 10s and then exits
+1. The node-agent waits grace plus 12s, sends `SIGKILL`, and waits until
+the process has exited before it releases the slot. A pid whose host
+boot id or OS start time does not match the lease is not killed.
+
+A supervisor the agent spawns (`--vm-supervisor-spawn=subprocess`, the
+default) has stdin `/dev/null` and appends stdout and stderr to
+`<run dir>/slot-N.supervisor.log` (mode 0600). The parent closes its
+copies after `Start`. Slot LaunchAgents still log under
+`/var/log/darwin-node/`. The node plist
+`deploy/launchd/io.darwin-node.node.plist` sets `AbandonProcessGroup`
+and `ProcessType` `Interactive`, so `kickstart -k` leaves supervisor
+sessions running and App Nap does not defer the agent heartbeat. Those
+two checks, and the fd-flatness check, are hardware-pending. The plist
+is installed as a LaunchDaemon; see [installation.md](installation.md).
+
 The operator notes, the 103-byte macOS socket-path limit, and the
 install steps are in [vm-supervisor.md](vm-supervisor.md) and
 [installation.md](installation.md). The decision is
@@ -289,7 +370,8 @@ that flag.
 | `pkg/provider` | Virtual Kubelet `PodLifecycleHandler` |
 | `pkg/engine` | Pod state machine, restart policy, hooks, probes |
 | `pkg/runtime` | VM interface |
-| `pkg/runtime/vz` | Virtualization.framework (`darwin/arm64`) |
+| `pkg/runtime/vz` | Virtualization.framework (`darwin/arm64`). Cold boot calls `pkg/vmidentity` |
+| `pkg/vmidentity` | Per-pod machine identifier and private NVRAM clone. No Virtualization.framework import, so Linux tests run it. See [vm-identity.md](vm-identity.md) |
 | `pkg/runtime/fake` | In-process VM for tests |
 | `pkg/runtime/simvz` | Linux stand-in that opens real sockets. See [simvz.md](simvz.md). Not selected by `--runtime` |
 | `pkg/runtime/supervised` | Agent-side adapter for `--vm-supervisor=on`. First attach and `Recover` call `supervisor.Adopt` (a fresh Connect over `SCM_RIGHTS`) |
@@ -317,7 +399,7 @@ directly. The provider stays the Kubernetes *Pod* API.
 
 - Host agent is a privileged, entitled process (Virtualization, optional vmnet).
 - With `--vm-supervisor=on`, the run directory (mode `0700`, owned by the service uid) and a same-uid peer check on the control socket are the local trust boundary for that VM. The in-process path is unchanged while the flag is off.
-- Guest agent runs as root *inside* the VM, not on the host.
+- Guest agent runs as root *inside* the VM, not on the host. `Adopt` does not change that: the host checks the proof and rejects a reused sample. See [guest-adopt.md](guest-adopt.md).
 - vsock is host-process-only. The guest agent has no TCP transport.
   Guest-reported metrics and status text are untrusted.
 - Secrets exist on the host disk under a 0700 pod directory for the pod lifetime.
