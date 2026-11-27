@@ -189,6 +189,45 @@ func TestExplicitFlagBeatsEnv(t *testing.T) {
 			wantErr: "cache writer",
 		},
 		{
+			name: "rotate server env applies when the flag is omitted",
+			env:  map[string]string{"DARWIN_NODE_ROTATE_SERVER_CERTIFICATES": "true"},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if !c.RotateServerCertificates {
+					t.Fatal("rotate server stayed off")
+				}
+			},
+		},
+		{
+			name: "explicit rotate server flag beats env",
+			env:  map[string]string{"DARWIN_NODE_ROTATE_SERVER_CERTIFICATES": "true"},
+			args: []string{"--rotate-server-certificates=false"},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if c.RotateServerCertificates {
+					t.Fatal("rotate server stayed on from the environment")
+				}
+			},
+		},
+		{
+			name: "bootstrap kubeconfig flag beats env",
+			env:  map[string]string{"DARWIN_NODE_BOOTSTRAP_KUBECONFIG": "/env/boot"},
+			args: []string{"--bootstrap-kubeconfig", "/flag/boot"},
+			check: func(t *testing.T, c dnconfig.Config) {
+				if c.BootstrapKubeconfig != "/flag/boot" {
+					t.Fatalf("bootstrap %q", c.BootstrapKubeconfig)
+				}
+			},
+		},
+		{
+			name:    "client rotation without bootstrap kubeconfig fails",
+			env:     map[string]string{"DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES": "true"},
+			wantErr: "bootstrap-kubeconfig",
+		},
+		{
+			name:    "malformed rotate server env is an error",
+			env:     map[string]string{"DARWIN_NODE_ROTATE_SERVER_CERTIFICATES": "yes"},
+			wantErr: "DARWIN_NODE_ROTATE_SERVER_CERTIFICATES",
+		},
+		{
 			name: "cache writers default to empty",
 			env:  map[string]string{"DARWIN_NODE_CACHE_WRITERS": ""},
 			check: func(t *testing.T, c dnconfig.Config) {

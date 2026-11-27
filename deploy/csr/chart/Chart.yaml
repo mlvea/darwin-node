@@ -1,0 +1,6 @@
+apiVersion: v2
+name: darwin-node-csr
+description: ClusterRoleBindings that let a bootstrapping node request its client certificate. Does not sign CSRs.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

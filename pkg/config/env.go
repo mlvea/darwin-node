@@ -74,6 +74,26 @@ func (c *Config) MergeEnv() error {
 	if v := os.Getenv("KUBECONFIG"); v != "" {
 		c.KubeConfig = v
 	}
+	if v := os.Getenv("DARWIN_NODE_CERT_DIR"); v != "" {
+		c.CertDir = v
+	}
+	if v := os.Getenv("DARWIN_NODE_BOOTSTRAP_KUBECONFIG"); v != "" {
+		c.BootstrapKubeconfig = v
+	}
+	if v := os.Getenv("DARWIN_NODE_ROTATE_SERVER_CERTIFICATES"); v != "" {
+		on, err := parseBoolFlag("DARWIN_NODE_ROTATE_SERVER_CERTIFICATES", v)
+		if err != nil {
+			return err
+		}
+		c.RotateServerCertificates = on
+	}
+	if v := os.Getenv("DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES"); v != "" {
+		on, err := parseBoolFlag("DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES", v)
+		if err != nil {
+			return err
+		}
+		c.RotateClientCertificates = on
+	}
 	if v := os.Getenv("APISERVER_CERT_LOCATION"); v != "" {
 		c.CertPath = v
 	}
@@ -263,6 +283,17 @@ func splitComma(s string) []string {
 		}
 	}
 	return out
+}
+
+func parseBoolFlag(name, v string) (bool, error) {
+	switch v {
+	case "true", "1":
+		return true, nil
+	case "false", "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s: want true or false, got %q", name, v)
+	}
 }
 
 func first(a, b string) string {

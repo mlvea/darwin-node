@@ -68,6 +68,12 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
+	if c.RotateClientCertificates && strings.TrimSpace(c.BootstrapKubeconfig) == "" {
+		return fmt.Errorf("client certificate rotation requires --bootstrap-kubeconfig")
+	}
+	if (c.RotateServerCertificates || c.RotateClientCertificates) && strings.TrimSpace(c.CertDir) == "" {
+		return fmt.Errorf("certificate rotation requires --cert-dir")
+	}
 	return nil
 }
 

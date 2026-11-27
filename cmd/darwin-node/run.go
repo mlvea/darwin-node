@@ -32,6 +32,9 @@ import (
 )
 
 func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdownGate) error {
+	if err := rotationWithStandalone(standalone, cfg); err != nil {
+		return err
+	}
 	if err := dnconfig.RequireKubeletTLS(standalone, cfg); err != nil {
 		return err
 	}
@@ -117,11 +120,12 @@ func run(ctx context.Context, cfg dnconfig.Config, standalone bool, gate *shutdo
 		return nil
 	}
 
-	k8s, err := nodeutil.ClientsetFromEnv(cfg.KubeConfig)
+	k8s, serving, stopCerts, err := clusterClient(ctx, cfg, host.InternalIP)
+	defer stopCerts()
 	if err != nil {
-		return fmt.Errorf("kube client: %w (set KUBECONFIG or pass --standalone)", err)
+		return err
 	}
-	if err := runVK(ctx, cfg, k8s, p); err != nil {
+	if err := runVK(ctx, cfg, k8s, p, serving); err != nil {
 		gate.Graceful(cfg.ShutdownGrace)
 		return err
 	}
@@ -157,7 +161,7 @@ func newRuntime(cfg dnconfig.Config) (runtime.Runtime, error) {
 	}
 }
 
-func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p *provider.Provider) error {
+func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p *provider.Provider, serving dnconfig.CertificateProvider) error {
 	if err := dnconfig.RequireKubeletClientCA(false, cfg.ClientCA); err != nil {
 		return err
 	}
@@ -173,7 +177,7 @@ func runVK(ctx context.Context, cfg dnconfig.Config, k8s kubernetes.Interface, p
 	go bundle.Run(ctx)
 	// Server certificate only. The client CA, when set, is the live bundle
 	// above so a rotated file is picked up without pinning ClientCAs here.
-	tlsCfg, err := dnconfig.TLSConfig(cfg.CertPath, cfg.KeyPath, "")
+	tlsCfg, err := dnconfig.TLSConfigFromSource(cfg.CertPath, cfg.KeyPath, "", serving)
 	if err != nil {
 		return fmt.Errorf("kubelet tls: %w", err)
 	}

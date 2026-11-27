@@ -1,0 +1,4 @@
+# Group that holds the bootstrap credential in --bootstrap-kubeconfig.
+bootstrapGroup: system:bootstrappers
+# Group of system:node:<nodename> after the client certificate is issued.
+nodeGroup: system:nodes
