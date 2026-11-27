@@ -354,7 +354,11 @@ func TestDeadmanStopsVM(t *testing.T) {
 }
 
 func TestDeadmanHoldsWhileConnectedAndResetsOnHeartbeat(t *testing.T) {
-	const dead = 200 * time.Millisecond
+	// A 200ms switch leaves only dead/3 to reconnect. Under -race on a
+	// loaded macOS runner the accept path stalled past that and the
+	// dial observed the switch firing (EOF). One second keeps the same
+	// ratios and leaves a reconnect window that survives that stall.
+	const dead = time.Second
 	h := newHarness(t, dead, nil)
 	ctx := context.Background()
 	c := h.dial()
