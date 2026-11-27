@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -161,14 +162,26 @@ func countFDs(t *testing.T) int {
 	if runtime.GOOS == "darwin" {
 		path = "/dev/fd"
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
+	// Same finalizer race as fdCount. Drain, then require two reads to agree.
+	runtime.GC()
+	runtime.GC()
+	prev := -1
+	for i := 0; i < 20; i++ {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names, err := f.Readdirnames(-1)
+		_ = f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(names) == prev {
+			return prev
+		}
+		prev = len(names)
+		time.Sleep(5 * time.Millisecond)
+		runtime.GC()
 	}
-	defer func() { _ = f.Close() }()
-	names, err := f.Readdirnames(-1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return len(names)
+	return prev
 }
