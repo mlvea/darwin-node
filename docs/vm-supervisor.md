@@ -155,20 +155,47 @@ takes a fresh Connect, arms the death watch, and releases the supervisor
 slot exactly once when the message is `supervisor lost`. A later `Stop`
 does not free a slot a new VM has taken.
 
-`--vm-supervisor` stays default `off`. This path is not used while the
-flag is off.
+With `--vm-supervisor` on, `Engine.Recover` calls the adapter's
+`Recover` before it deletes unheld pod directories. The metrics wrapper
+in front of the runtime forwards that call, and it forwards
+`SetAgentToken`, because production wraps the runtime before the engine
+is built. A supervisor that is still alive and whose lease matches a
+pod directory under `cache/pods/<uid>` is reattached as `Running`. The
+engine holds that slot, so the disk and `control/agent-token` stay. The
+guest is redialed through the fd this adopt attached. No new VM is
+booted. The restart count already on the pod is kept, and so is
+`status.startTime` when it is set. Init containers and the container
+workload are not applied again. Sidecars are created again, because
+they exited with the agent process. The lease does not store the
+guest-agent token. The engine reads it from the kept pod directory
+before the redial. A pod that is already `Succeeded` or `Failed`, a
+pod with a deletion timestamp, or a namespace and name that do not
+match the machine is not marked `Running`. That VM is stopped, the
+slot is released, and the node-restart settlement runs.
 
-`pkg/engine` still does not call the adapter's `Recover`. Its own
-`Recover` only republishes cache stores and deletes unheld pod
-directories. A restarted node-agent process therefore leaves a live VM
-unadopted. The machine status is `Failed` / `supervisor lost`. The pod
-status the engine writes is still its generic text: reason `VMFailed`,
-message `macOS VM Failed unexpectedly`.
+A supervisor that is gone stays on the node-restart settlement.
+`RestartPolicy` `Never` remains `Failed` with reason `NodeRestarted`,
+the slot stays free, and the disk is removed. `Always`, `OnFailure`, and an empty policy
+still receive one restart credit and boot again. A supervisor with no
+matching pod directory is stopped and its slot is released.
+
+A supervisor that disappears while the pod is `Running` is reason and
+message `supervisor lost` on the pod. Restart policy does not boot a
+replacement. The supervisor slot is released once. A later `Stop` does
+not free a slot a new VM has taken. Any other unexpected stop is still
+reason `VMFailed` and message `macOS VM Failed unexpectedly`.
+
+`--vm-supervisor` stays default `off`. With the flag off the wrapper's
+`Recover` returns no machines, and startup recovery is the previous
+cache sweep and node-restart settlement.
 
 `Connect` during `Start` on real Virtualization.framework is
 hardware-pending. Adopt calls `Connect` immediately. A guest that is
 not listening yet can stall that call. SimVZ registers the agent during
 `Start`, so the Linux tests do not show the stall.
+
+The engine half of this adopt is
+[vm-supervisor-recovery.md](vm-supervisor-recovery.md).
 
 ## Peer check
 
@@ -250,9 +277,6 @@ not been run on Apple hardware in this change:
 
 ## Still open
 
-- `pkg/engine` still does not call the adapter's `Recover`. A restarted
-  agent with the flag on leaves a live VM unadopted. See
-  [Restart and death](#restart-and-death).
 - The guest agent still dials the host. `AttachChannels` dials the
   guest. Those meet when the guest listens.
 - The datagram descriptor is handed to the agent and not bridged.
@@ -263,8 +287,5 @@ not been run on Apple hardware in this change:
   the newsyslog rule count to match the node plist log files.
 - The supervised machine does not expose the serial console. The
   in-process console flag is unchanged.
-- A recovered machine does not carry the guest-agent token. The lease
-  does not store it. The engine has to supply the token from the pod
-  before `DialAgent` on a reattached VM.
 - After a clean supervisor exit, launchd will not start the slot again
   until `kickstart` or a subprocess spawn.

@@ -24,5 +24,15 @@ What already reloads without a restart:
 - The kubelet client CA (`APISERVER_CA_CERT_LOCATION`). The process
   watches that file and uses the new bundle on the next handshake.
 
-There is no CertificateSigningRequest bootstrap. A new client certificate
-is a new kubeconfig and a restart.
+That one-shot kubeconfig load, and the serving-file reload above, remain
+the default. A new client certificate on this path is still a new
+kubeconfig and a restart.
+
+`--rotate-client-certificates` with `--bootstrap-kubeconfig` is the
+opt-in replacement for that restart. The process waits for signer
+`kubernetes.io/kube-apiserver-client-kubelet` and later rotations swap
+the client transport without exiting. `--rotate-server-certificates`
+asks signer `kubernetes.io/kubelet-serving` to write the pair into
+`--cert-dir`. The serving-file reload above stays available when that
+flag is off. darwin-node does not approve either CSR. Both flags
+default to off. See [node-certificates.md](node-certificates.md).

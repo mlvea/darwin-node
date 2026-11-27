@@ -54,6 +54,20 @@ for half a minute.
 on the hooks in `pkg/runtime/simvz/barriers.go` (`before_kvo_stopped`,
 `before_stop_completion`, and the other `before_*` names).
 
+`before_accept_wait` parks the `Stop` caller after the stopped
+generation's listener is closed and before that generation's
+accept-loop wait. It is not an Apple KVO point. Unarmed, it returns
+immediately. The suite's `stopstart` case is `while_stopping` (`Start`
+while the state is still `Stopping` returns
+`VZErrorInvalidVirtualMachineState`, code 3, and does not wait) and
+`during_accept_drain` (`Start` after `Stopped` is published, while
+that generation's accept loops are still draining). SimVZ runs both.
+Real Virtualization.framework has no `before_accept_wait` pause, so
+`stopstart` and `during_accept_drain` stay hardware-pending there.
+`TestRealVZContract` still skips unless `DARWIN_NODE_VZ_HARDWARE=1`,
+and with that variable set the hardware factory returns
+hardware-pending.
+
 ## Traces
 
 `pkg/vzcontract/testdata/vz_traces/*.jsonl` is the Day-1 corpus. Every
