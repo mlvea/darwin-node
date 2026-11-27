@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,8 +13,10 @@ import (
 
 // RequireKubeletTLS refuses a plaintext kubelet HTTP server in cluster mode.
 // --standalone does not serve that API and does not need certs.
+// --rotate-server-certificates supplies the certificate from the manager,
+// so the static files are not required while that flag is on.
 func RequireKubeletTLS(standalone bool, cfg Config) error {
-	if standalone {
+	if standalone || cfg.RotateServerCertificates {
 		return nil
 	}
 	if strings.TrimSpace(cfg.CertPath) == "" || strings.TrimSpace(cfg.KeyPath) == "" {
@@ -67,19 +70,64 @@ func TLSConfig(cert, key, clientCA string) (*tls.Config, error) {
 		GetCertificate: src.get,
 		ClientAuth:     tls.NoClientCert,
 	}
-	if strings.TrimSpace(clientCA) == "" {
-		return cfg, nil
+	if err := applyClientCA(cfg, clientCA); err != nil {
+		return nil, err
 	}
-	pem, err := os.ReadFile(clientCA)
+	return cfg, nil
+}
+
+func applyClientCA(cfg *tls.Config, clientCA string) error {
+	if strings.TrimSpace(clientCA) == "" {
+		return nil
+	}
+	pemBytes, err := os.ReadFile(clientCA)
 	if err != nil {
-		return nil, fmt.Errorf("read client CA: %w", err)
+		return fmt.Errorf("read client CA: %w", err)
 	}
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("parse client CA %q: no certificates", clientCA)
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return fmt.Errorf("parse client CA %q: no certificates", clientCA)
 	}
 	cfg.ClientCAs = pool
 	cfg.ClientAuth = tls.VerifyClientCertIfGiven
+	return nil
+}
+
+// CertificateProvider is the serving certificate when rotation is on.
+// Current hides an expired certificate. Retained still returns it.
+type CertificateProvider interface {
+	Current() *tls.Certificate
+	Retained() (*tls.Certificate, error)
+}
+
+// TLSConfigFromSource is TLSConfig when src is nil. When src is set,
+// GetCertificate returns the provider's current certificate, or the
+// retained one when the current one is hidden, and does not read cert
+// and key.
+func TLSConfigFromSource(cert, key, clientCA string, src CertificateProvider) (*tls.Config, error) {
+	if src == nil {
+		return TLSConfig(cert, key, clientCA)
+	}
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if c := src.Current(); c != nil && len(c.Certificate) > 0 {
+				return c, nil
+			}
+			kept, err := src.Retained()
+			if err != nil {
+				return nil, err
+			}
+			if kept == nil || len(kept.Certificate) == 0 {
+				return nil, errors.New("no serving certificate available")
+			}
+			return kept, nil
+		},
+		ClientAuth: tls.NoClientCert,
+	}
+	if err := applyClientCA(cfg, clientCA); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 

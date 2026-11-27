@@ -44,6 +44,18 @@ type Config struct {
 	CacheDir         string
 	AllowedHostPaths []string // empty denies all hostPath
 	KubeConfig       string
+	// CertDir holds rotated kubelet certificates (kubelet-*-current.pem).
+	// It is created only when a rotation flag is on.
+	CertDir string
+	// RotateServerCertificates requests kubernetes.io/kubelet-serving
+	// certificates. The process does not approve those CSRs.
+	RotateServerCertificates bool
+	// RotateClientCertificates bootstraps and rotates the node client
+	// certificate. It requires BootstrapKubeconfig.
+	RotateClientCertificates bool
+	// BootstrapKubeconfig is the kubeconfig used to create the first
+	// node client CSR. Later API calls present the issued certificate.
+	BootstrapKubeconfig string
 	// Cluster is set when the process joins a cluster. Host directory
 	// image paths are rejected. --standalone leaves it false.
 	Cluster        bool
@@ -138,6 +150,7 @@ func Default() Config {
 		Graphics:                types.DefaultGraphics(),
 		CacheDir:                cache,
 		KubeConfig:              filepath.Join(home, ".kube", "config"),
+		CertDir:                 filepath.Join(home, "Library", "Application Support", types.HostLaunchdLabel, "pki"),
 		ListenAddress:           "127.0.0.1",
 		ListenPort:              10250,
 		LogLevel:                "info",
