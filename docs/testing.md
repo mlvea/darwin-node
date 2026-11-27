@@ -22,6 +22,8 @@ make test-short
 - Per-VM supervisor control socket on Linux, with the fake runtime over
   real Unix sockets (see below). This does not boot launchd or
   Virtualization.framework
+- Cold-boot identity in `pkg/vmidentity`, and guest Adopt in
+  `pkg/vzcontract/uniqueness_test.go` (see below)
 - macOS-only admission and the always-on OS taint:
   `pkg/provider/admission_test.go` and `pkg/node/taint_test.go`. The
   rules are in [admission.md](admission.md)
@@ -79,6 +81,42 @@ hardware:
 - LaunchAgents in `gui/<uid>`, `launchctl kickstart`, and codesign of
   this one binary. CI checks the plist text in `deploy/launchd/`.
   launchd and the entitlement are not exercised.
+
+`pkg/supervisor/identity_test.go` (`linux || darwin`) covers a lease
+whose `host_boot_id` or `supervisor_proc_start` does not match:
+`CheckProcessLease` fails closed. `TestEnforceStopDoesNotKillReusedPID`
+in `pkg/runtime/supervised/kill_test.go` leaves that pid running.
+Stop budgets are grace plus 10s in the supervisor and grace plus 12s in
+the node-agent (`pkg/supervisor/stop_deadline_test.go`,
+`TestAgentStopBudget`). `deploy/launchd/node_plist_test.go` requires
+`AbandonProcessGroup` and `ProcessType` `Interactive` on the node plist.
+The three Mac Mini checks in
+[vm-supervisor-hardening.md](vm-supervisor-hardening.md) (fd flatness,
+App Nap, `kickstart -k`) are still open.
+
+## VM identity and guest Adopt
+
+`pkg/vmidentity` has no build tag. Linux `go test` covers a cold boot
+that discards image `machineIdData`, refuses a missing, empty, or
+symlink golden aux, and copies a private `aux.img` that `Release`
+removes. On Darwin that copy is `clonefile(2)`. There is no new flag.
+
+Linux coverage of distinct host entropy and guest samples, including a
+liveness restart that Adopts again, is
+`pkg/vzcontract/uniqueness_test.go` (`TestGuestIdentityUniqueness`).
+`TestAdoptReseedFailClosed` in that file rejects a reused sample and
+does not start the workload. Ready, then Adopt, then Materialize, then
+Workload, is `TestAdoptBeforeMaterializeAndWorkload` in
+`pkg/engine/adopt_test.go`. `TestAdoptSampleSetEvictsOldest` shows a
+full sample set drops the oldest; the engine's cap is 1024
+(`adoptSampleLimit`). These tests run
+on Linux. They do not boot Virtualization.framework. The Mac Mini
+checklist in [guest-adopt.md](guest-adopt.md) is still open: distinct
+`/dev/random` samples across two pods, a guest clock within 500ms, no
+`/etc/ssh/ssh_host_*` at workload start, and the pod hostname on
+HostName, LocalHostName, and ComputerName. Distinct `IOPlatformUUID`
+values for two cold boots of one image are the open list in
+[vm-identity.md](vm-identity.md).
 
 `pkg/runtime/simvz` is a separate Linux stand-in that opens real
 descriptors for the engine. `--runtime` does not select it. No

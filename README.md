@@ -34,7 +34,9 @@ like any other workload.
 | Kubelet authn/authz (client CA, TokenReview, SubjectAccessReview) | ✅ Verified against a real API server | `make test-kubelet-auth` (envtest, kube-apiserver + etcd 1.35) |
 | Real VM boot, exec, logs, metrics, delete | ⏳ Hardware pending | `make test-hardware IMAGE=...` on a Mac, not run yet |
 | 24 h adopt/delete soak on Virtualization.framework | ⏳ Hardware pending | `make soak IMAGE=...`, not run yet |
-| Per-VM supervisor (`--vm-supervisor`, default off) | ⏳ Linux tests cover the control socket and engine re-adopt of a live supervisor. Launchd and Virtualization.framework behaviour, including `Connect` during `Start`, are hardware-pending | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
+| Per-VM supervisor (`--vm-supervisor`, default off) | ⏳ Linux tests cover the control socket, engine re-adopt, lease `host_boot_id` / `supervisor_proc_start`, and the grace-plus hang caps. The flag stays off until the Mac Mini fd, App Nap, and `kickstart -k` checks pass. `Connect` during `Start` is still hardware-pending | [docs/vm-supervisor.md](docs/vm-supervisor.md), [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md) |
+| Per-pod VM identity | ⏳ Cold boot ignores image `machineIdData` and mints a `MacMachineIdentifier`; golden `aux.img` is cloned per pod. Linux tests in `pkg/vmidentity`. Distinct guest `IOPlatformUUID` values are hardware-pending | [docs/vm-identity.md](docs/vm-identity.md) |
+| Guest Adopt | ⏳ Linux `pkg/vzcontract/uniqueness_test.go`. A guest agent that predates Adopt fails every pod until the image is rebuilt, unless `DARWIN_NODE_ALLOW_LEGACY_GUEST=1`. The Mac Mini checklist is open | [docs/guest-adopt.md](docs/guest-adopt.md) |
 | Node certificates (opt-in, default off) | ⏳ Fake-clientset CSR suite. Mac Mini approval is still manual | [docs/node-certificates.md](docs/node-certificates.md) |
 | Bridged/routed pod networking | ⏳ Design chosen, not built | See [Roadmap](#roadmap) |
 
@@ -95,8 +97,10 @@ flowchart TD
   started as `--role=supervisor --slot=N`, so an agent crash can leave
   that VM running. With the flag on, engine startup calls the adapter's
   `Recover` and reattaches a live supervisor as `Running` (no new VM).
-  The flag stays off unless it is set. See
-  [docs/vm-supervisor.md](docs/vm-supervisor.md) and
+  The flag stays off unless it is set, and it stays off until the Mac
+  Mini file-descriptor, App Nap, and `kickstart -k` checks in
+  [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md) pass.
+  See [docs/vm-supervisor.md](docs/vm-supervisor.md) and
   [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md).
 - **Capacity.** Each VM takes one `darwin.node/vm-slot`. The node advertises
   that extended resource at the configured maximum (1 or 2) and fails closed
@@ -113,10 +117,19 @@ flowchart TD
   under launchd. Exec (stdin, PTY, resize), logs, probes, metrics and shutdown
   all go to it over **vsock**. There is no TCP path to the agent. SSH is an
   opt-in last resort for images without an agent, and it only uses keys.
+  After the agent dials and answers Ready, and before volumes are placed or
+  the workload starts, the host sends `Adopt`. A guest that cannot prove
+  the reseed fails the pod. A later redial of that same boot does not send
+  `Adopt` again. A VM restart does. An image whose agent predates `Adopt`
+  fails every pod until the image is rebuilt, unless
+  `DARWIN_NODE_ALLOW_LEGACY_GUEST=1`. See
+  [docs/guest-adopt.md](docs/guest-adopt.md).
 - **Images.** macOS disk images ship as OCI artifacts (Agoda-format artifacts
   can be read too). Each pod gets a copy-on-write overlay made with APFS
-  `clonefile`. Delta images patch a cached base in 4 MiB chunks and check the
-  SHA-256 of the whole target disk.
+  `clonefile`. Cold boot leaves the image `machineIdData` unused and mints
+  a new Mac machine identifier, plus a private clone of `aux.img`. Delta
+  images patch a cached base in 4 MiB chunks and check the SHA-256 of the
+  whole target disk. See [docs/vm-identity.md](docs/vm-identity.md).
 - **Networking.** NAT by default (laptops, CI). Bridged mode needs the
   `com.apple.vm.networking` entitlement. `hostPort` is a userspace TCP proxy.
   The pod IP comes from the guest agent.
@@ -328,6 +341,8 @@ See [docs/scheduling.md](docs/scheduling.md).
 | Delta image updates | `darwin-image delta-create` / `delta-apply` | [docs/delta-images.md](docs/delta-images.md) |
 | Debug snapshot without a cluster | `darwin-node debug-dump -o debug-snapshot.json` | [docs/testing.md](docs/testing.md) |
 | Per-VM supervisor (default off) | `--vm-supervisor=on`, `--role=supervisor --slot=N` | [docs/vm-supervisor.md](docs/vm-supervisor.md) |
+| Per-pod VM identity (always on, no flag) | Cold boot mints a Mac machine identifier and a private `aux.img` | [docs/vm-identity.md](docs/vm-identity.md) |
+| Guest Adopt (always on) | Baked into the guest agent. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` skips only a guest that has no `Adopt` method | [docs/guest-adopt.md](docs/guest-adopt.md) |
 | Node certificate bootstrap and rotation (default off) | `--rotate-server-certificates`, `--rotate-client-certificates`, `--bootstrap-kubeconfig`, `--cert-dir` | [docs/node-certificates.md](docs/node-certificates.md) |
 
 Warm-pool adoption needs a matching image and a matching vCPU and memory
@@ -440,6 +455,8 @@ Variables with no flag:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Turns on OpenTelemetry trace export |
 | `DARWIN_NODE_ENABLE_SSH_FALLBACK` | `true`/`1` turns on SSH for images with no agent (off by default) |
 | `DARWIN_NODE_SSH_USER`, `DARWIN_NODE_SSH_PRIVATE_KEY_PATH`, `DARWIN_NODE_SSH_PRIVATE_KEY_BASE64`, `DARWIN_NODE_SSH_KNOWN_HOSTS`, `DARWIN_NODE_SSH_HOST_KEY` | SSH fallback settings (`VZ_SSH_*` aliases are also accepted). `DARWIN_NODE_SSH_PASSWORD` and `VZ_SSH_PASSWORD` are rejected at startup; password auth is not a fallback |
+| `DARWIN_NODE_ALLOW_LEGACY_GUEST` | `1` or `true` lets a guest agent that has no `Adopt` method start. Default off: that image fails every pod until it is rebuilt. A bad proof still fails the pod. Read by the engine, not by `pkg/config` |
+| `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` | `1` or `true` makes `darwin-guest-agent` use the in-memory platform. SimVZ sets it on the test child. A VM image's launchd job leaves it unset. Not a node flag |
 
 > **Removed in PR #42:** `--agent-tcp-fallback`, `--listen` and
 > `DARWIN_NODE_AGENT_TCP_FALLBACK`. The guest agent is reachable only over
@@ -514,7 +531,12 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
   session. Capabilities are negotiated in the handshake. Exit codes are clamped
   to 0..255, and guest text copied into PodStatus or events is cut to 1024
   printable characters. Guest CPU/memory numbers are untrusted telemetry for
-  `kubectl top` and are never used for scheduling.
+  `kubectl top` and are never used for scheduling. `Adopt` does not make the
+  guest trusted: the host checks the proof and rejects a sample this engine
+  has already accepted. `Adopt` does not rotate the ECID.
+  `DARWIN_NODE_ALLOW_LEGACY_GUEST` (default off) skips only a guest that has
+  no `Adopt` method. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` is for the SimVZ
+  child, not a VM image. See [docs/guest-adopt.md](docs/guest-adopt.md).
 - **Volumes and images.** `hostPath` is denied unless `--allowed-host-paths` is
   set, and `/` is never shared. `CreatePod` admits `emptyDir`, `secret`,
   `configMap`, `downwardAPI`, allowlisted `hostPath`, and `projected`
@@ -554,8 +576,15 @@ like a kubelet. Full threat model: [SECURITY.md](SECURITY.md) and
   boundary. The supervisor does not parse the guest protocol. The adapter
   calls `supervisor.Adopt` on first attach and on `Recover`. With the
   flag on, engine startup calls that `Recover` and reattaches a live
-  supervisor. Kubelet TLS, the virtualization entitlement, and the guest
-  handshake stay as they are with the flag off.
+  supervisor. A lease without `host_boot_id` and `supervisor_proc_start`
+  is rejected on re-adopt, and that pid is not signalled. The VM boot
+  UUID and the socket handshake stay as they are. Kubelet TLS, the
+  virtualization entitlement, and the guest handshake stay as they are
+  with the flag off. The node plist sets `AbandonProcessGroup` and
+  `ProcessType` `Interactive`. See
+  [docs/vm-supervisor.md](docs/vm-supervisor.md),
+  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md), and
+  [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md).
 
 **Reporting a vulnerability:** do **not** open a public issue. GitHub
 private vulnerability reporting is the only channel: open the
@@ -591,7 +620,9 @@ matter most:
   the listeners and every live splice. One side ending half-closes the
   other; both close after 5s. A dial to the guest gives up after 5s.
   The caps are 256 connections per pod and 512 per node. There is no flag.
-- **Per-VM supervisor is off by default.** With `--vm-supervisor=on`, a supervisor that is still alive is reattached as `Running` after an agent restart: the slot stays held, the disk and agent token stay, the guest is redialed, and no new VM is booted. A dead supervisor keeps the node-restart settlement. A supervisor that disappears while the pod is running is reason and message `supervisor lost`, and restart policy does not boot a replacement. A guest booted with the flag on has no host network until the file-handle NIC is bridged. Real launchd and Virtualization.framework behaviour, including `Connect` during `Start`, is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md) and [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md).
+- **Per-VM supervisor is off by default.** With `--vm-supervisor=on`, a supervisor that is still alive is reattached as `Running` after an agent restart: the slot stays held, the disk and agent token stay, the guest is redialed, and no new VM is booted. A dead supervisor keeps the node-restart settlement. A supervisor that disappears while the pod is running is reason and message `supervisor lost`, and restart policy does not boot a replacement. A guest booted with the flag on has no host network until the file-handle NIC is bridged. The flag stays off until the Mac Mini fd, App Nap, and `kickstart -k` checks pass. Real launchd and Virtualization.framework behaviour, including `Connect` during `Start`, is hardware-pending. See [docs/vm-supervisor.md](docs/vm-supervisor.md), [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md), and [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md).
+- **Cold boots do not share a machine identifier.** Image `machineIdData` is a template. Each cold boot mints a `MacMachineIdentifier` and a private `aux.img`. A missing, empty, or symlink golden aux fails the boot. There is no flag. Virtualization.framework has no vmgenid, and a per-job ephemeral keychain is not implemented. See [docs/vm-identity.md](docs/vm-identity.md).
+- **Guest Adopt is required.** An image whose guest agent predates `Adopt` fails every pod until it is rebuilt, unless `DARWIN_NODE_ALLOW_LEGACY_GUEST=1`. The engine remembers 1024 accepted samples and then drops the oldest. The Mac Mini checklist is still open. See [docs/guest-adopt.md](docs/guest-adopt.md).
 - **Node certificate rotation is off by default.** `--rotate-client-certificates` makes the process `system:node:<nodename>` in `system:nodes`. The ServiceAccount kubeconfig remains the default. darwin-node does not approve CSRs, and join waits until the client certificate is signed. See [docs/node-certificates.md](docs/node-certificates.md).
 - **macOS pods only.** The node always publishes `darwin.node/os=macos:NoSchedule`. Container 0 has to use a conventional disk-image repository name, or the pod sets `darwin.node/disk-image: "true"`. Init and sidecar CPU and memory requests count against that one VM, and those processes still start on the host. The VM still boots at container 0's size (default 2 vCPU / 4 GiB). See [docs/admission.md](docs/admission.md).
 - **No real hardware run yet.** See the status table at the top.
@@ -612,7 +643,12 @@ checklist for a real Apple Silicon Mac, and it is the release gate:
 doc and in the PR that records them. The per-VM supervisor's LaunchAgents,
 `launchctl kickstart`, and Virtualization.framework paths (file-handle NIC,
 vsock `Connect`, pause/save) are a separate hardware-pending list. CI checks
-the slot plist text. It does not boot launchd or a VM.
+the slot plist text. It does not boot launchd or a VM. Also still open on
+a Mac Mini: the supervisor fd-flatness, App Nap, and `kickstart -k` checks
+in [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md), the
+two-guest `IOPlatformUUID` checks in
+[docs/vm-identity.md](docs/vm-identity.md), and the Adopt checklist in
+[docs/guest-adopt.md](docs/guest-adopt.md).
 
 ## Roadmap
 
@@ -675,7 +711,10 @@ Which file a new concern belongs in is [docs/code-layout.md](docs/code-layout.md
 | [docs/installation.md](docs/installation.md) | Build, sign, launchd, upgrades, Helm |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit together |
 | [docs/vm-supervisor.md](docs/vm-supervisor.md) | Per-VM supervisor (`--vm-supervisor`, default off), control socket, launchd slots |
+| [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md) | Fd, death watch, stop budgets, and the Mac Mini checks that keep `--vm-supervisor` default off |
 | [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md) | Engine re-adopt of a live supervisor when `--vm-supervisor` is on |
+| [docs/vm-identity.md](docs/vm-identity.md) | Per-pod Mac machine identifier and private NVRAM on cold boot |
+| [docs/guest-adopt.md](docs/guest-adopt.md) | Guest `Adopt` reseed barrier |
 | [docs/node-certificates.md](docs/node-certificates.md) | Opt-in node client and kubelet serving certificate rotation |
 | [docs/kubeconfig-rotation.md](docs/kubeconfig-rotation.md) | Default one-shot kubeconfig load and serving-file reload |
 | [docs/simvz.md](docs/simvz.md) | Linux stand-in for the VM runtime. It is not selected by `--runtime` |

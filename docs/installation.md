@@ -165,6 +165,21 @@ listen address by editing `--listen-address`. Log level has no
 environment variable.
 
 The guest-side plist is installed *inside images* by `darwin-image inject-agent`.
+That job does not set `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM`. That variable
+is for the SimVZ test child, not a VM image. See
+[Guest Adopt](#guest-adopt).
+
+## Guest Adopt
+
+Every pod start sends `Adopt` after the guest agent dials and before
+volumes are placed or the workload starts. An image whose guest agent
+predates that method fails every pod until the image is rebuilt with a
+guest agent that implements Adopt. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1`
+or `true` skips only a missing `adopt` capability or an `unknown_method`
+response, and logs a warning. Default off. A bad proof still fails the
+pod. The variable is read by the engine. It is not a flag and it is not
+a field of `pkg/config.Config`. Detail:
+[guest-adopt.md](guest-adopt.md).
 
 ## Per-VM supervisor
 
@@ -209,6 +224,28 @@ before the first boot. launchd does not create it. The plist has no
 agent default, when the flag is on and the run directory is left unset,
 is `~/Library/Application Support/io.darwin-node.node/run`. The boot
 lease is `<run dir>/slots/slot-N/lease.json` (mode `0600`).
+
+`--vm-supervisor` stays default off until a Mac Mini passes the checks in
+[vm-supervisor-hardening.md](vm-supervisor-hardening.md): file-descriptor
+flatness across 500 adopts, `processType = Interactive` with no App Nap
+on the VM host process, and `launchctl kickstart -k` leaving the
+supervisor pid and `<run dir>/slot-N.sock` alive. The node plist sets
+`AbandonProcessGroup` true and `ProcessType` `Interactive` for those last
+two. CI checks that plist text. It does not boot launchd or a VM.
+
+Lease JSON includes `host_boot_id` and `supervisor_proc_start`. A lease
+written before those fields existed fails closed on re-adopt: the pid in
+the lease is not signalled, and recovery asks a supervisor that is still
+listening to `StopVM` and deletes the lease. The VM boot UUID (`boot_id`)
+and the socket hello/ready handshake are unchanged.
+
+Stop waits add a hang cap to the pod's termination grace. The supervisor
+waits grace plus 10s and then exits 1. The node-agent waits grace plus
+12s, sends `SIGKILL`, and waits for the process to exit. A supervisor
+this agent spawns (`--vm-supervisor-spawn=subprocess`, the default) uses
+stdin `/dev/null` and appends stdout and stderr to
+`<run dir>/slot-N.supervisor.log` (mode 0600). The slot LaunchAgent logs
+under `/var/log/darwin-node/` are unchanged.
 
 Real LaunchAgent install, `launchctl kickstart`, codesign of the running
 binary, and Virtualization.framework behaviour are hardware-pending. CI
@@ -377,7 +414,7 @@ period, or launchd kills the process before that commit runs.
 
 A value that `Config.MergeEnv` or `(*Supervisor).MergeEnv` cannot parse is an error before flags are parsed, including before `--help`. For the node config that is a bad integer, duration, Kubernetes quantity, or graphics string, and `DARWIN_NODE_IMAGE_GC`, `DARWIN_NODE_ROTATE_SERVER_CERTIFICATES`, or `DARWIN_NODE_ROTATE_CLIENT_CERTIFICATES` set to anything other than `true`, `1`, `false`, or `0`. For the supervisor config it is a non-integer `DARWIN_NODE_SLOT` or a `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` that is not a Go duration. A value that parses and then fails `Validate` (`pkg/config/validate.go` for the node, `(*Supervisor).Validate` for the supervisor) is an error when the command runs. The flag is already applied, so it can stand in for an environment value that would not validate. Node `Validate` rejects max VMs outside 1 or 2, warm slots outside 0–2, an unknown runtime or network mode, bridged mode with no interface, a negative duration, image GC thresholds out of range, a metrics address that is not `host:port` while metrics are on, a cache-writer entry that is not a namespace or `namespace/serviceaccount`, any non-empty `DARWIN_NODE_SSH_PASSWORD` or `VZ_SSH_PASSWORD`, client certificate rotation without `--bootstrap-kubeconfig`, and either rotation flag with an empty cert directory. Combining a rotation flag with `--standalone` is rejected in `cmd/darwin-node` before the process joins. Supervisor `Validate` is described with the supervisor table below.
 
-The first table is every variable `Config.MergeEnv` reads. The flag column is the matching `buildCommand` flag. Where that column is empty, there is no flag.
+The first table is every variable `Config.MergeEnv` reads (`pkg/config/env.go`). The flag column is the matching `buildCommand` flag in `cmd/darwin-node/main.go`. Where that column is empty, there is no flag. The supervisor table is every variable `(*Supervisor).MergeEnv` reads. The "flags with no environment variable" table is every `buildCommand` flag that `MergeEnv` does not read. `DARWIN_NODE_ALLOW_LEGACY_GUEST` and `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` are outside `pkg/config`; they are listed after the supervisor table.
 
 `DARWIN_NODE_ALLOW_NAT_WORKLOADS`, `DARWIN_NODE_SERIAL_CONSOLE`, and `DARWIN_NODE_ENABLE_SSH_FALLBACK` turn on only for `true` or `1`. Any other non-empty value leaves them off and is not a parse error. An empty variable leaves the current value, except `DARWIN_NODE_METRICS_ADDRESS`: setting that variable to empty turns metrics off. `DARWIN_NODE_AGENT_TCP_FALLBACK` is read and ignored.
 
@@ -465,6 +502,15 @@ The socket path limit for `--vm-supervisor-run-dir` is in [Socket path limit](#s
 | `DARWIN_NODE_VM_SUPERVISOR_RUN_DIR` | `~/Library/Application Support/io.darwin-node.node/run` | `--vm-supervisor-run-dir` | Directory for `<run dir>/slot-N.sock` and the boot lease. Mode `0700`. On macOS the socket path must be at most 103 bytes |
 | `DARWIN_NODE_VM_SUPERVISOR_DEADMAN` | `5m` | `--vm-supervisor-deadman` | After a disconnect while a VM is running, stop it once no agent has been connected for this long. Must be a positive Go duration |
 | `DARWIN_NODE_VM_SUPERVISOR_SPAWN` | `subprocess` | `--vm-supervisor-spawn` | `subprocess` starts the slot with `Setsid`. `launchd` runs `launchctl kickstart` |
+
+### Environment variables outside `pkg/config`
+
+These are not fields of `config.Config` or `config.Supervisor`, and they have no flag. An empty value leaves the behaviour off.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DARWIN_NODE_ALLOW_LEGACY_GUEST` | off | `1` or `true` (any case) skips `Adopt` only when the guest has no `adopt` capability or answers `unknown_method`. Any other Adopt error still fails the pod. Read by `pkg/engine`. See [Guest Adopt](#guest-adopt) |
+| `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` | off | `1` or `true` (any case) makes `darwin-guest-agent` use the in-memory Adopt platform. SimVZ sets it on the test child. The guest-image launchd job does not set it. Setting it inside a VM skips the real reseed |
 
 ## Helm (optional skeleton)
 

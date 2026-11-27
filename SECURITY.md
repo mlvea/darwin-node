@@ -104,18 +104,40 @@ tab and choose **Report a vulnerability**.
 - A warm VM adopted by a pod gets a fresh agent token. The pod's own
   pull credentials are checked again before that adoption when a
   committed image cache exists. See [docs/security.md](docs/security.md).
-- `--vm-supervisor` defaults to `off`. With it on, the run directory
-  (mode `0700`) and a same-uid peer check on the slot socket are the
-  local trust boundary. The supervisor does not parse the guest
+- `--vm-supervisor` defaults to `off`, and it stays off until the Mac
+  Mini fd, App Nap, and `kickstart -k` checks pass. With it on, the run
+  directory (mode `0700`) and a same-uid peer check on the slot socket
+  are the local trust boundary. The supervisor does not parse the guest
   protocol. The adapter calls `supervisor.Adopt` on first attach and
   on `Recover`. Engine startup calls that `Recover`: a live supervisor
   matching `cache/pods/<uid>` is reattached as `Running` (slot held,
-  disk and agent token kept, guest redialed, no new VM). A dead
-  supervisor keeps the node-restart settlement. A supervisor lost at
-  runtime is reason and message `supervisor lost`, with no replacement
-  boot. Kubelet TLS and the guest handshake are unchanged while the
-  flag is off. See [docs/vm-supervisor.md](docs/vm-supervisor.md) and
-  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md).
+  disk and agent token kept, guest redialed, no new VM). A lease
+  without `host_boot_id` and `supervisor_proc_start` is rejected on
+  re-adopt, and that pid is not signalled. The VM boot UUID and the
+  socket handshake are unchanged. A dead supervisor keeps the
+  node-restart settlement. A supervisor lost at runtime is reason and
+  message `supervisor lost`, with no replacement boot. A supervisor
+  the agent spawns (`--vm-supervisor-spawn=subprocess`) appends stdout
+  and stderr to `<run dir>/slot-N.supervisor.log` (mode 0600), and
+  stdin is `/dev/null`. The node plist sets `AbandonProcessGroup` and
+  `ProcessType` `Interactive`. Kubelet TLS and the guest handshake are
+  unchanged while the flag is off. See
+  [docs/vm-supervisor.md](docs/vm-supervisor.md),
+  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md), and
+  [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md).
+- Guest `Adopt` does not trust the guest. The host checks the proof and
+  rejects a sample this engine has already accepted (1024 remembered,
+  then the oldest is dropped). `Adopt` does not rotate the ECID.
+  `DARWIN_NODE_ALLOW_LEGACY_GUEST` defaults off and weakens only the
+  missing-method case. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` is for the
+  SimVZ child, not a VM image. An image whose agent predates `Adopt`
+  fails every pod until it is rebuilt, unless that legacy variable is
+  set. See [docs/guest-adopt.md](docs/guest-adopt.md) and
+  [docs/security.md](docs/security.md).
+- Cold boot mints a fresh Mac machine identifier and a private NVRAM
+  clone. Image `machineIdData` is left unused. A missing, empty, or
+  symlink golden aux fails closed. There is no vmgenid on restore.
+  See [docs/vm-identity.md](docs/vm-identity.md).
 - The node always publishes `darwin.node/os=macos:NoSchedule`, including
   with `--disable-taint`. The label stays `kubernetes.io/os=darwin`.
   Container 0 is admitted by repository name. A custom name needs

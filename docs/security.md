@@ -197,6 +197,28 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
   is that code, not a transport error.
 - Exec argv comes from the Kubernetes API (kubectl exec / probes). Same
   trust model as kubelet. There is no extra in-guest authorization.
+- `Adopt` does not make the guest trusted. The host draws
+  `host_entropy_64b` and checks the response before Materialize or
+  Workload: `reseed_ok`, a 32-byte sample that is not all zeros, a
+  constant-time proof `SHA256(host_entropy_64b || sample)`, a guest
+  clock within 500ms, and a UUID-shaped `io_platform_uuid`. A sample
+  this engine has already accepted is rejected. The engine keeps 1024
+  samples and then drops the oldest, which may then be presented again.
+  Entropy and samples are not copied into pod status text. `Adopt`
+  reports `io_platform_uuid` and does not rotate the ECID. A per-job
+  ephemeral keychain is not implemented. Virtualization.framework has
+  no vmgenid, and this tree does not restore a saved VM. See
+  [guest-adopt.md](guest-adopt.md).
+- Missing capability `adopt`, or an `unknown_method` response, fails
+  the pod. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true` skips only that
+  case and logs a warning. Default off. A bad proof, a zero sample, a
+  duplicate sample, or any other Adopt error still fails the pod. The
+  variable is read in the engine. It is not a field on the node config.
+- `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1` or `true` forces the in-memory
+  Adopt platform inside `darwin-guest-agent`. SimVZ sets it when it
+  execs the test child, so that child does not reseed or rename the Mac
+  running the test. The launchd job inside a VM image does not set it.
+  Default off.
 
 ## hostPath
 
@@ -436,6 +458,18 @@ boundary for the slot. The full model is
   whose lease was replaced. Anyone who can read the lease can replay it,
   which is why the directory is `0700`. The lease does not store the
   guest-agent token.
+- Lease JSON also stores `host_boot_id` (host boot session:
+  `kern.bootsessionuuid` on Darwin, `/proc/sys/kernel/random/boot_id`
+  on Linux) and `supervisor_proc_start` (OS start time of
+  `supervisor_pid`). These are not the VM boot UUID in `boot_id`, and
+  they are not part of the socket hello/ready handshake. An empty boot
+  id, a mismatch, a zero start time, or a missing process fails
+  `supervisor.Adopt` before the dial, and that pid is not signalled.
+  `Recover` then sends `StopVM` to a supervisor that is still listening
+  and deletes the lease, so an old lease is not reattached. See
+  [vm-supervisor-hardening.md](vm-supervisor-hardening.md).
+- A supervisor the agent spawns appends stdout and stderr to
+  `<run dir>/slot-N.supervisor.log` (mode 0600). Stdin is `/dev/null`.
 - The supervisor does not parse the guest protocol. A hostile guest
   cannot drive the control socket through the vsock stream. The stream
   is handed to the agent.

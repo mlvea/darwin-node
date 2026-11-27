@@ -10,13 +10,14 @@ Virtualization.framework has no vmgenid. A restored guest keeps the kernel
 CSPRNG and the address space of processes that were already running. XNU
 reseeds the kernel CSPRNG synchronously when 64 bytes are written to
 `/dev/random` (`write_random`). Processes exec'd after that read fresh
-entropy. Adopt is the hook a later save/restore pool will call on every
-cold boot and every restore. This change does not restore snapshots.
+entropy. The engine calls Adopt on every cold start and every VM restart.
+A later save/restore pool would call it on restore as well. This tree
+does not restore snapshots.
 
-Per-pod `MacMachineIdentifier` and NVRAM identity are not part of Adopt.
-Pods of one image still share the image ECID until that change lands.
-Adopt reports `io_platform_uuid` so a later pool can see it. It does not
-rotate it.
+Per-pod `MacMachineIdentifier` and NVRAM are chosen on cold boot. See
+[vm-identity.md](vm-identity.md). Pods started from one image do not
+share that identifier or that NVRAM file. Adopt reports
+`io_platform_uuid` and does not rotate the ECID.
 
 ## Wire
 
