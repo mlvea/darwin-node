@@ -2,8 +2,9 @@
 
 // Package vz wraps Virtualization.framework via Code-Hex/vz.
 // Device attach order (bootloader, graphics, NAT/bridged, virtio-fs,
-// keyboard/pointing) is derived from Agoda macOS-vz-kubelet pkg/vm/config
-// (Apache-2.0) and the Code-Hex/vz macOS examples (MIT).
+// keyboard/pointing, virtio entropy) is derived from Agoda
+// macOS-vz-kubelet pkg/vm/config (Apache-2.0) and the Code-Hex/vz macOS
+// examples (MIT).
 package vz
 
 import (
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/mlvea/darwin-node/pkg/guest"
 	"github.com/mlvea/darwin-node/pkg/runtime"
 	"github.com/mlvea/darwin-node/pkg/types"
+	"github.com/mlvea/darwin-node/pkg/vmidentity"
 )
 
 // Runtime is the production Virtualization.framework backend.
@@ -31,8 +34,8 @@ func New(opts runtime.Options) *Runtime { return &Runtime{Opts: opts} }
 
 func (r *Runtime) Name() types.RuntimeName { return types.RuntimeVZ }
 
-func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machine, error) {
-	if err := Available(); err != nil {
+func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (_ runtime.Machine, err error) {
+	if err = Available(); err != nil {
 		return nil, err
 	}
 	if spec.CPU == 0 {
@@ -41,14 +44,24 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if spec.MemoryBytes == 0 {
 		spec.MemoryBytes = 4 << 30
 	}
-	var err error
 	if spec.CPU, err = clampCPU(spec.CPU); err != nil {
 		return nil, err
 	}
 	if spec.MemoryBytes, err = clampMemory(spec.MemoryBytes); err != nil {
 		return nil, err
 	}
-	cfg, nic, err := buildConfig(spec, r.Opts)
+	var boot vmidentity.Boot
+	var ident *vz.MacMachineIdentifier
+	spec, boot, ident, err = preparePlatform(spec)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = boot.Release()
+		}
+	}()
+	cfg, nic, err := buildConfig(spec, r.Opts, boot, ident)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +88,10 @@ func (r *Runtime) Create(ctx context.Context, spec types.VMSpec) (runtime.Machin
 	if err != nil {
 		return nil, err
 	}
-	m := &machine{id: spec.ID, spec: spec, vm: vm, token: spec.AgentToken, console: cons, nic: nic}
+	// The platform config retains the Objective-C identifier. Keep the
+	// Go wrapper alive until that copy has happened.
+	goruntime.KeepAlive(ident)
+	m := &machine{id: spec.ID, spec: spec, vm: vm, token: spec.AgentToken, console: cons, nic: nic, boot: boot}
 	nic = nil
 	return m, nil
 }
@@ -139,6 +155,7 @@ type machine struct {
 	disp     *agentDispatch
 	console  *serialConsole
 	nic      *nicFiles
+	boot     vmidentity.Boot
 }
 
 func (m *machine) ID() types.MachineID { return m.id }
@@ -226,6 +243,12 @@ func (m *machine) Stop(ctx context.Context, graceful time.Duration) error {
 	}
 	if finished != nil {
 		m.finished = finished
+	}
+	// Unlink the pod aux after the stop attempt. The golden image is not
+	// this path. A second Stop is a no-op. The stop error stays the one
+	// the caller can act on.
+	if rerr := m.boot.Release(); rerr != nil && err == nil {
+		return rerr
 	}
 	return err
 }
@@ -336,7 +359,7 @@ func (m *machine) Console() (io.ReadWriteCloser, error) {
 	return m.console, nil
 }
 
-func buildConfig(spec types.VMSpec, opts runtime.Options) (*vz.VirtualMachineConfiguration, *nicFiles, error) {
+func buildConfig(spec types.VMSpec, opts runtime.Options, cold vmidentity.Boot, ident *vz.MacMachineIdentifier) (*vz.VirtualMachineConfiguration, *nicFiles, error) {
 	boot, err := vz.NewMacOSBootLoader()
 	if err != nil {
 		return nil, nil, err
@@ -365,7 +388,7 @@ func buildConfig(spec types.VMSpec, opts runtime.Options) (*vz.VirtualMachineCon
 		}
 		return nil, nil, err
 	}
-	if err := attachPlatformAndDisk(cfg, spec); err != nil {
+	if err := attachPlatformAndDisk(cfg, spec, cold, ident); err != nil {
 		if nic != nil {
 			nic.Close()
 		}
