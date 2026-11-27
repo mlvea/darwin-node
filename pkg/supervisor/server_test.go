@@ -451,11 +451,28 @@ func fdCount() int {
 	if runtime.GOOS != "linux" {
 		return 0
 	}
-	ents, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		return -1
+	// Unreachable os.File values close their descriptors in a finalizer.
+	// A snapshot that races that goroutine reports a drop and fails the
+	// test even though nothing is still held open. Drain finalizers and
+	// wait until two reads agree. A descriptor that is still reachable
+	// stays open and still fails the check.
+	runtime.GC()
+	runtime.GC()
+	prev := -1
+	for i := 0; i < 20; i++ {
+		ents, err := os.ReadDir("/proc/self/fd")
+		n := -1
+		if err == nil {
+			n = len(ents)
+		}
+		if n == prev {
+			return n
+		}
+		prev = n
+		time.Sleep(5 * time.Millisecond)
+		runtime.GC()
 	}
-	return len(ents)
+	return prev
 }
 
 func fdList() []string {
