@@ -43,6 +43,7 @@ func (e *Engine) recoverSupervisors() error {
 	if e == nil || e.rt == nil {
 		return nil
 	}
+	e.installSkewControl()
 	rec, ok := e.rt.(supervisorRecoverer)
 	if !ok || rec == nil {
 		return nil
@@ -215,16 +216,21 @@ func (e *Engine) launchRecovered(start *recoveredStart, creds Credentials) error
 }
 
 // runRecovered redials the guest through the adopted fd and marks the
-// pod Running. The disk, the agent token, and the guest entrypoint are
-// the ones the previous process left. Init and the container workload
-// are not applied again. Sidecars died with the agent, so they are
-// created again.
+// pod Running. A handshake that already has an exit code is published
+// and the VM is stopped; that workload is finished. A handshake that
+// says the workload already started does not call Workload again.
+// Otherwise the container command is applied once. Sidecars died with
+// the agent, so they are created again. Init is not reapplied.
 func (e *Engine) runRecovered(ctx context.Context, rec *podRecord, creds Credentials) {
 	rec.mu.Lock()
 	pod := rec.pod.DeepCopy()
 	machine := rec.machine
 	rec.mu.Unlock()
 	if pod == nil || machine == nil {
+		return
+	}
+	if code, ok := supervisorWorkloadResult(machine); ok {
+		e.finishSupervisorWorkload(rec, code)
 		return
 	}
 	token := e.recoveredAgentToken(string(pod.UID))
@@ -290,6 +296,10 @@ func (e *Engine) runRecovered(ctx context.Context, rec *podRecord, creds Credent
 	}
 	e.refreshSidecarStatus(ctx, rec)
 	if !e.noteSidecarExit(rec) {
+		return
+	}
+	if err := e.applyRecoveredWorkload(ctx, cli, pod, machine); err != nil {
+		e.fail(rec, err)
 		return
 	}
 

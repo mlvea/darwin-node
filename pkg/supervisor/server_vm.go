@@ -32,6 +32,9 @@ func (s *Server) dispatch(ctx context.Context, req message) (message, []*osFile,
 		msg := s.inspect()
 		msg.OK = true
 		return msg, nil, false, nil
+	case opNoteWorkload:
+		msg, err := s.handleNoteWorkload(req)
+		return msg, nil, false, err
 	default:
 		return errMsg("", "unknown supervisor op "+req.Op), nil, false, nil
 	}
@@ -259,19 +262,19 @@ func (s *Server) inspect() message {
 		State:         string(types.VMPending),
 	}
 	s.mu.Unlock()
-	if m == nil {
-		return msg
+	if m != nil {
+		st := m.Status()
+		msg.State = string(st.State)
+		msg.IP = st.IP
+		msg.MAC = st.MAC
+		msg.AgentOK = st.AgentOK
+		msg.Message = st.Message
+		msg.ExitCode = st.ExitCode
+		if st.Err != nil && msg.Message == "" {
+			msg.Message = st.Err.Error()
+		}
 	}
-	st := m.Status()
-	msg.State = string(st.State)
-	msg.IP = st.IP
-	msg.MAC = st.MAC
-	msg.AgentOK = st.AgentOK
-	msg.Message = st.Message
-	msg.ExitCode = st.ExitCode
-	if st.Err != nil && msg.Message == "" {
-		msg.Message = st.Err.Error()
-	}
+	s.stampVersion(&msg)
 	return msg
 }
 

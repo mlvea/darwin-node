@@ -37,8 +37,10 @@ type Options struct {
 type Runtime struct {
 	Options
 
-	mu   sync.Mutex
-	used []bool
+	mu    sync.Mutex
+	used  []bool
+	skew  supervisor.SkewControl
+	holds map[int]*skewHold
 }
 
 // New returns an adapter.

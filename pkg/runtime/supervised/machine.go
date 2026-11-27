@@ -34,6 +34,11 @@ type machine struct {
 	supPID    int
 	procStart int64
 	hostBoot  string
+
+	hs              supervisor.Handshake
+	workloadStarted bool
+	workloadExited  bool
+	workloadCode    *int32
 }
 
 func (m *machine) ID() types.MachineID { return m.id }
@@ -178,6 +183,19 @@ func (m *machine) dropConn() {
 }
 
 func (m *machine) Status() types.VMStatus {
+	st := m.rawStatus()
+	m.mu.Lock()
+	exited := m.workloadExited
+	code := m.workloadCode
+	m.mu.Unlock()
+	if exited && code != nil {
+		c := *code
+		st.ExitCode = &c
+	}
+	return st
+}
+
+func (m *machine) rawStatus() types.VMStatus {
 	m.mu.Lock()
 	c := m.client
 	sess := m.sess

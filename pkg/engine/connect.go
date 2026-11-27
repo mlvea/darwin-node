@@ -161,6 +161,7 @@ func (e *Engine) watchGuestExit(rec *podRecord, cli *guest.Client) {
 		killed := rec.killedCode != nil
 		failed := rec.phase == corev1.PodFailed
 		rec.mu.Unlock()
+		e.noteSupervisorWorkload(rec, true, true, &code)
 		// The workload has ended. Commit before the VM is torn down and
 		// before anything removes the pod directory. A kill that already
 		// won, or a non-zero exit, does not replace a good cache.

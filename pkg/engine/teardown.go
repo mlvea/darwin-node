@@ -242,7 +242,7 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 	if agent != nil {
 		_ = agent.Close()
 	}
-	if machine != nil {
+	if machine != nil && !e.skewHolding(uid) {
 		_ = machine.Stop(ctx, time.Duration(grace)*time.Second)
 	}
 	_ = e.sidecar.RemovePod(ctx, ns, name, grace)
@@ -254,7 +254,7 @@ func (e *Engine) teardown(ctx context.Context, rec *podRecord, grace int64, runH
 	if warmDisk != "" {
 		_ = os.RemoveAll(warmDisk)
 	}
-	if uid != "" {
+	if uid != "" && !e.skewHolding(uid) {
 		e.slots.Release(uid)
 	}
 }
@@ -357,9 +357,13 @@ func (e *Engine) Delete(ctx context.Context, namespace, name string, grace int64
 	e.events.Normal(ctx, event.ReasonKilling, "stopping macOS VM")
 	e.teardown(ctx, rec, grace, true) // preStop, Shutdown, Stop — RemoveAll only after Stop returns
 	// Exit 0 commits. A kill or a non-zero exit leaves the previous store.
-	// The pod directory is removed only after that decision.
+	// The pod directory is removed only after that decision. A version-skew
+	// hold still has a live VM on that disk, so the directory stays until
+	// the supervisor exits.
 	e.snapshotPodCaches(rec)
-	_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
+	if !e.skewHolding(uid) {
+		_ = os.RemoveAll(filepath.Join(e.cfg.CacheDir, "pods", uid))
+	}
 
 	// The watch has returned, so it cannot arm the backoff again. Leaving
 	// the entry would keep a deleted pod's delay for the life of the

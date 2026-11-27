@@ -31,6 +31,16 @@ type Server struct {
 	AllowUIDSet    bool
 	AdvertiseMajor int
 	AdvertiseMinor int
+	// AdvertiseWireMajor, when non-zero, is the version-skew major this
+	// process reports. Zero uses WireMajor. The protocol major above is
+	// a separate check; a wire mismatch still completes the handshake so
+	// the agent can keep the dead-man disarmed.
+	AdvertiseWireMajor int
+	// AdvertiseWireMinor, when non-zero, replaces WireMinor.
+	AdvertiseWireMinor int
+	// BuildSHA is the git sha reported in the handshake. Empty uses
+	// BinaryVersion. Peers re-adopt an equal wire major whatever this is.
+	BuildSHA string
 	// StopDeadline caps a hung VM stop after the caller's grace period.
 	// Zero means 10s. Tests set a shorter cap.
 	StopDeadline time.Duration
@@ -66,12 +76,21 @@ type Server struct {
 	sock       string
 	acceptDone chan struct{}
 
-	uid     int
-	major   int
-	minor   int
-	version string
-	deadman time.Duration
-	started time.Time
+	uid      int
+	major    int
+	minor    int
+	version  string
+	deadman  time.Duration
+	started  time.Time
+	hostBoot string
+
+	// capSet selects capList instead of the default capability
+	// advertisement. Both are guarded by mu, as are the workload fields.
+	capSet          bool
+	capList         []string
+	workloadStarted bool
+	workloadExited  bool
+	workloadCode    *int32
 }
 
 // Serve listens until the VM stops or ctx is done, then stops the VM and
@@ -127,6 +146,9 @@ func (s *Server) prepare(ctx context.Context) error {
 	s.version = s.BinaryVersion
 	if s.version == "" {
 		s.version = "dev"
+	}
+	if boot, err := HostBootID(); err == nil {
+		s.hostBoot = boot
 	}
 	s.deadman = s.Deadman
 	if s.deadman <= 0 {
@@ -291,7 +313,7 @@ func (s *Server) serveConn(conn net.Conn) {
 }
 
 func (s *Server) hello() message {
-	return message{
+	msg := message{
 		Op:            opHello,
 		OK:            true,
 		ProtocolMajor: s.major,
@@ -302,6 +324,8 @@ func (s *Server) hello() message {
 		PID:           os.Getpid(),
 		StartTimeNS:   s.started.UnixNano(),
 	}
+	s.stampVersion(&msg)
+	return msg
 }
 
 func (s *Server) noteConn(delta int) {

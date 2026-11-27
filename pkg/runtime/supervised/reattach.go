@@ -41,6 +41,21 @@ func (r *Runtime) adoptExisting(ctx context.Context, slot int, pods []supervisor
 		}
 		return nil, err
 	}
+	// A mismatch already occupies this slot. A second Recover must not
+	// stop the VM while that hold is waiting for the supervisor to exit.
+	if r.skewBusy(slot) {
+		return nil, nil
+	}
+	if err := supervisor.CheckProcessLease(lease); err != nil {
+		return nil, err
+	}
+	held, err := r.considerSkew(ctx, slot, lease)
+	if err != nil {
+		return nil, err
+	}
+	if held {
+		return nil, nil
+	}
 	m := &machine{
 		rt:   r,
 		slot: slot,

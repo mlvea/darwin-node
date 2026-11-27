@@ -19,15 +19,16 @@ const (
 )
 
 const (
-	opHello     = "hello"
-	opReady     = "ready"
-	opStart     = "start_vm"
-	opInspect   = "inspect_vm"
-	opPause     = "pause_and_save_vm"
-	opStop      = "stop_vm"
-	opAttach    = "attach_channels"
-	opHeartbeat = "heartbeat"
-	opResponse  = "response"
+	opHello        = "hello"
+	opReady        = "ready"
+	opStart        = "start_vm"
+	opInspect      = "inspect_vm"
+	opPause        = "pause_and_save_vm"
+	opStop         = "stop_vm"
+	opAttach       = "attach_channels"
+	opHeartbeat    = "heartbeat"
+	opNoteWorkload = "note_workload"
+	opResponse     = "response"
 
 	codeMajor = "protocol_major"
 	codePeer  = "peer_uid"

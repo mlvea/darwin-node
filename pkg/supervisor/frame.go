@@ -26,8 +26,19 @@ type message struct {
 	BinaryVersion string `json:"binary_version,omitempty"`
 	Role          string `json:"role,omitempty"`
 	Slot          int    `json:"slot"`
-	PID           int    `json:"pid,omitempty"`
-	StartTimeNS   int64  `json:"start_time_ns,omitempty"`
+
+	// Version-skew handshake. wire_major is a pointer so a supervisor
+	// that predates these fields (the key is absent) is distinct from
+	// an explicit 0. Unknown JSON keys are ignored by encoding/json.
+	WireMajor       *int     `json:"wire_major,omitempty"`
+	WireMinor       int      `json:"wire_minor,omitempty"`
+	BuildSHA        string   `json:"build_sha,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	HostBootID      string   `json:"host_boot_id,omitempty"`
+	WorkloadStarted bool     `json:"workload_started,omitempty"`
+	WorkloadExited  bool     `json:"workload_exited,omitempty"`
+	PID             int      `json:"pid,omitempty"`
+	StartTimeNS     int64    `json:"start_time_ns,omitempty"`
 
 	Spec        *types.VMSpec `json:"spec,omitempty"`
 	BootID      string        `json:"boot_id,omitempty"`
