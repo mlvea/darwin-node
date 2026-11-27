@@ -167,12 +167,18 @@ func TestExecAndLogs(t *testing.T) {
 }
 
 func TestHybridSidecar(t *testing.T) {
+	// The success path returns as soon as both containers are running.
+	// Without Close, that VM's guest heartbeats stay up for the rest of
+	// the process. A later test's leakcheck then treats a stack change
+	// (heartbeat select vs Health) as a new goroutine.
+	leakcheck.Check(t)
 	slots, _ := capacity.New(2)
 	cfg := config.Default()
 	cfg.Runtime = "fake"
 	cfg.CacheDir = t.TempDir()
 	cfg.AgentReadyTimeout = 5 * time.Second
 	e := New(cfg, slots, fake.New(), sidecar.NewMemory(), event.Nop{}, "10.0.0.1")
+	t.Cleanup(func() { _ = e.Close() })
 	pod := samplePod("hy", "uid-hy")
 	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "log", Image: "busybox"})
 	if err := e.Create(context.Background(), pod, Credentials{}); err != nil {

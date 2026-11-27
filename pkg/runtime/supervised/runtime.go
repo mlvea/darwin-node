@@ -5,6 +5,7 @@ package supervised
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -42,6 +43,9 @@ type Runtime struct {
 
 // New returns an adapter.
 func New(opts Options) *Runtime {
+	if err := supervisor.RaiseNOFILE(); err != nil {
+		slog.Warn("node-agent nofile limit", "err", err)
+	}
 	if opts.LogLevel == "" {
 		opts.LogLevel = "info"
 	}

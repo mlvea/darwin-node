@@ -165,6 +165,8 @@ func (s *Server) handleAttach(ctx context.Context) (message, []*os.File, error) 
 	if err != nil {
 		return message{}, nil, err
 	}
+	setCloexec(netFD)
+	setCloexec(agentFD)
 	msg := s.inspect()
 	msg.OK = true
 	msg.FDCount = 2
@@ -186,12 +188,55 @@ func (s *Server) stopVM(ctx context.Context, grace time.Duration) (bool, error) 
 	if m == nil {
 		return false, nil
 	}
-	if c, ok := m.(runtime.ChannelCloser); ok {
-		_ = c.CloseChannels()
+	budget := stopHangBudget(grace, s.StopDeadline)
+	done := make(chan error, 1)
+	go func() {
+		if c, ok := m.(runtime.ChannelCloser); ok {
+			_ = c.CloseChannels()
+		}
+		done <- m.Stop(ctx, grace)
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		slog.Info("supervisor vm stopped", "slot", s.Slot, "err", errString(err))
+		return true, err
+	case <-timer.C:
+		// Stop can finish in the same instant the timer fires. Take
+		// that result instead of exiting a supervisor that already
+		// finished the call.
+		var finished bool
+		var err error
+		select {
+		case err = <-done:
+			finished = true
+		default:
+			finished = false
+		}
+		if finished {
+			slog.Info("supervisor vm stopped", "slot", s.Slot, "err", errString(err))
+			return true, err
+		}
+		slog.Error("supervisor vz stop exceeded deadline", "slot", s.Slot, "deadline", budget.String())
+		s.exitProcess(1)
+		err = <-done
+		if err == nil {
+			err = errStopDeadline
+		}
+		return true, err
 	}
-	err := m.Stop(ctx, grace)
-	slog.Info("supervisor vm stopped", "slot", s.Slot, "err", errString(err))
-	return true, err
+}
+
+// exitProcess ends the supervisor when a VM stop stays hung past the
+// hang cap. Tests set Server.Exit so the test process keeps running.
+// A test Exit must let Machine.Stop return, or stopVM waits forever.
+func (s *Server) exitProcess(code int) {
+	if s.Exit != nil {
+		s.Exit(code)
+		return
+	}
+	os.Exit(code)
 }
 
 func (s *Server) inspect() message {

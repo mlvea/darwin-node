@@ -120,12 +120,15 @@ type condTransition struct {
 type podRecord struct {
 	mu sync.Mutex
 
-	pod          *corev1.Pod
-	machine      runtime.Machine
-	agent        *guest.Client
-	places       []volume.Placement
-	token        string
-	phase        corev1.PodPhase
+	pod     *corev1.Pod
+	machine runtime.Machine
+	agent   *guest.Client
+	places  []volume.Placement
+	token   string
+	phase   corev1.PodPhase
+	// failing is set before teardown so a second fail does not stop the
+	// VM twice, and Failed is published only after the slot is released.
+	failing      bool
 	reason       string
 	message      string
 	startedAt    *metav1.Time

@@ -169,24 +169,34 @@ func (e *Engine) failWith(rec *podRecord, reason string, err error) {
 	rec.mu.Lock()
 	// Failed or Succeeded means Delete or a workload exit already owns the
 	// pod. A watch tick that observed Stopped must not tear it down twice.
-	if rec.phase == corev1.PodFailed || rec.phase == corev1.PodSucceeded {
+	// failing covers the window before Failed is published: teardown has
+	// to release the slot first, or a Get of the failed pod still sees
+	// the slot held.
+	if rec.phase == corev1.PodFailed || rec.phase == corev1.PodSucceeded || rec.failing {
 		rec.mu.Unlock()
 		return
 	}
+	rec.failing = true
 	if reason == "" {
 		reason = "Failed"
 	}
-	rec.phase = corev1.PodFailed
-	rec.reason = reason
-	rec.message = guest.SanitizeGuestText(err.Error())
-	rec.failedErr = err
-	rec.ready = false
+	msg := guest.SanitizeGuestText(err.Error())
 	uid := ""
 	if rec.pod != nil {
 		uid = string(rec.pod.UID)
 	}
 	rec.mu.Unlock()
 	e.teardown(context.Background(), rec, 0, false)
+	rec.mu.Lock()
+	// Delete may have published its own terminal phase while Stop ran.
+	if rec.phase != corev1.PodFailed && rec.phase != corev1.PodSucceeded {
+		rec.phase = corev1.PodFailed
+		rec.reason = reason
+		rec.message = msg
+		rec.failedErr = err
+		rec.ready = false
+	}
+	rec.mu.Unlock()
 	// A failed pod's overlay can be multiple gigabytes; nothing will ever
 	// restart it, so reclaim the directory now instead of leaving it for
 	// the next process's startup sweep.
