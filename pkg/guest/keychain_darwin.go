@@ -11,6 +11,37 @@ package guest
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 #include <stdlib.h>
+
+// NULL and the ref types stay in C. cgo treats these Security typedefs as
+// named types that cannot be compared with nil or passed nil.
+static OSStatus dn_sec_keychain_create(const char *path, UInt32 passwordLength, const void *password, SecKeychainRef *out) {
+	return SecKeychainCreate(path, passwordLength, password, (Boolean)0, (SecAccessRef)0, out);
+}
+
+static OSStatus dn_sec_keychain_open(const char *path, SecKeychainRef *out) {
+	return SecKeychainOpen(path, out);
+}
+
+static OSStatus dn_sec_keychain_unlock(SecKeychainRef kc, UInt32 passwordLength, const void *password) {
+	return SecKeychainUnlock(kc, passwordLength, password, (Boolean)1);
+}
+
+// version 1 is SEC_KEYCHAIN_SETTINGS_VERS1. useLockInterval false and
+// lockOnSleep false is no auto-lock for the job.
+static OSStatus dn_sec_keychain_no_autolock(SecKeychainRef kc) {
+	SecKeychainSettings settings;
+	settings.version = 1;
+	settings.lockOnSleep = (Boolean)0;
+	settings.useLockInterval = (Boolean)0;
+	settings.lockInterval = 0;
+	return SecKeychainSetSettings(kc, &settings);
+}
+
+static void dn_sec_keychain_release(SecKeychainRef kc) {
+	if (kc != NULL) {
+		CFRelease(kc);
+	}
+}
 */
 import "C"
 
@@ -215,11 +246,11 @@ func secKeychainCreate(path, password string) error {
 	}
 	defer wipe()
 	var kc C.SecKeychainRef
-	st := C.SecKeychainCreate(cpath, n, pw, C.Boolean(0), nil, &kc)
+	st := C.dn_sec_keychain_create(cpath, n, pw, &kc)
 	if st != 0 {
 		return fmt.Errorf("SecKeychainCreate: %d", int32(st))
 	}
-	releaseKeychain(kc)
+	C.dn_sec_keychain_release(kc)
 	return nil
 }
 
@@ -230,31 +261,23 @@ func secKeychainUnlock(path, password string, noAutoLock bool) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
 	var kc C.SecKeychainRef
-	if st := C.SecKeychainOpen(cpath, &kc); st != 0 {
+	if st := C.dn_sec_keychain_open(cpath, &kc); st != 0 {
 		return fmt.Errorf("SecKeychainOpen: %d", int32(st))
 	}
-	defer releaseKeychain(kc)
+	defer C.dn_sec_keychain_release(kc)
 	pw, n, wipe, err := cPassword(password)
 	if err != nil {
 		return err
 	}
 	defer wipe()
-	st := C.SecKeychainUnlock(kc, n, pw, C.Boolean(1))
+	st := C.dn_sec_keychain_unlock(kc, n, pw)
 	if st != 0 {
 		return fmt.Errorf("SecKeychainUnlock: %d", int32(st))
 	}
 	if !noAutoLock {
 		return nil
 	}
-	// SEC_KEYCHAIN_SETTINGS_VERS1 is 1. useLockInterval false and
-	// lockOnSleep false is no auto-lock for the job.
-	settings := C.SecKeychainSettings{
-		version:         1,
-		lockOnSleep:     C.Boolean(0),
-		useLockInterval: C.Boolean(0),
-		lockInterval:    0,
-	}
-	if st := C.SecKeychainSetSettings(kc, &settings); st != 0 {
+	if st := C.dn_sec_keychain_no_autolock(kc); st != 0 {
 		return fmt.Errorf("SecKeychainSetSettings: %d", int32(st))
 	}
 	return nil
@@ -280,11 +303,4 @@ func cPassword(password string) (unsafe.Pointer, C.UInt32, func(), error) {
 		}
 		C.free(buf)
 	}, nil
-}
-
-func releaseKeychain(kc C.SecKeychainRef) {
-	if kc == nil {
-		return
-	}
-	C.CFRelease(C.CFTypeRef(unsafe.Pointer(kc)))
 }
