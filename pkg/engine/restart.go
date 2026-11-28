@@ -61,6 +61,10 @@ func (e *Engine) restartVM(ctx context.Context, rec *podRecord) error {
 	if machine == nil {
 		return fmt.Errorf("no machine to restart")
 	}
+	// The watch goroutine may not have observed VMRunning yet. Its first
+	// pass would read the Stop below as an unexpected death.
+	markRestarting(rec)
+	defer clearRestarting(rec)
 	if oldAgent != nil {
 		_ = oldAgent.Close() // release the pre-restart vsock/TCP connection
 	}
