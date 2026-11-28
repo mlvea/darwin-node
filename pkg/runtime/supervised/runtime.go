@@ -37,10 +37,11 @@ type Options struct {
 type Runtime struct {
 	Options
 
-	mu    sync.Mutex
-	used  []bool
-	skew  supervisor.SkewControl
-	holds map[int]*skewHold
+	mu        sync.Mutex
+	used      []bool
+	skew      supervisor.SkewControl
+	holds     map[int]*skewHold
+	finishing []*skewHold // removed from holds, Release still running
 }
 
 // New returns an adapter.

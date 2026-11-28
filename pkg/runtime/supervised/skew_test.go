@@ -488,6 +488,56 @@ func writeFrame(conn net.Conn, body []byte) error {
 	return err
 }
 
+// WaitSkew must not return while Release is still inside the cordon
+// patch. The slot map drops the hold before that call.
+func TestWaitSkewBlocksUntilReleaseReturns(t *testing.T) {
+	started := make(chan struct{})
+	block := make(chan struct{})
+	skew := &gateSkew{started: started, block: block}
+	rt := New(Options{Slots: 2, Deadman: time.Hour, VMRuntime: types.RuntimeFake})
+	rt.SetSkewControl(skew)
+	h := &skewHold{uid: "uid-hold", done: make(chan struct{})}
+	rt.mu.Lock()
+	rt.holds = map[int]*skewHold{0: h}
+	rt.mu.Unlock()
+
+	go rt.finishSkew(0, h)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("release did not start")
+	}
+	returned := make(chan struct{})
+	go func() {
+		rt.WaitSkew(2 * time.Second)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("WaitSkew returned while release was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(block)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("WaitSkew did not return after release")
+	}
+}
+
+type gateSkew struct {
+	started chan struct{}
+	block   chan struct{}
+	once    sync.Once
+}
+
+func (g *gateSkew) Hold(string, string) error { return nil }
+
+func (g *gateSkew) Release(string) {
+	g.once.Do(func() { close(g.started) })
+	<-g.block
+}
+
 func readFrame(conn net.Conn) ([]byte, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(conn, hdr[:]); err != nil {

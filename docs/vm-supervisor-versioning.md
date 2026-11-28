@@ -59,9 +59,31 @@ The agent does not call StopVM.
   supervisor dead-man stays disarmed. It watches the supervisor pid
   recorded in the lease.
 - When that supervisor exits on its own, the slot is released once.
-- The node is made schedulable again only when darwin-node itself
-  cordoned it. An operator cordon is left in place. Two mismatched
-  supervisors keep the cordon until the last one exits.
+- The node is made schedulable again only when this agent owns the
+  cordon. Ownership is the annotation
+  `darwin-node.io/cordoned-by=supervisor-skew`.
+- Two mismatched supervisors keep the cordon until the last one exits.
+
+Before the first hold, the agent reads the Node. A node that is
+already unschedulable, and does not carry that annotation, stays
+unschedulable when the last held supervisor exits. A node that already
+carries the annotation was cordoned by a previous process of this
+agent; the new process clears it once, after the last supervisor exits.
+
+An operator who cordons during a hold, or who replaces the annotation,
+keeps the cordon. The agent re-reads the Node before it clears
+`spec.unschedulable`, and it clears the bit only while the annotation
+is still `supervisor-skew`. An operator who clears `spec.unschedulable`
+during a hold is not cordoned again. The agent logs a warning and
+emits one `SupervisorSkewOperatorUncordon` event.
+
+The cordon and the clear are JSON patches against the Node, not the
+status subresource. When the Node has a resourceVersion, the patch
+tests it and retries if the object changed. The client's RBAC needs
+`patch` on `nodes` as well as `nodes/status`. With
+`--rotate-client-certificates` the node client does not exist yet when
+recovery runs; call `(*engine.Engine).SetSkewNodeClient` after it
+does. Until that call, a hold does not assume the node was schedulable.
 
 A supervisor that does not send `wire_major` is wire major 0. That is
 the fail-closed path, same as an explicit 0 or any other mismatch.
@@ -70,11 +92,6 @@ A protocol-major mismatch is also a hold: the agent does not call
 StopVM. The server rejects the hello before it counts the connection,
 so this path cannot refresh the dead-man. The supervisor's own timer
 can still stop the VM. The agent watches the pid and the socket.
-
-Recover does not read the API node's unschedulable bit. The first hold
-assumes the node was schedulable and that this process owns the
-cordon. A node an operator had already cordoned can be made
-schedulable when the last held supervisor exits.
 
 ## Hardware-pending
 
@@ -87,7 +104,8 @@ tests in this change use the fake runtime and unix sockets.
    to another pod.
 2. Let that supervisor exit on its own (the VM stops; the new agent
    does not send SIGKILL). The slot frees once. The node becomes
-   schedulable only if darwin-node cordoned it.
+   schedulable only if `darwin-node.io/cordoned-by=supervisor-skew`
+   is still set. An operator cordon without that annotation stays.
 3. Re-adopt a same-major supervisor with a different git sha. The pod
    reattaches, and a `restartPolicy: Never` command is not started
    twice.

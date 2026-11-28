@@ -151,6 +151,10 @@ func (r *Runtime) finishSkew(slot int, h *skewHold) {
 		if r.holds != nil && r.holds[slot] == h {
 			delete(r.holds, slot)
 		}
+		// WaitSkew reads holds. The slot is free before Release returns,
+		// and Release now talks to the API, so the done channel has to
+		// stay visible until that call finishes.
+		r.finishing = append(r.finishing, h)
 		skew := r.skew
 		r.mu.Unlock()
 		r.free(slot)
@@ -158,19 +162,38 @@ func (r *Runtime) finishSkew(slot int, h *skewHold) {
 			skew.Release(h.uid)
 		}
 		close(h.done)
+		r.mu.Lock()
+		r.finishing = dropHold(r.finishing, h)
+		r.mu.Unlock()
 	})
+}
+
+func dropHold(hs []*skewHold, h *skewHold) []*skewHold {
+	out := hs[:0]
+	for _, cur := range hs {
+		if cur != h {
+			out = append(out, cur)
+		}
+	}
+	return out
 }
 
 // WaitSkew blocks until every hold has released, or until d elapses.
 // Tests register it after the supervisor cleanup so a hold goroutine
-// is gone before the leak checker runs.
+// is gone before the leak checker runs. A hold that has left the slot
+// map but not yet returned from Release is included.
 func (r *Runtime) WaitSkew(d time.Duration) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	waits := make([]chan struct{}, 0, len(r.holds))
+	waits := make([]chan struct{}, 0, len(r.holds)+len(r.finishing))
 	for _, h := range r.holds {
+		if h != nil {
+			waits = append(waits, h.done)
+		}
+	}
+	for _, h := range r.finishing {
 		if h != nil {
 			waits = append(waits, h.done)
 		}
