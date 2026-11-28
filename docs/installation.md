@@ -166,27 +166,34 @@ environment variable.
 
 The guest-side plist is installed *inside images* by `darwin-image inject-agent`.
 That job does not set `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM`. That variable
-is for the SimVZ test child, not a VM image. See
+is for the SimVZ test child, not a VM image. It selects the in-memory
+Adopt and keychain platforms. See
 [Guest Adopt](#guest-adopt).
 
 ## Guest Adopt
 
 Every pod start sends `Adopt` after the guest agent dials and before
-volumes are placed or the workload starts. An image whose guest agent
-predates that method fails every pod until the image is rebuilt with a
-guest agent that implements Adopt. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1`
-or `true` skips only a missing `adopt` capability or an `unknown_method`
-response, and logs a warning. Default off. A bad proof still fails the
-pod. The variable is read by the engine. It is not a flag and it is not
-a field of `pkg/config.Config`. Detail:
-[guest-adopt.md](guest-adopt.md).
+volumes are placed or the workload starts, then installs a per-job
+keychain, then starts the workload. An image whose guest agent
+predates Adopt or `EphemeralKeychain` fails every pod until the image
+is rebuilt. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true` skips only a
+missing `adopt` or `ephemeral-keychain` capability, or an
+`unknown_method` response, and logs a warning. Default off. A bad proof
+still fails the pod. A failed keychain create, unlock, default, search
+list, or hide still fails the pod. The variable is read by the engine.
+It is not a flag and it is not a field of `pkg/config.Config`. Detail:
+[guest-adopt.md](guest-adopt.md) and
+[guest-keychain.md](guest-keychain.md).
 
 ## Per-VM supervisor
 
 The mode stays off unless the process is started with `--vm-supervisor=on`.
 Off keeps each `VZVirtualMachine` inside the agent. On runs each VM in a
 second process of the same signed binary. The protocol, threat model, and
-upgrade flow are in [vm-supervisor.md](vm-supervisor.md). Flags and
+upgrade flow are in [vm-supervisor.md](vm-supervisor.md). A wire-major
+mismatch, a pre-handshake supervisor, or a protocol-major rejection does
+not stop the VM; see
+[vm-supervisor-versioning.md](vm-supervisor-versioning.md). Flags and
 environment variables are in
 [Per-VM supervisor configuration](#per-vm-supervisor-configuration).
 
@@ -300,8 +307,9 @@ open. [vm-supervisor.md](vm-supervisor.md) records the same open items.
   lease matches `cache/pods/<uid>` is reattached as `Running`: the
   slot stays held, the disk and `control/agent-token` stay, the guest
   is redialed through the adopted fd, and no new VM is booted. The
-  restart count and `status.startTime` (when set) are kept. Init and
-  the workload are not applied again. Sidecars are created again. A
+  restart count and `status.startTime` (when set) are kept. Init is not
+  applied again. The workload is sent once when an equal-major re-adopt
+  says it has not started. Sidecars are created again. A
   dead supervisor keeps the node-restart settlement (`Never` stays
   `Failed` / `NodeRestarted`, slot free, disk removed; `Always`,
   `OnFailure`, and an empty policy receive one restart credit). A
@@ -509,8 +517,8 @@ These are not fields of `config.Config` or `config.Supervisor`, and they have no
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DARWIN_NODE_ALLOW_LEGACY_GUEST` | off | `1` or `true` (any case) skips `Adopt` only when the guest has no `adopt` capability or answers `unknown_method`. Any other Adopt error still fails the pod. Read by `pkg/engine`. See [Guest Adopt](#guest-adopt) |
-| `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` | off | `1` or `true` (any case) makes `darwin-guest-agent` use the in-memory Adopt platform. SimVZ sets it on the test child. The guest-image launchd job does not set it. Setting it inside a VM skips the real reseed |
+| `DARWIN_NODE_ALLOW_LEGACY_GUEST` | off | `1` or `true` (any case) skips `Adopt` or `EphemeralKeychain` only when the guest has no `adopt` or `ephemeral-keychain` capability, or answers `unknown_method`. Any other Adopt or keychain error still fails the pod. Read by `pkg/engine`. See [Guest Adopt](#guest-adopt) and [guest-keychain.md](guest-keychain.md) |
+| `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` | off | `1` or `true` (any case) makes `darwin-guest-agent` use the in-memory Adopt and keychain platforms. SimVZ sets it on the test child. The guest-image launchd job does not set it. Setting it inside a VM skips the real reseed and the real keychain |
 
 ## Helm (optional skeleton)
 
