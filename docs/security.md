@@ -501,9 +501,12 @@ boundary for the slot. The full model is
   Sidecars are created again. A wire-major mismatch, a supervisor with
   no wire major, or a protocol-major rejection does not stop the VM.
   The slot stays held and the node is cordoned `SupervisorVersionSkew`
-  / `WireMajorMismatch` until that supervisor exits. Recover does not
-  read an existing unschedulable bit, so that exit can clear an
-  operator cordon. See
+  / `WireMajorMismatch` until the last held supervisor exits. The node
+  is made schedulable again only while
+  `darwin-node.io/cordoned-by=supervisor-skew` is still set. An
+  operator cordon is left in place, and an operator who clears
+  `spec.unschedulable` during the hold is not patched back
+  (`SupervisorSkewOperatorUncordon`). See
   [vm-supervisor-versioning.md](vm-supervisor-versioning.md). A dead
   supervisor keeps the
   node-restart settlement. An orphan supervisor is stopped and its slot

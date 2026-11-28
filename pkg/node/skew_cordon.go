@@ -23,69 +23,108 @@ type SkewEvent struct {
 }
 
 // SkewCordon marks the node unschedulable while at least one supervisor
-// is held for a wire-major mismatch. Unschedulable is cleared only when
-// the last hold releases and this process is the one that cordoned.
-// An operator cordon (priorUnschedulable) is left in place.
+// is held for a wire-major mismatch. Ownership is the annotation
+// darwin-node.io/cordoned-by=supervisor-skew on the API node.
+// spec.unschedulable is cleared only when the last hold releases and
+// that annotation is still ours. An operator cordon is left in place.
+//
+// apiMu covers the node read and patch. mu covers the counters.
+// Lock order is apiMu then mu.
 type SkewCordon struct {
-	mu           sync.Mutex
-	holds        int
-	cordonedByUs bool
-	reason       string
-	since        metav1.Time
-	events       []SkewEvent
+	mu            sync.Mutex
+	apiMu         sync.Mutex
+	holds         int
+	cordonedByUs  bool
+	yielded       bool
+	yieldReported bool
+	nodeRequired  bool
+	reason        string
+	since         metav1.Time
+	events        []SkewEvent
+	nodes         NodePatcher
+	nodeName      string
+	report        func(kind, reason, message string)
 }
 
-// Hold counts one mismatched supervisor. priorUnschedulable is the
-// node's spec at the moment of the hold. A blank status snapshot is not
-// a usable signal, so the caller passes it explicitly. The first hold
-// decides ownership; later holds only keep the node cordoned.
+// Hold counts one mismatched supervisor. priorUnschedulable is used
+// only when no node client is attached. The first hold reads the API
+// node and decides ownership; later holds keep the cordon up.
 func (s *SkewCordon) Hold(priorUnschedulable bool, reason string) {
 	if s == nil {
 		return
 	}
+	s.apiMu.Lock()
+	defer s.apiMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.holds == 0 {
-		s.cordonedByUs = !priorUnschedulable
-		s.since = metav1.Now()
-		s.reason = reason
+	first := s.holds == 0
+	s.holds++
+	if !first {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	owned, yielded, msg := s.decideHold(priorUnschedulable)
+	s.mu.Lock()
+	s.since = metav1.Now()
+	s.reason = reason
+	var fire bool
+	var fn func(string, string, string)
+	if yielded {
+		fire, msg = s.markYield(msg)
+		fn = s.report
+	} else {
+		s.cordonedByUs = owned
 		s.events = append(s.events, SkewEvent{Kind: "cordon", Reason: ReasonSupervisorSkew, Message: reason})
 	}
-	s.holds++
+	s.mu.Unlock()
+	if fire && fn != nil {
+		fn("yield", ReasonSkewOperatorUncordon, msg)
+	}
 }
 
 // Release drops one hold. The returned bool is true when this release
-// removed the last hold and darwin-node itself cordoned the node. Apply
-// is what clears spec.unschedulable; a release with holds still above
+// removed the last hold and the API node still carries our annotation,
+// so Apply clears spec.unschedulable. A release with holds still above
 // zero leaves the cordon up.
 func (s *SkewCordon) Release() bool {
 	if s == nil {
 		return false
 	}
+	s.apiMu.Lock()
+	defer s.apiMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.holds == 0 {
+		s.mu.Unlock()
 		return false
 	}
 	s.holds--
 	if s.holds > 0 {
+		s.mu.Unlock()
 		return false
 	}
 	s.events = append(s.events, SkewEvent{Kind: "clear", Reason: ReasonSupervisorSkew, Message: s.reason})
-	return s.cordonedByUs
+	owned := s.cordonedByUs && !s.yielded
+	s.mu.Unlock()
+	return s.finishRelease(owned)
 }
 
 // Apply writes the cordon onto n. A status publisher builds a blank node
 // on every pass, so this has to run after that node is filled in. The
-// condition's transition time stays at the first hold.
+// condition's transition time stays at the first hold. The ownership
+// annotation is not copied here: the node controller merges annotations
+// from this snapshot, and writing it back would replace an operator's.
 func (s *SkewCordon) Apply(n *corev1.Node) {
 	if s == nil || n == nil {
 		return
 	}
+	s.observeOperator()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.holds > 0 {
-		n.Spec.Unschedulable = true
+		if !s.yielded {
+			n.Spec.Unschedulable = true
+		}
 		s.upsertLocked(n)
 		return
 	}

@@ -49,8 +49,12 @@ func (e *Engine) skewBridge() *skewBridge {
 		return v.(*skewBridge)
 	}
 	b := &skewBridge{e: e, cordon: &node.SkewCordon{}, held: map[string]holdState{}}
-	actual, _ := skewBridges.LoadOrStore(e, b)
-	return actual.(*skewBridge)
+	b.attachNodeAPI()
+	actual, loaded := skewBridges.LoadOrStore(e, b)
+	if loaded {
+		return actual.(*skewBridge)
+	}
+	return b
 }
 
 // SupervisorSkew is the cordon the status publisher should apply. Nil
@@ -83,9 +87,9 @@ func (e *Engine) skewHolding(uid string) bool {
 
 // Hold occupies a VM slot and cordons the node. A second hold for the
 // same uid does not acquire again. TryAcquire failing still cordons;
-// Release then must not free a slot this hold did not take. prior
-// unschedulable is false: Recover runs before this process has read
-// the API node's spec.
+// Release then must not free a slot this hold did not take. The cordon
+// reads the API node when a client is attached. The false argument is
+// the no-client path, which treats the node as schedulable.
 func (b *skewBridge) Hold(uid, reason string) error {
 	if b == nil || b.e == nil || uid == "" {
 		return nil

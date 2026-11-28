@@ -122,8 +122,9 @@ tab and choose **Report a vulnerability**.
   stdin is `/dev/null`. The node plist sets `AbandonProcessGroup` and
   `ProcessType` `Interactive`. Kubelet TLS and the guest handshake are
   unchanged while the flag is off. A wire-major mismatch does not stop
-  the VM; the node is cordoned until that supervisor exits, and that
-  exit can clear an operator cordon. See
+  the VM; the node is cordoned for the hold. It is made schedulable
+  again only while `darwin-node.io/cordoned-by=supervisor-skew` is
+  still set, so an operator cordon is left in place. See
   [docs/vm-supervisor.md](docs/vm-supervisor.md),
   [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md),
   [docs/vm-supervisor-versioning.md](docs/vm-supervisor-versioning.md), and

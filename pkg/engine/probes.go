@@ -365,6 +365,9 @@ func stopProbeTimer(timer probeTimer) {
 // the watch should stop. Delete sets a terminal phase before it stops the
 // machine, and failWith leaves that phase alone.
 func (e *Engine) noteVMDeath(ctx context.Context, rec *podRecord) (restarted, keep bool) {
+	if isRestarting(rec) {
+		return false, true
+	}
 	rec.mu.Lock()
 	phase := rec.phase
 	var vm types.VMStatus

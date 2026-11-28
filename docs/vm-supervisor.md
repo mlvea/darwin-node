@@ -61,7 +61,9 @@ The first frame is a version handshake. The supervisor sends its
 protocol major, protocol minor, and binary version, plus the wire-major
 fields in [vm-supervisor-versioning.md](vm-supervisor-versioning.md).
 The socket rejects an unknown protocol major. That rejection does not
-stop the VM: the slot stays held and the node is cordoned. An equal
+stop the VM: the slot stays held and the node is cordoned. The cordon
+is cleared on exit only while
+`darwin-node.io/cordoned-by=supervisor-skew` is still set. An equal
 protocol major is accepted at any minor and any binary. A running
 supervisor therefore keeps its old binary until its VM exits. The agent
 then sends its own hello. A peer-uid failure is an error frame before
@@ -246,7 +248,9 @@ when the flag is off.
    does not stop the VM. The slot stays held. The node is cordoned with
    condition `SupervisorVersionSkew` / `WireMajorMismatch` and a warning
    event of that reason. The slot is released once when that supervisor
-   exits. Detail:
+   exits. The node is made schedulable again only while
+   `darwin-node.io/cordoned-by=supervisor-skew` is still set. An
+   operator cordon is left in place. Detail:
    [vm-supervisor-versioning.md](vm-supervisor-versioning.md).
 4. When a VM stops, that supervisor exits 0. The next `StartVM` for the
    slot is a new process on the new binary.

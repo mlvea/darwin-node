@@ -57,7 +57,8 @@ Adopt on the first attach and on `Recover`. `Recover` does not spawn a
 supervisor. A wire-major mismatch, a supervisor that sends no
 `wire_major`, and a protocol-major rejection hold the slot and do not
 call `StopVM`. The node is cordoned `SupervisorVersionSkew` /
-`WireMajorMismatch`. Linux coverage is
+`WireMajorMismatch`, and made schedulable again only while
+`darwin-node.io/cordoned-by=supervisor-skew` is still set. Linux coverage is
 `TestWireMajorMismatchHoldsSlotUntilSupervisorExits` and
 `TestProtocolMajorMismatchHoldsWithoutStopping` in
 `pkg/runtime/supervised`, and
