@@ -58,10 +58,12 @@ The agent does not call StopVM.
 - The agent keeps the control connection (or heartbeats it) so the
   supervisor dead-man stays disarmed. It watches the supervisor pid
   recorded in the lease.
-- When that supervisor exits on its own, the slot is released once.
-- The node is made schedulable again only when darwin-node itself
-  cordoned it. An operator cordon is left in place. Two mismatched
-  supervisors keep the cordon until the last one exits.
+- When that supervisor exits on its own, its slot is released once.
+- The node is made schedulable when the last held supervisor exits.
+  Two mismatched supervisors keep the cordon until that last exit.
+  Recover does not read an existing unschedulable bit, so this clear
+  also removes a cordon an operator had already set. See the known
+  limitation below.
 
 A supervisor that does not send `wire_major` is wire major 0. That is
 the fail-closed path, same as an explicit 0 or any other mismatch.
@@ -71,10 +73,14 @@ StopVM. The server rejects the hello before it counts the connection,
 so this path cannot refresh the dead-man. The supervisor's own timer
 can still stop the VM. The agent watches the pid and the socket.
 
-Recover does not read the API node's unschedulable bit. The first hold
-assumes the node was schedulable and that this process owns the
-cordon. A node an operator had already cordoned can be made
-schedulable when the last held supervisor exits.
+## Known limitation
+
+`SkewCordon` leaves an operator cordon in place when the first hold is
+told the node was already unschedulable. Recover does not read that
+bit. The first hold is always told the node was schedulable, so this
+process treats the cordon as its own. A node an operator had already
+cordoned can be made schedulable when the last held supervisor exits.
+That is the current behaviour.
 
 ## Hardware-pending
 
@@ -86,8 +92,8 @@ tests in this change use the fake runtime and unix sockets.
    `SupervisorVersionSkew`, the VM stays up, and the slot is not given
    to another pod.
 2. Let that supervisor exit on its own (the VM stops; the new agent
-   does not send SIGKILL). The slot frees once. The node becomes
-   schedulable only if darwin-node cordoned it.
+   does not send SIGKILL). The slot frees once. The node is made
+   schedulable, including when an operator had already cordoned it.
 3. Re-adopt a same-major supervisor with a different git sha. The pod
    reattaches, and a `restartPolicy: Never` command is not started
    twice.

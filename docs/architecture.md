@@ -119,8 +119,8 @@ A warm adoption does not cold-boot again, so the pod keeps the identifier
 that VM's cold boot already minted.
 
 Virtualization.framework publishes no vmgenid. This tree does not restore
-a saved VM. A per-job ephemeral keychain is not implemented. Detail:
-[vm-identity.md](vm-identity.md).
+a saved VM. Detail: [vm-identity.md](vm-identity.md). The per-job keychain
+is [guest-keychain.md](guest-keychain.md).
 
 ## Guest Adopt
 
@@ -129,11 +129,16 @@ a saved VM. A per-job ephemeral keychain is not implemented. Detail:
 
 `runConnected` dials the agent and then calls `Engine.reseedGuest` before
 `Materialize` and before `Workload`. A warm-pool handoff uses that same
-path. `restartVM` calls it again after the new dial, before the workload,
-and before a copy-mode rematerialize: a VM restart is a new boot.
-`recoverAgent` redials a dropped session and does not call `Adopt` again.
-Reattaching a live supervisor (`runRecovered`) redials the guest that is
-already running and does not call `Adopt`, `Materialize`, or `Workload`.
+path. The step order on that path is Adopt, volume placement,
+`EphemeralKeychain`, then Workload. `restartVM` calls Adopt again after
+the new dial, then installs the keychain and starts the workload, and
+then rematerializes copy-mode volumes: a VM restart is a new boot.
+`recoverAgent` redials a dropped session and does not call `Adopt` or
+install another keychain. Reattaching a live supervisor (`runRecovered`)
+redials the guest that is already running and does not call `Adopt` or
+guest `Materialize`. It sends `EphemeralKeychain` and `Workload` once
+when the handshake says the workload has not started. Detail:
+[guest-keychain.md](guest-keychain.md).
 
 The guest stays untrusted. The host checks `reseed_ok`, a 32-byte sample
 that is not all zeros, a constant-time proof
@@ -145,12 +150,16 @@ drops the oldest. Entropy and samples stay out of pod status text.
 
 A guest that omits capability `adopt`, or that answers `unknown_method`,
 fails the pod. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true` skips only
-that case and logs a warning. Default off. The variable is read in the
+that case, and the same missing-method case for `ephemeral-keychain`,
+and logs a warning. Default off. The variable is read in the
 engine. It is not a field on the node config. A bad proof still fails
-the pod. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1` or `true` forces the
-in-memory platform in `darwin-guest-agent`. SimVZ sets it when it execs
-the test child. The launchd job inside a VM image does not set it.
-Detail: [guest-adopt.md](guest-adopt.md).
+the pod, and a failed keychain create, unlock, default, search list, or
+hide still fails the pod. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1` or
+`true` forces the in-memory Adopt and keychain platforms in
+`darwin-guest-agent`. SimVZ sets it when it execs the test child. The
+launchd job inside a VM image does not set it. Detail:
+[guest-adopt.md](guest-adopt.md) and
+[guest-keychain.md](guest-keychain.md).
 
 ## Cache volumes
 
@@ -270,8 +279,16 @@ wrapper forwards the call. A live supervisor whose lease matches
 `cache/pods/<uid>` is reattached as `Running`: the slot stays held, the
 disk and `control/agent-token` stay, the guest is redialed through the
 adopted fd, and no new VM is booted. The restart count already on the
-pod is kept, and so is `status.startTime` when it is set. Init and the
-workload are not applied again. Sidecars are created again. A dead
+pod is kept, and so is `status.startTime` when it is set. Init is not
+applied again. The workload is sent once when an equal-major handshake
+says it has not started, and is not sent again when that handshake says
+it already started. Sidecars are created again. A wire-major mismatch,
+a supervisor with no wire major, or a protocol-major rejection does not
+stop the VM: the slot stays held and the node is cordoned
+`SupervisorVersionSkew` / `WireMajorMismatch` until that supervisor
+exits. Recover does not read an existing unschedulable bit, so that
+exit can make a node an operator had already cordoned schedulable.
+Detail: [vm-supervisor-versioning.md](vm-supervisor-versioning.md). A dead
 supervisor keeps the node-restart settlement (`Never` stays `Failed` /
 `NodeRestarted`, slot free, disk removed; `Always`, `OnFailure`, and an
 empty policy receive one restart credit and boot again). A supervisor with no

@@ -65,4 +65,6 @@ interface, so tests drive it with the fake runtime.
   taken from the unexported connection field because v3 does not export it.
 
 The operator notes, the threat model, and the hardware-pending list are
-in `docs/vm-supervisor.md`.
+in `docs/vm-supervisor.md`. Wire-major skew, which holds the VM and
+cordons the node instead of stopping it, is in
+`docs/vm-supervisor-versioning.md`.

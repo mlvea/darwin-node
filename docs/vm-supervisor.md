@@ -58,11 +58,14 @@ background `Wait` reaps it.
 ## Control socket
 
 The first frame is a version handshake. The supervisor sends its
-protocol major, protocol minor, and binary version. The agent refuses an
-unknown major and accepts any minor and any binary of the same major. A
-running supervisor therefore keeps its old binary until its VM exits.
-The agent then sends its own hello. A peer-uid failure is an error frame
-before the hello.
+protocol major, protocol minor, and binary version, plus the wire-major
+fields in [vm-supervisor-versioning.md](vm-supervisor-versioning.md).
+The socket rejects an unknown protocol major. That rejection does not
+stop the VM: the slot stays held and the node is cordoned. An equal
+protocol major is accepted at any minor and any binary. A running
+supervisor therefore keeps its old binary until its VM exits. The agent
+then sends its own hello. A peer-uid failure is an error frame before
+the hello.
 
 After the handshake the calls are:
 
@@ -164,8 +167,10 @@ pod directory under `cache/pods/<uid>` is reattached as `Running`. The
 engine holds that slot, so the disk and `control/agent-token` stay. The
 guest is redialed through the fd this adopt attached. No new VM is
 booted. The restart count already on the pod is kept, and so is
-`status.startTime` when it is set. Init containers and the container
-workload are not applied again. Sidecars are created again, because
+`status.startTime` when it is set. Init containers are not applied
+again. The container workload is not applied again, except an
+equal-major re-adopt whose handshake says the workload has not started:
+that command is sent once. Sidecars are created again, because
 they exited with the agent process. The lease does not store the
 guest-agent token. The engine reads it from the kept pod directory
 before the redial. A pod that is already `Succeeded` or `Failed`, a
@@ -235,10 +240,14 @@ when the flag is off.
 1. Install the new signed binary over the agent path.
 2. Restart the agent. Supervisors that are already running are not
    restarted. They keep the previous binary.
-3. The new agent handshakes. Same protocol major: it reattaches, checks
-   the lease and the pod, and leaves the VM running. Different major:
-   it refuses the socket. The operator stops that VM (or waits for the
-   dead-man switch) and the slot's next start is the new binary.
+3. The new agent handshakes. An equal wire major reattaches, checks the
+   lease and the pod, and leaves the VM running. A wire-major mismatch,
+   a supervisor that sends no wire major, or a protocol-major rejection
+   does not stop the VM. The slot stays held. The node is cordoned with
+   condition `SupervisorVersionSkew` / `WireMajorMismatch` and a warning
+   event of that reason. The slot is released once when that supervisor
+   exits. Detail:
+   [vm-supervisor-versioning.md](vm-supervisor-versioning.md).
 4. When a VM stops, that supervisor exits 0. The next `StartVM` for the
    slot is a new process on the new binary.
 
