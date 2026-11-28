@@ -58,7 +58,7 @@ The agent does not call StopVM.
 - The agent keeps the control connection (or heartbeats it) so the
   supervisor dead-man stays disarmed. It watches the supervisor pid
   recorded in the lease.
-- When that supervisor exits on its own, the slot is released once.
+- When that supervisor exits on its own, its slot is released once.
 - The node is made schedulable again only when this agent owns the
   cordon. Ownership is the annotation
   `darwin-node.io/cordoned-by=supervisor-skew`.

@@ -205,20 +205,32 @@ ServiceAccount identity may get Secrets and ConfigMaps, and may create
   this engine has already accepted is rejected. The engine keeps 1024
   samples and then drops the oldest, which may then be presented again.
   Entropy and samples are not copied into pod status text. `Adopt`
-  reports `io_platform_uuid` and does not rotate the ECID. A per-job
-  ephemeral keychain is not implemented. Virtualization.framework has
-  no vmgenid, and this tree does not restore a saved VM. See
-  [guest-adopt.md](guest-adopt.md).
+  reports `io_platform_uuid` and does not rotate the ECID.
+  Virtualization.framework has no vmgenid, and this tree does not
+  restore a saved VM. See [guest-adopt.md](guest-adopt.md).
+- Each pod gets a fresh user keychain before Workload. The password is
+  drawn in the guest and is not a request field, a response field, or
+  pod status. Golden `login.keychain-db` and `login.keychain` are
+  renamed out of the user search list. The System keychain is left in
+  place. A failure fails the pod and does not start the workload.
+  Missing capability `ephemeral-keychain`, or `unknown_method`, fails
+  the pod unless `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true`. That
+  variable skips only the missing-capability case, for Adopt and for
+  this keychain, and logs a warning. Default off. A failed create,
+  unlock, default, search list, or hide still fails the pod. Protocol
+  stays 1. See [guest-keychain.md](guest-keychain.md).
 - Missing capability `adopt`, or an `unknown_method` response, fails
   the pod. `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true` skips only that
-  case and logs a warning. Default off. A bad proof, a zero sample, a
-  duplicate sample, or any other Adopt error still fails the pod. The
-  variable is read in the engine. It is not a field on the node config.
+  case, and the same missing-method case for `ephemeral-keychain`, and
+  logs a warning. Default off. A bad proof, a zero sample, a
+  duplicate sample, or any other Adopt error still fails the pod. A
+  failed keychain step still fails the pod. The variable is read in
+  the engine. It is not a field on the node config.
 - `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1` or `true` forces the in-memory
-  Adopt platform inside `darwin-guest-agent`. SimVZ sets it when it
-  execs the test child, so that child does not reseed or rename the Mac
-  running the test. The launchd job inside a VM image does not set it.
-  Default off.
+  Adopt and keychain platforms inside `darwin-guest-agent`. SimVZ sets
+  it when it execs the test child, so that child does not reseed, rename
+  the Mac running the test, or create a keychain on it. The launchd job
+  inside a VM image does not set it. Default off.
 
 ## hostPath
 
@@ -484,8 +496,19 @@ boundary for the slot. The full model is
   that `Recover`. A live supervisor matching `cache/pods/<uid>` is
   reattached as `Running`: the slot stays held, the disk and
   `control/agent-token` stay, the guest is redialed through the adopted
-  fd, and no new VM is booted. Init and the workload are not applied
-  again. Sidecars are created again. A dead supervisor keeps the
+  fd, and no new VM is booted. Init is not applied again. The workload
+  is sent once when an equal-major handshake says it has not started.
+  Sidecars are created again. A wire-major mismatch, a supervisor with
+  no wire major, or a protocol-major rejection does not stop the VM.
+  The slot stays held and the node is cordoned `SupervisorVersionSkew`
+  / `WireMajorMismatch` until the last held supervisor exits. The node
+  is made schedulable again only while
+  `darwin-node.io/cordoned-by=supervisor-skew` is still set. An
+  operator cordon is left in place, and an operator who clears
+  `spec.unschedulable` during the hold is not patched back
+  (`SupervisorSkewOperatorUncordon`). See
+  [vm-supervisor-versioning.md](vm-supervisor-versioning.md). A dead
+  supervisor keeps the
   node-restart settlement. An orphan supervisor is stopped and its slot
   is released. A supervisor lost while the pod is `Running` is reason
   and message `supervisor lost`, with no replacement boot. Any other

@@ -75,10 +75,13 @@ runs as. Those calls fail closed without that.
 
 ## Host checks
 
-The host calls `EphemeralKeychain` after Adopt and volume placement, and
-before Workload. A VM restart uses that same order: the new boot is
-reseeding, then the keychain, then the workload. A redial of a guest that
-already passed this boot does not install another keychain.
+On a cold start and on a warm-pool handoff the host calls
+`EphemeralKeychain` after Adopt and volume placement, and before
+Workload. A VM restart reseeds, installs the keychain, and then starts
+the workload. Copy-mode volumes are placed again after that. A redial
+of the same boot (`recoverAgent`) does not install another keychain.
+An equal-major supervisor re-adopt whose handshake says the workload
+has not started sends this call once, on the way to Workload.
 
 On failure the host closes the agent, stops the VM, and marks the pod
 Failed. Workload is not called. This is a permanent start failure. Retrying

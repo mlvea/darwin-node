@@ -121,18 +121,27 @@ tab and choose **Report a vulnerability**.
   and stderr to `<run dir>/slot-N.supervisor.log` (mode 0600), and
   stdin is `/dev/null`. The node plist sets `AbandonProcessGroup` and
   `ProcessType` `Interactive`. Kubelet TLS and the guest handshake are
-  unchanged while the flag is off. See
+  unchanged while the flag is off. A wire-major mismatch does not stop
+  the VM; the node is cordoned for the hold. It is made schedulable
+  again only while `darwin-node.io/cordoned-by=supervisor-skew` is
+  still set, so an operator cordon is left in place. See
   [docs/vm-supervisor.md](docs/vm-supervisor.md),
-  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md), and
+  [docs/vm-supervisor-recovery.md](docs/vm-supervisor-recovery.md),
+  [docs/vm-supervisor-versioning.md](docs/vm-supervisor-versioning.md), and
   [docs/vm-supervisor-hardening.md](docs/vm-supervisor-hardening.md).
 - Guest `Adopt` does not trust the guest. The host checks the proof and
   rejects a sample this engine has already accepted (1024 remembered,
   then the oldest is dropped). `Adopt` does not rotate the ECID.
   `DARWIN_NODE_ALLOW_LEGACY_GUEST` defaults off and weakens only the
-  missing-method case. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` is for the
+  missing-method case, for `Adopt` and for `EphemeralKeychain`.
+  `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM` is for the
   SimVZ child, not a VM image. An image whose agent predates `Adopt`
-  fails every pod until it is rebuilt, unless that legacy variable is
-  set. See [docs/guest-adopt.md](docs/guest-adopt.md) and
+  or `EphemeralKeychain` fails every pod until it is rebuilt, unless
+  that legacy variable is set. Each pod otherwise gets a fresh user
+  keychain with a guest-drawn password. Golden login keychains are
+  hidden. The System keychain is untouched. See
+  [docs/guest-adopt.md](docs/guest-adopt.md),
+  [docs/guest-keychain.md](docs/guest-keychain.md), and
   [docs/security.md](docs/security.md).
 - Cold boot mints a fresh Mac machine identifier and a private NVRAM
   clone. Image `machineIdData` is left unused. A missing, empty, or

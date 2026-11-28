@@ -35,8 +35,10 @@ before that settlement. It reads the agent token back from
 `cache/pods/<uid>/control/agent-token`, redials the guest through the
 descriptor this `Recover` attached, and marks the pod `Running`. The
 restart count already on the pod is kept, and so is `status.startTime`
-when the pod has one. Init containers are not run again, and the container
-workload is not applied again. Host volume files and emptyDir limits are
+when the pod has one. Init containers are not run again. The container
+workload is not applied again, except an equal-major re-adopt whose
+handshake says the workload has not started: that command is sent once.
+Host volume files and emptyDir limits are
 rebuilt from the pod. The guest is not asked to materialize them again.
 Sidecars are created again, because they exited with the agent process.
 

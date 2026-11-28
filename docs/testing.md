@@ -35,8 +35,8 @@ make test-short
 ## Per-VM supervisor
 
 `--vm-supervisor` defaults to `off`. Linux tests drive a supervisor with
-the fake runtime over a real Unix socket. They cover the handshake and a
-refused unknown protocol major, all five RPCs (`StartVM`, `InspectVM`,
+the fake runtime over a real Unix socket. They cover the handshake, a protocol-major rejection that holds the
+slot instead of stopping the VM, all five RPCs (`StartVM`, `InspectVM`,
 `PauseAndSaveVM`, `StopVM`, `AttachChannels`), `SCM_RIGHTS` descriptors
 that can be written on one end and read on the other, reattach that
 leaves the VM running, a lease mismatch and a deleting pod leading to
@@ -54,7 +54,19 @@ A node-agent restart re-adopts through `supervisor.Adopt`
 `AttachChannels`. The guest fd is a fresh Connect passed with
 `SCM_RIGHTS`. A saved fd is not reused. `pkg/runtime/supervised` calls
 Adopt on the first attach and on `Recover`. `Recover` does not spawn a
-supervisor. Supervisor death becomes `SlotLost` and `VMFailed` with
+supervisor. A wire-major mismatch, a supervisor that sends no
+`wire_major`, and a protocol-major rejection hold the slot and do not
+call `StopVM`. The node is cordoned `SupervisorVersionSkew` /
+`WireMajorMismatch`, and made schedulable again only while
+`darwin-node.io/cordoned-by=supervisor-skew` is still set. Linux coverage is
+`TestWireMajorMismatchHoldsSlotUntilSupervisorExits` and
+`TestProtocolMajorMismatchHoldsWithoutStopping` in
+`pkg/runtime/supervised`, and
+`TestWireMajorMismatchHoldsBudgetAndCordons` in `pkg/engine`. An
+equal-major re-adopt whose handshake says the workload has not started
+sends the command once (`TestRecoveredWorkloadRunsOnce`). See
+[vm-supervisor-versioning.md](vm-supervisor-versioning.md). Supervisor
+death becomes `SlotLost` and `VMFailed` with
 message `supervisor lost` within about 2 seconds. The watch is
 edge-triggered epoll (`EPOLLET`) on Linux and kqueue (`EV_CLEAR`) on
 Darwin. It does not wait for the dead-man switch. The contract test
@@ -127,6 +139,20 @@ the generation it captured on entry to `Stopping`, so a `Start` after
 [simvz.md](simvz.md). The conformance harness that relies on it is in
 [kubelet-conformance.md](kubelet-conformance.md). The supervisor
 feature write-up is [vm-supervisor.md](vm-supervisor.md).
+
+## Guest ephemeral keychain
+
+Linux and SimVZ cover the per-job keychain with an in-memory platform
+(`pkg/guest.MemoryKeychain`). They do not call Security.framework.
+`TestEphemeralKeychainBeforeWorkload` in `pkg/engine/keychain_test.go`
+checks Ready, then Adopt, then Materialize, then `EphemeralKeychain`,
+then Workload. `pkg/vzcontract/keychain_test.go` fails a create closed.
+SimVZ installs the same in-memory directory on the in-process guest
+(`pkg/runtime/simvz/keychain.go`). `cmd/guest-agent` on non-darwin
+installs it too. `DARWIN_NODE_GUEST_SOFTWARE_PLATFORM=1` selects it on
+darwin, which is how the SimVZ child avoids the Mac it is running on.
+The `security` checks in [guest-keychain.md](guest-keychain.md) need a
+Mac.
 
 ## Node certificates
 

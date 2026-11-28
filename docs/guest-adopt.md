@@ -78,8 +78,8 @@ Inside a VM the agent has to be root. Writing `/dev/random`,
 `settimeofday`, `scutil`, deleting `/etc/ssh/ssh_host_*`, and signalling
 `mDNSResponder` all fail closed without it.
 
-A per-job ephemeral keychain, installed as the default keychain, is not
-implemented.
+Before Workload the guest installs a fresh per-job keychain as the
+user default. See [guest-keychain.md](guest-keychain.md).
 
 ## Host checks
 
@@ -116,8 +116,10 @@ That session is the same boot.
 Missing capability `adopt`, or an `unknown_method` response, fails the pod.
 `DARWIN_NODE_ALLOW_LEGACY_GUEST=1` or `true` skips only that case and logs
 a warning. Default off. A bad proof, a zero sample, a duplicate sample, or
-any other Adopt error still fails the pod. The variable is read in the
-engine. It is not a field on the node config.
+any other Adopt error still fails the pod. The same variable also skips a
+missing `ephemeral-keychain` capability, and nothing else. The variable is
+read in the engine. It is not a field on the node config. See
+[guest-keychain.md](guest-keychain.md).
 
 ## Hardware-pending
 
